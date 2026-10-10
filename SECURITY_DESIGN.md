@@ -47,7 +47,7 @@ Windows credential store address different risks; both require review.
 - Enforce the [importer support contract](HISTORICAL_REPORTS.md#importer-support-contract-v1)
   and its remaining provenance/lifecycle gates before claiming a complete result.
 - Local Windows builds use a pinned, isolated Python 3.11 environment and an
-  explicit source allowlist. See [Windows packaging and releases](README.md#windows-packaging-and-releases)
+  explicit source allowlist. See [Windows packaging and releases](DEVELOPMENT.md#windows-packaging-and-releases)
   for candidate metadata and committed-tag release checks. Review dependency
   licenses before shipping.
 
@@ -264,7 +264,9 @@ The review recorded on 10 October 2026 is **blocked for distribution**.
 versions and 26 installed licence/notice file hashes. This is an installed
 environment inventory plus findings from earlier candidate payloads; it is not
 an audit of a newly built installer or approval. Metadata alone cannot establish
-rights for every native library. Both publication build modes enforce this gate;
+rights for every native library. Both publication build modes enforce this gate
+by default. An explicitly authorized owner deferral is recorded in publication
+metadata without changing this review or approving any remaining findings;
 local candidates display the status and exact review hash in provenance.
 
 | Dependency group | Recorded licence information | Remaining review |

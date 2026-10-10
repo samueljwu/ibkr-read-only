@@ -26,7 +26,7 @@ APP_MODULES = {
 APP_PACKAGES = tuple(APP_MODULES)
 WORKER_FILES = ("__init__.py", "sync_trades.py", "sync_analytics.py", "sync_cash.py",
                 "history_worker.py", "import_history.py", "audit_activity_cash.py")
-DOCUMENTS = ("README.md", "HISTORICAL_REPORTS.md", "SECURITY_DESIGN.md")
+DOCUMENTS = ("README.md", "HISTORICAL_REPORTS.md", "SECURITY_DESIGN.md", "DEVELOPMENT.md")
 DEPENDENCIES = ("PySide6", "PySide6_Addons", "PySide6_Essentials", "shiboken6", "pandas",
                 "numpy", "openpyxl", "ibapi", "python-dateutil", "pytz", "tzdata", "six", "et_xmlfile")
 
@@ -171,7 +171,10 @@ def validate_dependencies(root=ROOT, *, complete_environment=False):
     return pins
 
 
-def validate_license_review(root, pins, *, publication=False):
+def validate_license_review(root, pins, *, publication=False, deferral=None):
+    if deferral is not None and (not publication or not isinstance(deferral, str) or
+                                 not deferral.strip() or len(deferral) > 1000):
+        raise ValueError("A distribution review deferral requires publication and a nonempty reason of at most 1000 characters")
     review = json.loads((root / LICENSE_REVIEW).read_text(encoding="utf-8"))
     from packaging.utils import canonicalize_name
     versions = {}
@@ -182,7 +185,7 @@ def validate_license_review(root, pins, *, publication=False):
         versions[name] = entry["version"]
     if versions != pins or review.get("python") != ".".join(map(str, CANDIDATE_PYTHON)):
         raise ValueError("License inventory must match the exact runtime and dependency pins")
-    if publication and (review.get("status") != "approved" or review.get("unresolved") != [] or not review.get("approved_by") or not review.get("evidence")):
+    if publication and deferral is None and (review.get("status") != "approved" or review.get("unresolved") != [] or not review.get("approved_by") or not review.get("evidence")):
         raise ValueError("Distribution license/runtime review is blocked; resolve and document every gate before publication")
     return review
 
@@ -229,12 +232,14 @@ def main(argv=None):
     publication_mode = parser.add_mutually_exclusive_group()
     publication_mode.add_argument("--release", action="store_true", help="Require clean source and matching stable tag")
     publication_mode.add_argument("--dev-release", type=int, metavar="N", help="Publish vBASE_VERSION-dev.N prerelease")
+    parser.add_argument("--defer-distribution-review", metavar="REASON",
+                        help="Record an explicit owner decision to publish with unresolved review findings; does not approve them")
     args = parser.parse_args(argv)
     publishing = args.release or args.dev_release is not None
     try:
         environment_info = validate_environment()
         pins = validate_dependencies(complete_environment=True)
-        validate_license_review(ROOT, pins, publication=publishing)
+        validate_license_review(ROOT, pins, publication=publishing, deferral=args.defer_distribution_review)
     except (ValueError, OSError, importlib.metadata.PackageNotFoundError) as exc:
         parser.error(str(exc))
     if not args.iscc.is_file():
@@ -279,9 +284,11 @@ def main(argv=None):
             parser.error(str(exc))
     if dependency_pins(stage) != pins:
         raise ValueError("Dependency inputs changed while staging")
-    review = validate_license_review(stage, pins, publication=publishing)
+    review = validate_license_review(stage, pins, publication=publishing, deferral=args.defer_distribution_review)
     license_info = dict(status=review["status"],
                         sha256=hashlib.sha256((stage / LICENSE_REVIEW).read_bytes()).hexdigest())
+    if args.defer_distribution_review is not None:
+        license_info["owner_deferral"] = args.defer_distribution_review.strip()
     info = dict(channel=args.channel, version=label, base_version=BASE_VERSION, commit=commit,
                 dirty=dirty, release=args.release, publication_kind=kind, publication_tag=tag,
                 platform="windows", architecture="x64", source_sha256=snapshot,
