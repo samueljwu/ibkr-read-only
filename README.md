@@ -8,9 +8,11 @@ A read-only desktop app for an Interactive Brokers account with a USD base curre
 
 Export to Excel, create backups, and customize tables and themes. Press **F1** for the in-app guide.
 
+The Windows v1.0.1 patch candidate encrypts local databases and database backups in stable and Dev builds. Use **File → Export portable recovery backup** and save its recovery code separately to recover after losing your Windows profile. Excel exports and report caches remain unencrypted. The published v1.0.0 installer still uses plaintext databases.
+
 ## Quick start
 
-Install Python 3.11, then run from this folder:
+On Windows x64, install Python 3.11, then run from this folder:
 
 ```powershell
 python -m venv .venv

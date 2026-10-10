@@ -2059,7 +2059,11 @@ class MainWindow(QMainWindow):
 
     def _make_menu(self):
         file_menu = self.menuBar().addMenu("File")
-        for title, handler in (("Export Workbook", self.export), ("Create SQLite Backup", self.backup)):
+        for title, handler in (("Export Workbook (unencrypted)", self.export),
+                               ("Create encrypted local backup", self.backup),
+                               ("Restore encrypted local backup", self.restore_local_backup),
+                               ("Export portable recovery backup", self.export_recovery_backup),
+                               ("Restore portable recovery backup", self.restore_recovery_backup)):
             action = QAction(title, self)
             action.triggered.connect(handler)
             file_menu.addAction(action)
@@ -2558,6 +2562,14 @@ class MainWindow(QMainWindow):
             try:
                 self.db.configure_data_directory(self._pending_data_directory)
             except Exception as exc:
+                if getattr(self.db, "_relocation_retired", False):
+                    self.db.conn.close()
+                    message = ("The new portfolio location is selected. Restart the app to open it."
+                               if getattr(self.db, "_relocation_selected", False) else
+                               "The original portfolio was retired safely. Restart the app and recover the completed operation receipt.")
+                    QMessageBox.warning(self, "Database move requires restart", message + "\n\n" + str(exc))
+                    super().closeEvent(event)
+                    return
                 event.ignore()
                 self.timer.start(250)
                 self._set_refresh_interval()
@@ -2934,9 +2946,23 @@ class MainWindow(QMainWindow):
     def backup(self):
         try:
             path = self.db.backup()
-            QMessageBox.information(self, "Backup created", str(path))
+            QMessageBox.information(self, "Encrypted local backup created", str(path)
+                                    + "\n\nThis backup requires the original Windows profile key. "
+                                    "Export a portable recovery backup to recover after losing that profile.")
         except Exception as exc:
             QMessageBox.warning(self, "Backup failed", str(exc))
+
+    def export_recovery_backup(self):
+        from app.ui.recovery_ui import export_portable
+        return export_portable(self, self.db)
+
+    def restore_local_backup(self):
+        from app.ui.recovery_ui import restore_backup
+        return restore_backup(self, portable=False)
+
+    def restore_recovery_backup(self):
+        from app.ui.recovery_ui import restore_backup
+        return restore_backup(self, portable=True)
 
     def export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export workbook", "portfolio.xlsx", "Excel workbook (*.xlsx)")

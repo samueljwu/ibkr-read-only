@@ -4,3 +4,4 @@ numpy==2.2.3
 ibapi==9.81.1.post1
 openpyxl==3.1.2
 keyring==25.7.0; sys_platform == "darwin"
+sqlcipher3==0.6.3; sys_platform == "win32"

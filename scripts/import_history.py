@@ -51,7 +51,10 @@ def main(argv=None, *, progress=None, should_pause=None) -> int:
         from pathlib import Path
         if not Path(args.database).is_file():
             parser.error("The selected database does not exist")
-    db = Database(args.database)
+    try:
+        db = Database(args.database)
+    except Exception:
+        parser.error("Portfolio storage is unavailable. Open the app to resolve migration, recovery, or active-session errors.")
     try:
         account = db.setting("ib_account_id")
         if not account:

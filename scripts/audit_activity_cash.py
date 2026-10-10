@@ -11,8 +11,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
-import sqlite3
+from contextlib import closing, ExitStack
 from app.storage.paths import selected_data_directory, validate_database_path
+from app.storage.database import read_identity, validate_schema
+from app.storage.database_keys import load_key
+from app.storage.security_storage import connect
+from app.storage.storage_operations import SessionLease
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,9 +106,18 @@ def audit(report, database=None):
     if first > last:
         raise ValueError("Report period is reversed")
 
-    uri = f"file:{database.resolve().as_posix()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
-    connection.row_factory = sqlite3.Row
+    identity = read_identity(database)
+    key = load_key(identity["channel"], identity["portfolio_uuid"])
+    if key is None:
+        raise ValueError("Database key is missing; restore using your recovery code")
+    registered = ExitStack()
+    registered.enter_context(SessionLease(database))
+    try:
+        connection = registered.enter_context(closing(connect(database, key, read_only=True)))
+        validate_schema(connection, identity["portfolio_uuid"])
+    except BaseException:
+        registered.close()
+        raise
     try:
         saved_account = connection.execute(
             "SELECT value FROM settings WHERE key='ib_account_id'").fetchone()
@@ -123,7 +136,7 @@ def audit(report, database=None):
             if abs(qty) > Decimal("0.00000001"):
                 local_stocks[position["display_ticker"]] = qty
     finally:
-        connection.close()
+        registered.close()
 
     usd = cash_values(rows, "USD")
     base = cash_values(rows, "Base Currency Summary")

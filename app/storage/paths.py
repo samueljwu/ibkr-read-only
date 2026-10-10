@@ -98,7 +98,10 @@ def select_data_directory(directory):
     config.parent.mkdir(parents=True, exist_ok=True)
     temporary = config.with_name(f".{config.name}-{uuid4().hex}.tmp")
     try:
-        temporary.write_text(json.dumps({"data_directory": str(directory)}), encoding="utf-8")
+        with temporary.open("x", encoding="utf-8") as output:
+            json.dump({"data_directory": str(directory)}, output)
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, config)
     finally:
         temporary.unlink(missing_ok=True)

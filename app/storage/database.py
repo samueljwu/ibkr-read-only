@@ -1,13 +1,19 @@
-"""Small SQLite store. Raw trades are never rewritten by lot matching."""
+"""Authenticated encrypted portfolio store. Raw trades retain their meaning."""
 
-import sqlite3
+from sqlcipher3 import dbapi2 as sqlite3
 import json
 import math
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
+
+from app.platform.runtime import channel
+from app.storage import database_keys
+from app.storage.security_storage import connect, verify_integrity
+from app.storage.encrypted_backup import export_database, _publish
+from app.storage.storage_operations import SessionLease
 
 from app.storage.paths import (default_data_dir, select_data_directory,
                        selected_data_directory, validate_database_path, validate_data_directory)
@@ -28,22 +34,188 @@ TRADE_FIELDS = ("trade_id", "trade_date", "display_ticker", "ib_symbol", "side",
                 "price", "security_type", "multiplier", "currency", "fx_to_usd", "commission_usd", "tax_lc", "tax_usd", "notes")
 
 
+APPLICATION_ID = 0x4349424D
+SCHEMA_VERSION = 1
+TABLE_NAMES = frozenset({
+    "portfolios", "positions", "trades", "trade_matches", "contracts",
+    "historical_prices", "benchmark_prices", "market_quotes", "exposure_facts",
+    "exposure_custom", "exposure_custom_sets", "settings", "app_metadata",
+    "broker_positions", "fx_rates", "account_values", "account_history",
+    "external_flows", "cash_movements", "trade_fee_adjustments",
+    "cash_reconciliations", "broker_executions", "broker_source_records",
+    "broker_sync_windows", "broker_sync_runs",
+})
+
+
+def validate_schema_objects(conn, *, allow_legacy=False):
+    """Reject executable or unrecognized schema objects before adoption."""
+    tables = set()
+    for object_type, name, sql in conn.execute("SELECT type,name,sql FROM sqlite_master"):
+        if object_type == "index":
+            if name.startswith("sqlite_autoindex_") or name in {
+                "idx_positions_portfolio", "idx_trades_portfolio", "idx_trades_position"
+            }:
+                continue
+            raise ValueError("Unsupported database index")
+        if object_type != "table" or name not in TABLE_NAMES:
+            raise ValueError("Unsupported database schema object")
+        if not sql or " ".join(sql.upper().split()).startswith("CREATE VIRTUAL TABLE"):
+            raise ValueError("Unsupported virtual table")
+        tables.add(name)
+    if not allow_legacy and tables != TABLE_NAMES:
+        raise ValueError("Incomplete database application schema")
+
+
+class LegacyDatabaseError(ValueError):
+    pass
+
+
+class IncompleteDatabaseError(ValueError):
+    pass
+
+
+def identity_path(path):
+    path = Path(path)
+    return path.with_name(path.name + ".identity.json")
+
+
+def read_identity(path):
+    sidecar = identity_path(path)
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError("Portfolio identity is missing; restore or explicit migration is required")
+    if sidecar.stat().st_size > 1024:
+        raise ValueError("Unsupported portfolio identity")
+    identity = json.loads(sidecar.read_text(encoding="utf-8"))
+    if not isinstance(identity, dict) or set(identity) != {"version", "channel", "portfolio_uuid"}:
+        raise ValueError("Unsupported portfolio identity")
+    if identity["version"] != 1 or identity["channel"] != channel():
+        raise ValueError("Unsupported portfolio identity or different app channel")
+    if str(UUID(identity["portfolio_uuid"])) != identity["portfolio_uuid"]:
+        raise ValueError("Unsupported portfolio identity")
+    return identity
+
+
+def write_identity(path, identity):
+    """Reserve an identity exclusively; metadata contains no key or account ID."""
+    with identity_path(path).open("x", encoding="utf-8") as output:
+        json.dump(identity, output, sort_keys=True)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def validate_schema(conn, portfolio_uuid):
+    if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
+        raise ValueError("Unsupported database application")
+    if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        raise ValueError("Unsupported database schema version")
+    validate_schema_objects(conn)
+    row = conn.execute("SELECT value FROM app_metadata WHERE key='portfolio_uuid'").fetchone()
+    if row is None or row[0] != portfolio_uuid:
+        raise ValueError("Portfolio identity does not match the encrypted database")
+
+
+class PortfolioConnection(sqlite3.Connection):
+    _storage_lease = None
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            if self._storage_lease is not None:
+                self._storage_lease.close()
+                self._storage_lease = None
+
+
 class Database:
     def __init__(self, path=None):
         new_selection = path is None and selected_data_directory() is None
         self.path = validate_database_path(path if path is not None else default_data_dir() / "portfolio.sqlite3")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, timeout=30)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA busy_timeout=30000")
-        self._init()
+        self._lease = SessionLease(self.path)
+        try:
+            self._open_encrypted(new_selection)
+        except BaseException:
+            self._lease.close()
+            raise
+
+    def _open_connection(self):
+        connection = connect(self.path, self._key, factory=PortfolioConnection)
+        connection._storage_lease = self._lease
+        return connection
+
+    def _open_encrypted(self, new_selection):
+        if self.path.exists():
+            with self.path.open("rb") as source:
+                if source.read(16) == b"SQLite format 3\x00":
+                    raise LegacyDatabaseError("Unencrypted portfolio requires explicit preserved-original migration")
+            identity = read_identity(self.path)
+            self.portfolio_uuid = identity["portfolio_uuid"]
+            self._key = database_keys.load_key(channel(), self.portfolio_uuid)
+            if self._key is None:
+                raise ValueError("Database key is missing; restore using your recovery code")
+            # Validate authentication, schema and identity before writable settings
+            # (including journal mode) or any upgrade can mutate existing data.
+            with closing(connect(self.path, self._key, read_only=True)) as check:
+                validate_schema(check, self.portfolio_uuid)
+                verify_integrity(check)
+                from app.storage.migration import validate_application
+                validate_application(check)
+            self.conn = self._open_connection()
+            try:
+                self._init()
+            except BaseException:
+                self.conn.close()
+                raise
+        else:
+            self._create_encrypted()
         if new_selection:
             try:
                 select_data_directory(self.path.parent)
-            except Exception:
+            except BaseException:
                 self.conn.close()
                 raise
+
+    def _create_encrypted(self):
+        if identity_path(self.path).exists() or identity_path(self.path).is_symlink():
+            raise IncompleteDatabaseError("Interrupted portfolio initialization; existing identity was preserved")
+        self.portfolio_uuid = str(uuid4())
+        identity = {"version": 1, "channel": channel(), "portfolio_uuid": self.portfolio_uuid}
+        write_identity(self.path, identity)
+        temporary = self.path.with_name(f".portfolio-{uuid4().hex}.pending")
+        key_created = published = False
+        try:
+            self._key = database_keys.create_key(channel(), self.portfolio_uuid)
+            key_created = True
+            # Reserve an owned temporary file exclusively, avoiding path races.
+            with temporary.open("xb"):
+                pass
+            self.conn = connect(temporary, self._key, create=True, journal_mode="DELETE")
+            try:
+                self._init()
+                with self.conn:
+                    self.conn.execute("INSERT INTO app_metadata(key,value) VALUES ('portfolio_uuid',?)", (self.portfolio_uuid,))
+                    self.conn.execute(f"PRAGMA application_id={APPLICATION_ID}")
+                    self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                validate_schema(self.conn, self.portfolio_uuid)
+                verify_integrity(self.conn)
+            finally:
+                self.conn.close()
+            with temporary.open("r+b") as completed:
+                os.fsync(completed.fileno())
+            _publish(temporary, self.path)
+            published = True
+            self.conn = self._open_connection()
+        except BaseException:
+            # After publication retain the authenticated portfolio and key for
+            # retry. Before it, roll back only artifacts owned by this creator.
+            if not published:
+                if key_created:
+                    database_keys.delete_key(channel(), self.portfolio_uuid)
+                identity_path(self.path).unlink(missing_ok=True)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+            Path(str(temporary) + "-journal").unlink(missing_ok=True)
 
     def _init(self):
         self.conn.executescript("""
@@ -258,7 +430,8 @@ class Database:
                     (position_id, row["portfolio_id"], row["display_ticker"]))
 
         from app.finance.trade_costs import upgrade_saved_trade_taxes
-        if 'tax_usd' in added_trades and self.conn.execute('SELECT 1 FROM trades LIMIT 1').fetchone():
+        if ('tax_usd' in added_trades and self.conn.execute('SELECT 1 FROM trades LIMIT 1').fetchone()
+                and not getattr(self, "_pre_upgrade_snapshot", None)):
             self.backup()
         with self.conn:
             if 'tax_usd' in added_trades:
@@ -661,7 +834,7 @@ class Database:
         # A Flex sync may hold the writer lock. Quote caching is optional, so skip
         # that batch rather than blocking the UI behind the main 30-second timeout.
         try:
-            with closing(sqlite3.connect(self.path, timeout=0.05)) as cache_conn:
+            with SessionLease(self.path), closing(connect(self.path, self._key, timeout=0.05)) as cache_conn:
                 with cache_conn:
                     cache_conn.executemany("""INSERT INTO market_quotes
                         (portfolio_id,account_id,position_id,con_id,price,source,as_of)
@@ -705,36 +878,15 @@ class Database:
         target_dir = validate_data_directory(directory or self.setting("backup_directory") or self.path.parent / "backups")
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"portfolio-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3"
-        destination = sqlite3.connect(target)
+        identity = read_identity(self.path)
+        write_identity(target, identity)
         try:
-            self.conn.backup(destination)
-        finally:
-            destination.close()
+            export_database(self.conn, target, self._key)
+        except BaseException:
+            identity_path(target).unlink(missing_ok=True)
+            raise
         return target
 
     def configure_data_directory(self, directory):
-        """Copy a quiescent database and select the verified copy for next launch."""
-        target_dir = validate_data_directory(directory or self.path.parent)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "portfolio.sqlite3"
-        temporary = target_dir / f".portfolio-{uuid4().hex}.sqlite3"
-        created = False
-        if target.resolve() != self.path.resolve():
-            if target.exists():
-                raise FileExistsError(f"A portfolio database already exists at {target}")
-            try:
-                with closing(sqlite3.connect(temporary)) as destination:
-                    self.conn.backup(destination)
-                    if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                        raise RuntimeError("Copied portfolio database failed integrity check")
-                os.replace(temporary, target)
-                created = True
-            except Exception:
-                temporary.unlink(missing_ok=True)
-                raise
-        try:
-            select_data_directory(target_dir)
-        except Exception:
-            if created:
-                target.unlink(missing_ok=True)
-            raise
+        from app.storage.migration import relocate_portfolio
+        return relocate_portfolio(self, directory)

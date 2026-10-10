@@ -7,7 +7,7 @@ import subprocess
 import sys
 from app.resources import app_directory, project_directory
 
-BASE_VERSION = "1.0.0"
+BASE_VERSION = "1.0.1"
 
 
 @lru_cache(maxsize=1)

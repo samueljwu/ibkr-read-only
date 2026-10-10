@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_MODULES = {
@@ -18,9 +19,9 @@ APP_MODULES = {
     'finance': ('__init__', 'analytics', 'calcs', 'calculations', 'exposure', 'instrument_names', 'returns', 'services', 'trade_costs'),
     'imports': ('__init__', 'activity_statement_trades', 'activity_statement_transfers', 'analytics_flex', 'cash_flex', 'excel_io', 'flex_import', 'import_contract'),
     'platform': ('__init__', 'diagnostics', 'package_check', 'runtime'),
-    'storage': ('__init__', 'database', 'local_files', 'paths', 'secret_store'),
+    'storage': ('__init__', 'database', 'database_keys', 'encrypted_backup', 'local_files', 'migration', 'paths', 'recovery', 'recovery_code', 'secret_store', 'security_storage', 'storage_operations'),
     'sync': ('__init__', 'history_coverage', 'history_status', 'sync_service', 'sync_timing', 'workers'),
-    'ui': ('__init__', 'analytics_ui', 'calcs_ui', 'cash_ui', 'clipboard_ui', 'exposure_custom_ui', 'exposure_ui', 'header_icons', 'help_visuals', 'returns_ui', 'settings_ui', 'table_ui', 'themed_checkbox', 'ui_theme', 'window'),
+    'ui': ('__init__', 'analytics_ui', 'calcs_ui', 'cash_ui', 'clipboard_ui', 'exposure_custom_ui', 'exposure_ui', 'header_icons', 'help_visuals', 'returns_ui', 'recovery_ui', 'settings_ui', 'table_ui', 'themed_checkbox', 'ui_theme', 'window'),
     'updates': ('__init__', 'release_policy', 'update_handoff', 'update_ui', 'updater'),
 }
 APP_PACKAGES = tuple(APP_MODULES)
@@ -28,7 +29,7 @@ WORKER_FILES = ("__init__.py", "sync_trades.py", "sync_analytics.py", "sync_cash
                 "history_worker.py", "import_history.py", "audit_activity_cash.py")
 DOCUMENTS = ("README.md", "HISTORICAL_REPORTS.md", "SECURITY_DESIGN.md", "DEVELOPMENT.md")
 DEPENDENCIES = ("PySide6", "PySide6_Addons", "PySide6_Essentials", "shiboken6", "pandas",
-                "numpy", "openpyxl", "ibapi", "python-dateutil", "pytz", "tzdata", "six", "et_xmlfile")
+                "numpy", "openpyxl", "ibapi", "sqlcipher3", "python-dateutil", "pytz", "tzdata", "six", "et_xmlfile")
 
 
 def git(*args):
@@ -73,15 +74,17 @@ def source_manifest(files, root=ROOT):
 
 def audit_bundle(bundle):
     forbidden_parts = {"data", "backups", "reports", "logs", "secrets", ".git", "tests", "__pycache__"}
-    forbidden_suffixes = {".sqlite3", ".db", ".xlsx", ".xls", ".csv", ".xml", ".log", ".pem", ".key"}
+    forbidden_suffixes = {".sqlite3", ".db", ".xlsx", ".xls", ".csv", ".xml", ".log", ".pem", ".key", ".pmbackup", ".pending"}
     entries = []
     for path in sorted(bundle.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(bundle)
-        if path.is_symlink() or forbidden_parts.intersection(relative.parts) or path.suffix.lower() in forbidden_suffixes:
+        if path.is_symlink() or forbidden_parts.intersection(part.lower() for part in relative.parts) or path.suffix.lower() in forbidden_suffixes:
             raise ValueError(f"Unexpected data-like file in package: {relative}")
-        if path.name in ("local_config.json", "history-import-status.json") or path.name.startswith(".env"):
+        if (path.name.lower() in ("local_config.json", "history-import-status.json")
+                or path.name.lower().startswith((".env", ".storage-"))
+                or path.name.lower().endswith(("-wal", "-journal", "-shm", ".identity.json"))):
             raise ValueError(f"Unexpected local configuration in package: {relative}")
         entries.append(dict(path=relative.as_posix(), bytes=path.stat().st_size,
                             sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
@@ -90,6 +93,52 @@ def audit_bundle(bundle):
 
 CANDIDATE_PYTHON = (3, 11, 4)
 LICENSE_REVIEW = "release-license-review.json"
+SQLCIPHER_WHEEL = "sqlcipher3-0.6.3-cp311-cp311-win_amd64.whl"
+SQLCIPHER_WHEEL_SHA256 = "136b04e6e481c0a2a0b63f13d16b05419714a4368355c93ab10f9c4d99aab4fb"
+SQLCIPHER_EXTENSION = "sqlcipher3/_sqlite3.cp311-win_amd64.pyd"
+SQLCIPHER_EXTENSION_SHA256 = "de34b44f0d16078064d050c68268852946fdabd5c58aadb4c561aa365379233f"
+NATIVE_ENGINE = {"binding": "0.6.3", "cipher_version": "4.12.0 community",
+                 "cipher_provider": "openssl", "cipher_provider_version": "OpenSSL 3.6.0 1 Oct 2025",
+                 "sqlite_version": "3.51.1", "threadsafe": "THREADSAFE=1"}
+
+
+def validate_native_engine(wheel, *, extension=None, native=None):
+    """Bind the installed native engine to the reviewed Windows wheel bytes."""
+    wheel = Path(wheel)
+    if wheel.name != SQLCIPHER_WHEEL or hashlib.sha256(wheel.read_bytes()).hexdigest() != SQLCIPHER_WHEEL_SHA256:
+        raise ValueError("Unreviewed SQLCipher wheel bytes")
+    with zipfile.ZipFile(wheel) as archive:
+        binaries = [name for name in archive.namelist() if name.lower().endswith((".pyd", ".dll", ".so"))]
+        if binaries != [SQLCIPHER_EXTENSION] or hashlib.sha256(archive.read(SQLCIPHER_EXTENSION)).hexdigest() != SQLCIPHER_EXTENSION_SHA256:
+            raise ValueError("Unreviewed SQLCipher native binary closure")
+    if extension is None:
+        import sqlcipher3._sqlite3 as engine
+        extension = engine.__file__
+        if not Path(extension).resolve().is_relative_to(Path(sys.prefix).resolve()):
+            raise ValueError("SQLCipher extension is outside the isolated build environment")
+    extension = Path(extension).resolve()
+    if hashlib.sha256(extension.read_bytes()).hexdigest() != SQLCIPHER_EXTENSION_SHA256:
+        raise ValueError("Installed SQLCipher extension differs from the reviewed wheel")
+    if native is None:
+        from sqlcipher3 import dbapi2 as cipher
+        connection = cipher.connect(":memory:")
+        try:
+            connection.execute('PRAGMA key="build-provenance-memory-probe"')
+            native = {name: connection.execute("PRAGMA " + name).fetchone()[0]
+                      for name in ("cipher_version", "cipher_provider", "cipher_provider_version")}
+            native.update(binding=importlib.metadata.version("sqlcipher3"),
+                          sqlite_version=connection.execute("SELECT sqlite_version()").fetchone()[0],
+                          threadsafe=next((row[0] for row in connection.execute("PRAGMA compile_options")
+                                           if row[0].startswith("THREADSAFE=")), "missing"))
+        finally:
+            connection.close()
+    if native != NATIVE_ENGINE:
+        raise ValueError("Unreviewed SQLCipher engine/provider/SQLite/thread configuration")
+    return dict(native, wheel=SQLCIPHER_WHEEL, wheel_sha256=SQLCIPHER_WHEEL_SHA256,
+                extension=SQLCIPHER_EXTENSION, extension_sha256=SQLCIPHER_EXTENSION_SHA256,
+                binary_closure=[SQLCIPHER_EXTENSION], journal_mode="DELETE", temp_store="MEMORY",
+                trusted_schema=False, cell_size_check=True, load_extensions=False,
+                cipher_memory_security=False)
 
 
 def validate_environment(*, prefix=None, base_prefix=None, executable=None,
@@ -229,6 +278,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=("stable", "dev"), default="dev")
     parser.add_argument("--iscc", type=Path, required=True, help="Path to pinned Inno Setup 6.7.3 ISCC.exe")
+    parser.add_argument("--sqlcipher-wheel", type=Path,
+                        default=ROOT / "build" / "security-qa" / "wheels" / SQLCIPHER_WHEEL,
+                        help="Reviewed pinned Windows SQLCipher wheel used by this build environment")
     publication_mode = parser.add_mutually_exclusive_group()
     publication_mode.add_argument("--release", action="store_true", help="Require clean source and matching stable tag")
     publication_mode.add_argument("--dev-release", type=int, metavar="N", help="Publish vBASE_VERSION-dev.N prerelease")
@@ -240,6 +292,7 @@ def main(argv=None):
         environment_info = validate_environment()
         pins = validate_dependencies(complete_environment=True)
         validate_license_review(ROOT, pins, publication=publishing, deferral=args.defer_distribution_review)
+        native_info = validate_native_engine(args.sqlcipher_wheel)
     except (ValueError, OSError, importlib.metadata.PackageNotFoundError) as exc:
         parser.error(str(exc))
     if not args.iscc.is_file():
@@ -292,7 +345,7 @@ def main(argv=None):
     info = dict(channel=args.channel, version=label, base_version=BASE_VERSION, commit=commit,
                 dirty=dirty, release=args.release, publication_kind=kind, publication_tag=tag,
                 platform="windows", architecture="x64", source_sha256=snapshot,
-                build_environment=environment_info, license_review=license_info)
+                build_environment=environment_info, license_review=license_info, encrypted_storage=native_info)
     (stage / "app" / "_build_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     # Import only from the allowlisted tree before freezing. This catches a
     # runtime helper omitted from staging without launching UI or opening data.
@@ -327,6 +380,9 @@ def main(argv=None):
     for doc in (*DOCUMENTS, LICENSE_REVIEW):
         shutil.copyfile(stage / doc, bundle / doc)
     payload = audit_bundle(bundle)
+    native_payload = [item for item in payload if item["path"].replace("\\", "/").endswith(SQLCIPHER_EXTENSION)]
+    if len(native_payload) != 1 or native_payload[0]["sha256"] != SQLCIPHER_EXTENSION_SHA256:
+        raise ValueError("Frozen SQLCipher extension differs from the reviewed wheel")
     output_name = asset_name.removesuffix(".exe") if asset_name else f"{name}-{label.replace('+', '-')}-windows-x64-setup"
     output = ROOT / "dist" / args.channel
     output.mkdir(parents=True, exist_ok=True)

@@ -8,9 +8,14 @@ from app.platform.diagnostics import configure_diagnostics
 
 
 def main(database_path=None):
-    db = Database(database_path)
-    log = configure_diagnostics(db.path, "sync-analytics")
     try:
+        db = Database(database_path)
+    except Exception:
+        if sys.stderr is not None:
+            print("Portfolio storage is unavailable. Open the app to resolve migration, recovery, or active-session errors.", file=sys.stderr)
+        return 1
+    try:
+        log = configure_diagnostics(db.path, "sync-analytics")
         db.set_metadata("ibkr_analytics_sync_status", "running")
         log.info("Analytics history sync started")
         result = run_analytics_flex_sync(db, db.setting("ib_account_id"), db.setting("analytics_flex_query_id"))
@@ -21,7 +26,8 @@ def main(database_path=None):
     except Exception as exc:
         db.set_metadata("ibkr_analytics_sync_status", "failed")
         db.set_metadata("ibkr_analytics_sync_error", str(exc)[:500])
-        log.error("Analytics history sync failed: %s", type(exc).__name__)
+        if "log" in locals():
+            log.error("Analytics history sync failed: %s", type(exc).__name__)
         if sys.stderr is not None:
             print(f"IBKR Analytics history sync failed: {type(exc).__name__}", file=sys.stderr)
         return 1

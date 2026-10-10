@@ -244,6 +244,17 @@
           "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
+    },
+    {
+      "name": "sqlcipher3",
+      "version": "0.6.3",
+      "license_metadata": null,
+      "notice_files": [
+        {
+          "path": "sqlcipher3-0.6.3.dist-info/licenses/LICENSE",
+          "sha256": "d2af98975b150bf6ff5ef99785b56b4b5979024a4ab3117253f1cd777f98bad6"
+        }
+      ]
     }
   ],
   "unresolved": [
@@ -255,6 +266,17 @@
   ],
   "scope": "Installed pinned candidate environment and earlier payload findings; not approval or a new artifact audit",
   "schema_version": 1,
+  "native_encrypted_storage": {
+    "wheel": "sqlcipher3-0.6.3-cp311-cp311-win_amd64.whl",
+    "wheel_sha256": "136b04e6e481c0a2a0b63f13d16b05419714a4368355c93ab10f9c4d99aab4fb",
+    "extension": "sqlcipher3/_sqlite3.cp311-win_amd64.pyd",
+    "extension_sha256": "de34b44f0d16078064d050c68268852946fdabd5c58aadb4c561aa365379233f",
+    "binary_closure": ["sqlcipher3/_sqlite3.cp311-win_amd64.pyd"],
+    "sqlcipher": "4.12.0 community",
+    "sqlite": "3.51.1",
+    "provider": "OpenSSL 3.6.0 1 Oct 2025",
+    "review_scope": "Exact artifact provenance only; embedded SQLCipher/SQLite/OpenSSL distribution notices remain deferred and this is not license approval"
+  },
   "reviewed_on": "2026-10-10",
   "approved_by": null,
   "evidence": [],

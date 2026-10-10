@@ -65,11 +65,12 @@ original during migration. The two copies then evolve independently.
 
 ### Build a local candidate
 
-Local candidate builds currently pin **Windows x64 Python 3.11.4**, matching the
-historical environment snapshot. This older runtime is **not approved for
-distribution**. Before shipping, select a reviewed security-patched Windows
-Python 3.11 build, record its provenance, and update `CANDIDATE_PYTHON`, the
-environment and licensing record together. Create an isolated build environment
+Builds currently pin **Windows x64 Python 3.11.4**, matching the
+historical environment snapshot. The v1.0.1 patch retains this older runtime
+under the owner's explicit distribution review deferral. Runtime and licensing
+findings remain unresolved. A future runtime update must select a reviewed
+security-patched Windows Python 3.11 build, record its provenance, and update
+`CANDIDATE_PYTHON`, the environment and licensing record together. Create an isolated build environment
 with the exact candidate interpreter:
 
 ```powershell
@@ -96,7 +97,7 @@ the release notes must retain these limitations. Exact inventory, dependency,
 source and committed-tag checks still apply. Approval requires documented reviewer/evidence,
 no unresolved entries and exact interpreter/dependency agreement. Staging checks
 the exact copied requirements and review again. See the
-[dependency review](SECURITY_DESIGN.md#dependency-and-distribution-review).
+[distribution limitations](SECURITY_DESIGN.md#verification-and-distribution-limitations).
 Publication also rechecks HEAD, tag and cleanliness after staging and compares
 every staged input to its committed Git object, applying Git's checkout newline
 filters. An edit between the initial check and staging cannot inherit the tag.
@@ -118,7 +119,7 @@ The script never commits, pushes, tags, publishes, or installs the app. It:
    are copied. Checks selected text for likely account IDs and embedded tokens.
 2. Records source file hashes, the aggregate source hash, base Git revision,
    dirty state, channel and version. Uncommitted builds are visibly local
-   candidates: `1.0.0+local.<hash>` or `1.0.0-dev+local.<hash>`.
+   candidates: `1.0.1+local.<hash>` or `1.0.1-dev+local.<hash>`.
 3. Builds a PyInstaller one-folder app, with all four workers using that same
    executable and an explicit database path. Includes timezone data and runtime
    package metadata and available licence files, and creates an exact payload
@@ -133,6 +134,27 @@ gets a new source hash. Byte-for-byte reproducibility is not claimed: manifests
 make the exact inputs and outputs inspectable.
 
 ### Offline package checks
+
+The v1.0.1 stable and Dev patch candidate uses SQLCipher for portfolio
+connections, local backups, migration and portable recovery. The published v1.0.0 installer remains
+plaintext. Native tests require the reviewed `sqlcipher3` wheel. Tests marked
+`native_key_store` use random synthetic Windows Credential Manager targets and
+delete only those targets; ordinary unit fixtures use a test-only memory store.
+Running the full suite with the Windows store requires access outside the
+restricted credential-store sandbox. Never substitute real portfolio files or
+broker credentials. See [the security boundary](SECURITY_DESIGN.md).
+
+Production uses DELETE journals because the reviewed wheel's SQLite 3.51.1
+predates the WAL-reset corruption fix. Explicit-WAL reference tests do not
+approve production WAL concurrency. Record the exact native extension hash,
+SQLCipher/SQLite/OpenSSL versions and installed package receipts with each
+candidate. Successful same-machine profile-key deletion and restore is useful
+evidence, but actual clean-account/other-computer acceptance remains separate.
+
+The owner has authorized the combined v1.0.1 patch release and explicitly
+deferred the recorded distribution review. Publication requires final source
+and installed-artifact verification; the runtime/license findings and actual
+clean-profile/other-computer recovery acceptance remain unresolved.
 
 Use a fresh disposable Windows local-data directory inside the workspace:
 
@@ -159,20 +181,20 @@ is registered. Before distribution, verify clean-user/VM install, side-by-side
 launch, upgrade with saved data, uninstall retention, and successful fresh
 broker import. Offline synthetic checks alone do not satisfy those live gates.
 
-### Future publication
+### Publication workflow
 
 Use reviewed `main` and short-lived `codex/...` development branches. Keep
 Windows v1 separate from the existing future macOS Kanban cards. Formal stable
 builds use `--release`; the script requires a clean committed checkout and
-`v1.0.0` pointing at its exact source commit. Update `BASE_VERSION` in
+`v1.0.1` pointing at its exact source commit. Update `BASE_VERSION` in
 `app/platform/runtime.py` for subsequent releases. Never reuse a published tag for changed
 source. Published Dev prereleases use `--channel dev --dev-release N` with a
 positive sequence number `N`, a clean committed checkout, and an exact
-`v1.0.0-dev.N` tag. Stable assets are named
-`PortfolioMonitor-1.0.0-windows-x64-setup.exe`; Dev assets are named
-`PortfolioMonitorDev-1.0.0-dev.N-windows-x64-setup.exe`. The build also emits
+`v1.0.1-dev.N` tag. Stable assets are named
+`PortfolioMonitor-1.0.1-windows-x64-setup.exe`; Dev assets are named
+`PortfolioMonitorDev-1.0.1-dev.N-windows-x64-setup.exe`. The build also emits
 matching `.manifest.json` and `.sha256` files. Stable and local executable
-numeric versions use `1.0.0.0`; published Dev sequence `N` uses `1.0.0.N`
+numeric versions use `1.0.1.0`; published Dev sequence `N` uses `1.0.1.N`
 for downgrade protection. A local candidate or Dev prerelease does not become
 a formal stable release.
 
@@ -207,4 +229,7 @@ GitHub Release assets; do not commit generated binaries or financial data. No
 publication is authorized by running this build script. Validate public API
 visibility, exact asset names/digests, signed installer behavior, clean-user
 stable and Dev upgrades, cancel/reopen, and mutex timing in a disposable
-Windows VM before publishing. Offline synthetic tests do not pass these gates.
+Windows VM before claiming those acceptance gates passed. The owner-authorized v1.0.1
+publication defers the recorded distribution review; it does not establish
+actual clean-profile/other-computer recovery, live broker, or signed installer
+acceptance. Offline synthetic tests do not pass those gates.
