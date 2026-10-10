@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 from app.imports.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError, fetch_flex, weekends_only
 from app.storage.secret_store import load_flex_token
-from app.sync.sync_service import single_writer_lock
+from app.sync.sync_service import single_writer_lock, check_automatic_flex_sync
 from app.sync.history_coverage import catchup_windows, remember_account_open_day
 
 
@@ -177,17 +177,18 @@ def run_analytics_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=N
     if not account_id or not query_id:
         raise ValueError("IBKR account and Analytics Flex query ID are required")
     db.validate_account_ownership(account_id)
-    today = today or date.today()
-    secret = token or load_flex_token(account_id)
-    if not secret:
-        raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
     with single_writer_lock(db.path):
+        pacer = request_pacer or FlexRequestPacer(pacing_seconds)
+        pacer.configure(db, account_id)
+        if windows_override is None:
+            check_automatic_flex_sync(db, pacer, query_id)
+        secret = token or load_flex_token(account_id)
+        if not secret:
+            raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
         windows = windows_override if windows_override is not None else planned_analytics_windows(db, account_id, today)
         if windows and backup:
             db.backup()
         count = 0
-        pacer = request_pacer or FlexRequestPacer(pacing_seconds)
-        pacer.configure(db, account_id)
         unavailable = 0
         processed = 0
         def unavailable_window(first, last):

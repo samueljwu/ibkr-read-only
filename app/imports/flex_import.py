@@ -1,10 +1,11 @@
 """Retrieve IBKR Activity Flex reports for automatic trade sync."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 import time
+import math
 from pathlib import Path
 from hashlib import sha256
 from tempfile import NamedTemporaryFile
@@ -32,6 +33,42 @@ class FlexServiceError(ValueError):
         self.stage = stage
         self.message = message
         super().__init__(f"Flex error {self.code}: {message}" if self.code else message)
+
+
+FLEX_UNAVAILABLE_COOLDOWN_SECONDS = 6 * 60 * 60
+
+
+class FlexSyncDeferred(RuntimeError):
+    """A local automatic attempt is deferred; this is not a broker response."""
+
+    def __init__(self, retry_at):
+        self.retry_at = retry_at
+        retry = datetime.fromtimestamp(retry_at, timezone.utc).isoformat(timespec='seconds')
+        super().__init__(f'Automatic Flex sync deferred until {retry} after an unavailable report. '
+                         'Use Import history with explicit dates to retry immediately.')
+
+
+def unavailable_backoff_key(account, query_id):
+    identity = sha256(f'{account}:{query_id}'.encode()).hexdigest()
+    return f'ibkr_flex_unavailable_until:v1:{identity}'
+
+
+def check_unavailable_backoff(db, account, query_id, *, clock=None):
+    """Read under the writer lock; repair corrupt state into one bounded deferral."""
+    now = (clock or time.time)()
+    key = unavailable_backoff_key(account, query_id)
+    value = db.metadata(key)
+    if not value:
+        return
+    try:
+        deadline = float(value)
+    except (ValueError, TypeError):
+        deadline = float('nan')
+    if not math.isfinite(deadline) or deadline < 0 or deadline > now + FLEX_UNAVAILABLE_COOLDOWN_SECONDS:
+        deadline = now + FLEX_UNAVAILABLE_COOLDOWN_SECONDS
+        db.set_metadata(key, str(deadline))
+    if deadline > now:
+        raise FlexSyncDeferred(deadline)
 
 
 class FlexReportTooLarge(ValueError):
@@ -105,7 +142,8 @@ def weekends_only(first, last):
 class FlexRequestPacer:
     """Keep sends spaced across windows and bound retries for temporary errors."""
 
-    def __init__(self, seconds=DEFAULT_REQUEST_PACING_SECONDS):
+    def __init__(self, seconds=DEFAULT_REQUEST_PACING_SECONDS, *, clock=None):
+        self.clock = clock or time.time
         self.seconds = seconds
         self.last_request = 0.0
         self.db = None
@@ -125,6 +163,9 @@ class FlexRequestPacer:
     def configure(self, db, account):
         self.db, self.account = db, account
         self.log = configure_diagnostics(db.path, 'flex-requests')
+
+    def check_unavailable_backoff(self, query_id):
+        check_unavailable_backoff(self.db, self.account, query_id, clock=self.clock)
 
     def wait(self):
         """Pace sends AND statement polls, including sequential worker processes."""
@@ -175,6 +216,10 @@ class FlexRequestPacer:
             except FlexServiceError as exc:
                 if self.db:
                     self.log.warning('Report %s to %s failed: Flex %s during %s', first, last, exc.code, exc.stage)
+                if self.db and exc.code == 1003:
+                    # Persist before bounded recovery continues, including GetStatement errors.
+                    self.db.set_metadata(unavailable_backoff_key(self.account, query_id),
+                                         str(self.clock() + FLEX_UNAVAILABLE_COOLDOWN_SECONDS))
                 if self.db and exc.code in CONFIGURATION_FLEX_CODES:
                     self.db.set_metadata('ibkr_flex_paused', str(exc.code))
                 if exc.code not in TEMPORARY_FLEX_CODES or attempt == 2:

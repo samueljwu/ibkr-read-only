@@ -125,8 +125,19 @@ a new parser and passing it alone cannot prove completeness.
 Activity Flex availability is the current calendar year plus four previous
 calendar years; on 10 October 2026 the lower bound is 1 January 2022. Each
 requested `fd`/`td` range is at most 365 inclusive days, even in a leap year.
-The app imports completed dates ending before today. Account opening, query
-configuration, broker availability, errors and local 30,000,000-byte report
+Automatic Trades, Analytics and Cash requests end on the previous Monday to Friday
+calendar date strictly before today in America/New_York. Hong Kong midnight
+therefore does not advance a request while New York is still on the same day.
+This conservative application policy has no holiday calendar and does not
+guarantee broker publication. IBKR describes Activity data through the previous business day in
+its [Activity Flex configuration guidance](https://www.ibkrguides.com/clientportal/configure-flex-with-ai.htm).
+Deferred weekend dates remain gaps until later reports cover them.
+An explicit `today` supplied to a runner retains calendar-yesterday behavior,
+including weekends. Explicit Import history ranges are not clipped to the
+automatic cutoff. Missing local timezone data stops automatic planning with an
+actionable error; explicit dated history remains available.
+
+Account opening, query configuration, broker availability, errors and local 30,000,000-byte report
 limits may narrow actual coverage further. A bounded split/retry can recover
 smaller intervals; every unavailable, failed or unchecked interval stays a gap.
 Never treat pre-account dates or unavailable reports as verified empty periods
@@ -136,6 +147,31 @@ CSV recovery has no app-imposed Flex cutoff but depends on statements the user
 can obtain and their required fields. Imported executions are discrete records,
 not continuous report coverage. A year with a few trades imported is not a
 verified year of activity. Broker corrections require replay/reconciliation.
+
+### Unavailable reports and retries
+
+An observed Flex 1003 at either request or retrieval starts a persistent six-hour
+local cooldown for automatic attempts in that portfolio database, scoped to the
+account and query ID. Six hours is an application backoff choice, not an IBKR
+recovery interval. IBKR identifies 1003 as unavailable in its
+[Flex error codes](https://www.interactivebrokers.com/docs/web-api/flex-web-service/error-codes);
+[report generation guidance](https://www.interactivebrokers.com/docs/web-api/flex-web-service/using-flex-web-service/generate-the-report)
+documents date overrides and pacing. The existing request pacing and generation
+polling remain unchanged. Restarting a worker, changing the requested dates or
+using Sync IBKR does not bypass it. Skipped attempts perform no credential loading,
+backup or broker request and do not extend the deadline. Successful older slices
+or other queries do not clear it. Invalid saved cooldown state becomes one
+bounded six-hour deferral instead of an indefinite pause.
+
+The current invocation retains its existing bounded splitting/retry budget and
+saves validated partial success. Use **Import history** with explicit dates for
+an immediate intentional retry; history keeps its existing recovery budgets and
+records any subsequent 1003. Expiry allows another bounded automatic attempt,
+but neither local midnight nor expiry proves broker availability. Configuration
+errors and 1025 still stop immediately and remain paused until an explicit retry.
+Every unavailable or unverified interval remains a gap, never verified empty
+history. The observed live 1025 restriction remains unresolved; this prevention
+change makes no claim to remove or recover from a broker restriction.
 
 ### Conditions for a future complete result
 

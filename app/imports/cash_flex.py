@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 from app.imports.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError, fetch_flex, weekends_only
 from app.storage.secret_store import load_flex_token
-from app.sync.sync_service import single_writer_lock
+from app.sync.sync_service import single_writer_lock, check_automatic_flex_sync
 from app.sync.history_coverage import catchup_windows, covered_windows, remember_account_open_day
 from app.broker.broker_fees import reconcile_fee_adjustments
 
@@ -248,19 +248,20 @@ def run_cash_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=None,
     if not account_id or not query_id:
         raise ValueError("IBKR account and Cash Flex query ID are required")
     db.validate_account_ownership(account_id)
-    today = today or date.today()
-    windows = windows_override if windows_override is not None else planned_cash_windows(db, portfolio_id, today, account_id)
-    if not windows:
-        return {"windows": 0, "movements": 0}
-    secret = token or load_flex_token(account_id)
-    if not secret:
-        raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
-    count = 0
     with single_writer_lock(db.path):
-        if backup:
-            db.backup()
         pacer = request_pacer or FlexRequestPacer(pacing_seconds)
         pacer.configure(db, account_id)
+        if windows_override is None:
+            check_automatic_flex_sync(db, pacer, query_id)
+        windows = windows_override if windows_override is not None else planned_cash_windows(db, portfolio_id, today, account_id)
+        if not windows:
+            return {"windows": 0, "movements": 0}
+        secret = token or load_flex_token(account_id)
+        if not secret:
+            raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
+        count = 0
+        if backup:
+            db.backup()
         pacer.protected_windows = [tuple(row) for row in covered_windows(db, account_id, 'cash', portfolio_id)]
         unavailable = 0
         processed = 0

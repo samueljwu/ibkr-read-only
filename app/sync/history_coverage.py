@@ -1,6 +1,24 @@
 """Date coverage shared by history imports and routine catch-up."""
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import xml.etree.ElementTree as ET
+
+
+def report_through(today=None, *, now=None):
+    """Use yesterday for explicit dates, or the previous New York weekday."""
+    if today is not None:
+        return today - timedelta(days=1)
+    instant = now if now is not None else datetime.now(timezone.utc)
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError('Automatic Flex planning requires an aware clock')
+    try:
+        through = instant.astimezone(ZoneInfo('America/New_York')).date() - timedelta(days=1)
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError('New York timezone data is unavailable; repair the local timezone data '
+                           'or use Import history with explicit dates') from exc
+    while through.weekday() >= 5:
+        through -= timedelta(days=1)
+    return through
 
 
 def account_open_day(db, account):
@@ -89,7 +107,7 @@ def missing_windows(db, account, source, first, last, days, portfolio_id=1, *, r
 
 
 def catchup_windows(db, account, source, today, days, portfolio_id=1):
-    through = today - timedelta(days=1)
+    through = report_through(today)
     covered = covered_windows(db, account, source, portfolio_id)
     # Fresh setup stays small. Once history is imported, preserve interior gaps.
     first = min((date.fromisoformat(row[0]) for row in covered),

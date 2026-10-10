@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import os
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from app.broker.broker_sync import BrokerIngestor, parse_flex_xml
 from app.platform.diagnostics import configure_diagnostics
-from app.imports.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError, fetch_flex
+from app.imports.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError, FlexSyncDeferred, fetch_flex
 from app.storage.secret_store import load_flex_token
 from app.finance.services import MatchingService
 from app.sync.history_coverage import catchup_windows, remember_account_open_day
@@ -23,6 +23,14 @@ def trade_sync_paused(db) -> bool:
     return (db.metadata('ibkr_flex_paused') or '') not in ('', '1003') or db.metadata("ibkr_flex_sync_status") == "failed" and (
         db.metadata("ibkr_flex_sync_error_code") == "1025"
         or db.metadata("ibkr_flex_sync_error").startswith("Flex error 1025:"))
+
+
+def check_automatic_flex_sync(db, pacer, query_id):
+    """Configuration/broker pauses take precedence over the local cooldown."""
+    if trade_sync_paused(db):
+        raise ValueError('Automatic Flex sync is paused after a broker/configuration error. '
+                         'Review the saved error and use Import history to retry explicitly.')
+    pacer.check_unavailable_backoff(query_id)
 
 
 @contextmanager
@@ -62,7 +70,7 @@ def single_writer_lock(database_path: Path, lock_name="ibkr-sync.lock"):
             handle.close()
 
 
-def planned_windows(db, account_id: str, today: date) -> list[tuple[str, str]]:
+def planned_windows(db, account_id: str, today: date | None) -> list[tuple[str, str]]:
     return catchup_windows(db, account_id, 'trades', today, 28)
 
 
@@ -97,8 +105,21 @@ def run_flex_sync(db, account_id: str, query_id: str, *, today: date | None = No
     if not account_id or not query_id:
         raise ValueError("IBKR account and Flex query ID are required")
     db.validate_account_ownership(account_id)
-    today = today or date.today()
     with single_writer_lock(db.path):
+        pacer = request_pacer or FlexRequestPacer(pacing_seconds)
+        pacer.configure(db, account_id)
+        if windows_override is None:
+            try:
+                check_automatic_flex_sync(db, pacer, query_id)
+            except FlexSyncDeferred as exc:
+                # Workers/UI may have marked this launch starting. Persist a local
+                # failure without creating a broker run or changing coverage.
+                db.set_metadata('ibkr_flex_sync_status', 'failed')
+                db.set_metadata('ibkr_flex_sync_error', str(exc))
+                db.set_metadata('ibkr_flex_sync_error_code', '')
+                db.set_metadata('ibkr_flex_sync_stage', 'waiting for unavailable-report cooldown')
+                db.set_metadata('ibkr_flex_sync_failed_at', datetime.now().isoformat(timespec='seconds'))
+                raise
         log = configure_diagnostics(db.path, "sync-trades")
         with db.conn:
             run_id = db.conn.execute("""INSERT INTO broker_sync_runs(account_id,source)
@@ -117,12 +138,10 @@ def run_flex_sync(db, account_id: str, query_id: str, *, today: date | None = No
             if not secret:
                 raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
             windows = windows_override if windows_override is not None else planned_windows(db, account_id, today)
-            log.info("Run %s started; %s date windows planned through %s", run_id, len(windows), today - timedelta(days=1))
+            log.info("Run %s started; %s date windows planned through %s", run_id, len(windows), max((last for _, last in windows), default=None))
             if windows and backup:
                 stage = "creating database backup"
                 db.backup()
-            pacer = request_pacer or FlexRequestPacer(pacing_seconds)
-            pacer.configure(db, account_id)
             unavailable = 0
             def unavailable_window(first, last):
                 nonlocal unavailable
