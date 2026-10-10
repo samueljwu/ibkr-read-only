@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sys
 
-from app.database import Database
-from app.diagnostics import configure_diagnostics
-from app.sync_service import run_flex_sync
+from app.storage.database import Database
+from app.platform.diagnostics import configure_diagnostics
+from app.sync.sync_service import run_flex_sync
 
 
 def main(database_path=None) -> int:
@@ -26,4 +26,5 @@ def main(database_path=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) == 2 else None))
+    from app.updates.update_handoff import source_worker_entry
+    raise SystemExit(source_worker_entry(lambda: main(sys.argv[1] if len(sys.argv) == 2 else None)))

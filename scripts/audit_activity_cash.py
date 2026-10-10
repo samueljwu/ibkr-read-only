@@ -12,7 +12,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import sqlite3
-from app.paths import selected_data_directory, validate_database_path
+from app.storage.paths import selected_data_directory, validate_database_path
 
 
 ROOT = Path(__file__).resolve().parents[1]

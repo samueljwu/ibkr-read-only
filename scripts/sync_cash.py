@@ -2,9 +2,9 @@
 
 import sys
 
-from app.cash_flex import run_cash_flex_sync
-from app.database import Database
-from app.diagnostics import configure_diagnostics
+from app.imports.cash_flex import run_cash_flex_sync
+from app.storage.database import Database
+from app.platform.diagnostics import configure_diagnostics
 
 
 def main(database_path=None):
@@ -30,4 +30,5 @@ def main(database_path=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1] if len(sys.argv) == 2 else None))
+    from app.updates.update_handoff import source_worker_entry
+    raise SystemExit(source_worker_entry(lambda: main(sys.argv[1] if len(sys.argv) == 2 else None)))

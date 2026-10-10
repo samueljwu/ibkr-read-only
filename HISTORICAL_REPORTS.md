@@ -1,4 +1,4 @@
-# Set up IBKR history
+# IBKR history setup and support
 
 Create three **Activity Flex Queries**: **Trades**, **Analytics** and **Cash**. The app supports one **USD base account** per database.
 
@@ -80,3 +80,83 @@ Do this for **Trades**, **Analytics** and **Cash**:
 Use **Sync IBKR** for later updates. **Pause import** saves the current report before stopping; **Resume import** skips history already saved.
 
 If dates are missing, open **Settings > History & Flex > Show all date ranges**. IBKR may not supply older periods. Use **Import older trades** for an older Activity Statement CSV; follow its instructions. This adds trades and verified transferred holdings only.
+
+## Importer support contract v1
+
+The app handles one selected account per portfolio database and never places
+orders. An import finishing successfully means its validated report windows
+were saved. It does **not** prove a complete account, full lifetime history or
+tax return. Worker results explicitly record `complete_result=false` until
+the account, query and lifecycle acceptance gates below are implemented and
+verified. Old internal `complete` coverage/status values are scoped to that
+report source/window; do not promote them to a whole-account claim.
+
+### Defined scope
+
+| Dimension | v1 scope | Outside the complete-result contract |
+| --- | --- | --- |
+| Account structure | One Individual (Single) account; customer Individual or Joint; Cash or ordinary Margin | Advisor/broker/institution masters, consolidated/model/linked multi-account reports, Trust/IRA/company/fund structures and Portfolio Margin |
+| Environment | Live account, or separate paper account for testing | Paper tests do not prove live statement correctness; never mix their IDs |
+| Base currency | Explicit USD evidence in broker reports | Non-USD, absent/conflicting base declarations; do not infer from account ID or traded currency |
+| Instruments | Stocks/ETFs as STK; individually identified equity/index OPT contracts; ordinary BOND executions with verified multiplier/quote convention | CFDs, futures options, crypto, funds with unknown pricing, combos/bags, commodities, complex bonds/TIPS and unsupported corporate actions |
+| Futures | FUT executions can be stored/previewed with explicit multiplier | Futures cash settlement/variation margin and complete performance are outside v1; a parsed execution does not imply full lifecycle support |
+| Native currencies | Currency codes carried by the report; USD values require a verified positive FX rate for each relevant date/fee | No claim that all traded currencies are verified; missing FX/fees/taxes/basis remain provisional |
+| Activity Flex | XML Activity reports; executions/closed lots/open lots and configured event sections; dated daily Analytics; whole-period Cash with successful arithmetic reconciliation | Trade Confirmation Flex, PDF, HTML, summarized/order-level rows, symbol-filtered or aliased/consolidated reports |
+| Older recovery | English Activity Statement CSV with the expected repeated section headers and contract identity; individual STK/OPT/FUT/BOND executions and verified transferred stock lots | Localized/custom CSV; automatic continuous coverage; older Analytics/Cash reconstruction |
+
+This is a narrow release support boundary, not certification of every row in
+an otherwise supported report. Short-sale opening basis, option exercise and
+assignment, reverse splits, mergers/spinoffs, redemptions, transfers without
+verified lots and other unsupported lifecycle events must stay in review.
+The existing parser retains such records for investigation. Declared scope
+does not bypass any account/date/amount/reconciliation checks.
+
+IBKR distinguishes Account Type, Customer Type and Account Capabilities.
+The existing queries do not request or validate all three. Missing evidence
+therefore blocks an overall completeness claim; never infer these fields from
+an ID prefix. Before enabling `complete_result=true`, request the three fields,
+validate their actual XML schema using broker fixtures, and persist per-report
+provenance consistently across Trades, Analytics and Cash. The helper in
+`app/imports/import_contract.py` assesses normalized explicit evidence only; it is not
+a new parser and passing it alone cannot prove completeness.
+
+### Time and report limits
+
+Activity Flex availability is the current calendar year plus four previous
+calendar years; on 10 October 2026 the lower bound is 1 January 2022. Each
+requested `fd`/`td` range is at most 365 inclusive days, even in a leap year.
+The app imports completed dates ending before today. Account opening, query
+configuration, broker availability, errors and local 30,000,000-byte report
+limits may narrow actual coverage further. A bounded split/retry can recover
+smaller intervals; every unavailable, failed or unchecked interval stays a gap.
+Never treat pre-account dates or unavailable reports as verified empty periods
+without broker evidence.
+
+CSV recovery has no app-imposed Flex cutoff but depends on statements the user
+can obtain and their required fields. Imported executions are discrete records,
+not continuous report coverage. A year with a few trades imported is not a
+verified year of activity. Broker corrections require replay/reconciliation.
+
+### Conditions for a future complete result
+
+All of these must be demonstrated for a clearly labelled account/source/date
+scope: supported explicit account/base provenance; unfiltered expected sections
+and execution-level data; continuous actual report coverage (including proven
+empty intervals); no unsupported/skipped instruments/events; all original
+opening holdings and balances; linked purchase/closed lots and fees/taxes/FX;
+cash and holdings reconciliation; and no review/pending/failed/unverified rows.
+Full lifetime performance additionally needs proven account-opening history.
+Trades-only success cannot prove Analytics or Cash completeness. Existing
+legacy rows without this evidence do not gain it through schema migration.
+
+Tests reject unsupported normalized scope, rollover of Flex availability,
+unknown instrument ingestion and a stale `complete_result=true` worker flag.
+Existing wrong-account/base/date, partial report, gap, replay and reconciliation
+tests remain required. No live broker request was used for this change.
+
+### Primary references
+
+- [IBKR account information fields](https://www.ibkrguides.com/reportingreference/reportguide/account%20information%20activity%20flex.htm)
+- [Execution and lot detail fields](https://www.ibkrguides.com/reportingreference/reportguide/tradesfq.htm)
+- [Flex historical availability](https://www.ibkrguides.com/clientportal/performanceandstatements/flex.htm)
+- [Flex date override limit](https://www.ibkrguides.com/advisorportal/ug/flex3.htm)

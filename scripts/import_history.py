@@ -6,14 +6,14 @@ import argparse
 from datetime import date, timedelta
 import sys
 
-from app.analytics_flex import run_analytics_flex_sync
-from app.cash_flex import run_cash_flex_sync, CashReconciliationError
-from app.database import Database
-from app.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError
-from app.sync_service import run_flex_sync
-from app.history_coverage import missing_windows, account_open_day, covered_windows
-from app.broker_lots import restore_saved_lot_links, reconcile_closed_lots, check_open_lots
-from app.services import MatchingService
+from app.imports.analytics_flex import run_analytics_flex_sync
+from app.imports.cash_flex import run_cash_flex_sync, CashReconciliationError
+from app.storage.database import Database
+from app.imports.flex_import import DEFAULT_REQUEST_PACING_SECONDS, FlexRequestPacer, FlexServiceError
+from app.sync.sync_service import run_flex_sync
+from app.sync.history_coverage import missing_windows, account_open_day, covered_windows
+from app.broker.broker_lots import restore_saved_lot_links, reconcile_closed_lots, check_open_lots
+from app.finance.services import MatchingService
 
 
 WINDOW_DAYS = {"trades": 365, "analytics": 365, "cash": 365}

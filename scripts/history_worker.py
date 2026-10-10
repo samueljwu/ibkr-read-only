@@ -10,8 +10,9 @@ from pathlib import Path
 import sys
 import time
 
-from app.history_status import pause_request_path, read_status, write_status
-from app.diagnostics import configure_diagnostics
+from app.sync.history_status import pause_request_path, read_status, write_status
+from app.platform.diagnostics import configure_diagnostics
+from app.imports.import_contract import CONTRACT_VERSION, COMPLETENESS_LIMIT
 from scripts.import_history import main as import_history
 
 
@@ -22,6 +23,9 @@ def main(argv=None) -> int:
     path = Path(argv[1])
     status = read_status(path)
     status.update(state="running", pid=os.getpid(), pause_supported=True, paused_by_user=False, started_sources=[],
+                  support_contract_version=CONTRACT_VERSION,
+                  result_scope="validated_report_windows", complete_result=False,
+                  completeness_limit=COMPLETENESS_LIMIT,
                   completed_sources=[], completed_windows={}, unavailable_windows={},
                   unverified_windows={}, outside_history_windows={},
                   before_account_windows={},
@@ -143,4 +147,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from app.updates.update_handoff import source_worker_entry
+    raise SystemExit(source_worker_entry(main))

@@ -1,0 +1,266 @@
+{
+  "python": "3.11.4",
+  "status": "blocked",
+  "dependencies": [
+    {
+      "name": "PySide6",
+      "version": "6.8.1",
+      "license_metadata": "LGPL",
+      "notice_files": [
+        {
+          "path": "PySide6-6.8.1.dist-info/LicenseRef-Qt-Commercial.txt",
+          "sha256": "4f54763ac0fe2abd8f7f8d8fe370a94a08ebf84786aa0b91045bd6628deb08a3"
+        }
+      ]
+    },
+    {
+      "name": "PySide6_Addons",
+      "version": "6.8.1",
+      "license_metadata": "LGPL",
+      "notice_files": [
+        {
+          "path": "PySide6_Addons-6.8.1.dist-info/LicenseRef-Qt-Commercial.txt",
+          "sha256": "4f54763ac0fe2abd8f7f8d8fe370a94a08ebf84786aa0b91045bd6628deb08a3"
+        }
+      ]
+    },
+    {
+      "name": "PySide6_Essentials",
+      "version": "6.8.1",
+      "license_metadata": "LGPL",
+      "notice_files": [
+        {
+          "path": "PySide6_Essentials-6.8.1.dist-info/LicenseRef-Qt-Commercial.txt",
+          "sha256": "4f54763ac0fe2abd8f7f8d8fe370a94a08ebf84786aa0b91045bd6628deb08a3"
+        }
+      ]
+    },
+    {
+      "name": "altgraph",
+      "version": "0.17.5",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "altgraph-0.17.5.dist-info/LICENSE",
+          "sha256": "6c194d6db0c64d45535d10c95142b9b0cda7b7dcc7f1ddee302b3d536f3dbe46"
+        }
+      ]
+    },
+    {
+      "name": "et_xmlfile",
+      "version": "2.0.0",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "et_xmlfile-2.0.0.dist-info/LICENCE.python",
+          "sha256": "4ccdaaebc0f44b83720ec0399bb7ab329adce067dd62f73c5535a2dc05628ab2"
+        },
+        {
+          "path": "et_xmlfile-2.0.0.dist-info/LICENCE.rst",
+          "sha256": "0c84bb42f5d367e5ebf9fc2dde35b16141df5ee0fdc189250858bc6c5560f69e"
+        }
+      ]
+    },
+    {
+      "name": "ibapi",
+      "version": "9.81.1.post1",
+      "license_metadata": "IB API Non-Commercial License or the IB API Commercial License",
+      "notice_files": []
+    },
+    {
+      "name": "numpy",
+      "version": "2.2.3",
+      "license_metadata": "Copyright (c) 2005-2024, NumPy Developers.",
+      "notice_files": [
+        {
+          "path": "numpy-2.2.3.dist-info/LICENSE.txt",
+          "sha256": "14256cc3a2c9d32ac284da96b937feb44f72dd90bee2317ac3020166846ad99d"
+        },
+        {
+          "path": "numpy/_core/include/numpy/random/LICENSE.txt",
+          "sha256": "d544761558b510866c21f7e8a2d5716fca76e0b98117e3b6b86314db7244d150"
+        },
+        {
+          "path": "numpy/ma/LICENSE",
+          "sha256": "d78dbb208b80d92b4d333e41a4baae50d12444f46e53199fa7726a91de6e2da7"
+        },
+        {
+          "path": "numpy/random/LICENSE.md",
+          "sha256": "b4bc2f4fa1c95778f1ed3dd8f14706bece399475b978f9f34b5d3cd72521b48a"
+        }
+      ]
+    },
+    {
+      "name": "openpyxl",
+      "version": "3.1.2",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "openpyxl-3.1.2.dist-info/LICENCE.rst",
+          "sha256": "0c84bb42f5d367e5ebf9fc2dde35b16141df5ee0fdc189250858bc6c5560f69e"
+        }
+      ]
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "license_metadata": "Apache-2.0 OR BSD-2-Clause",
+      "notice_files": [
+        {
+          "path": "packaging-26.3.dist-info/licenses/LICENSE",
+          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+        },
+        {
+          "path": "packaging-26.3.dist-info/licenses/LICENSE.APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "packaging-26.3.dist-info/licenses/LICENSE.BSD",
+          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+        }
+      ]
+    },
+    {
+      "name": "pandas",
+      "version": "2.2.3",
+      "license_metadata": "BSD 3-Clause License",
+      "notice_files": [
+        {
+          "path": "pandas-2.2.3.dist-info/LICENSE",
+          "sha256": "533eb6d0b98e5be3ddd12dce97be35dd11282f5c47cdf8d08c81756fd5d70a26"
+        }
+      ]
+    },
+    {
+      "name": "pefile",
+      "version": "2023.2.7",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "pefile-2023.2.7.dist-info/LICENSE",
+          "sha256": "bfd4b5e4f8a99c961fd6f94d708e38396cc146bfe8fbc5d2a86e63aa29fb4208"
+        }
+      ]
+    },
+    {
+      "name": "pyinstaller",
+      "version": "6.16.0",
+      "license_metadata": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
+      "notice_files": [
+        {
+          "path": "pyinstaller-6.16.0.dist-info/licenses/COPYING.txt",
+          "sha256": "dcf75fdb959db1e3b41c0f8505069d2ece781b5ec6b3d0a4d30975cfc6580245"
+        }
+      ]
+    },
+    {
+      "name": "pyinstaller-hooks-contrib",
+      "version": "2026.8",
+      "license_metadata": "unspecified",
+      "notice_files": [
+        {
+          "path": "pyinstaller_hooks_contrib-2026.8.dist-info/licenses/LICENSE",
+          "sha256": "91d0baaff00773038e72c0a1fc9d5d2d38706b7a2b9c04f34296608f931b9cd0"
+        }
+      ]
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "license_metadata": "Dual License",
+      "notice_files": [
+        {
+          "path": "python_dateutil-2.9.0.post0.dist-info/LICENSE",
+          "sha256": "ba00f51a0d92823b5a1cde27d8b5b9d2321e67ed8da9bc163eff96d5e17e577e"
+        }
+      ]
+    },
+    {
+      "name": "pytz",
+      "version": "2026.5",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "pytz-2026.5.dist-info/LICENSE.txt",
+          "sha256": "be8b1a37ebe26c592a90f6c0eb33103a7f383ce2f4d7498c0af9a526990a07b8"
+        }
+      ]
+    },
+    {
+      "name": "pywin32-ctypes",
+      "version": "0.2.3",
+      "license_metadata": "BSD-3-Clause",
+      "notice_files": [
+        {
+          "path": "pywin32_ctypes-0.2.3.dist-info/LICENSE.txt",
+          "sha256": "dfa83b3e2709adfcdb838d9ad55823ca674abb780e60563d9dd9544ccbf785e9"
+        }
+      ]
+    },
+    {
+      "name": "setuptools",
+      "version": "65.5.0",
+      "license_metadata": "unspecified",
+      "notice_files": [
+        {
+          "path": "setuptools-65.5.0.dist-info/LICENSE",
+          "sha256": "db3f0246b1f9278f15845b99fec478b8b506eb76487993722f8c6e254285faf8"
+        }
+      ]
+    },
+    {
+      "name": "shiboken6",
+      "version": "6.8.1",
+      "license_metadata": "LGPL",
+      "notice_files": [
+        {
+          "path": "shiboken6-6.8.1.dist-info/LicenseRef-Qt-Commercial.txt",
+          "sha256": "4f54763ac0fe2abd8f7f8d8fe370a94a08ebf84786aa0b91045bd6628deb08a3"
+        }
+      ]
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "license_metadata": "MIT",
+      "notice_files": [
+        {
+          "path": "six-1.17.0.dist-info/LICENSE",
+          "sha256": "4375ba20e2b9c6c4e7cad2940a628fd90e95cc3d50ee92aae755715d8ba1fbd0"
+        }
+      ]
+    },
+    {
+      "name": "tzdata",
+      "version": "2026.5",
+      "license_metadata": "Apache-2.0",
+      "notice_files": [
+        {
+          "path": "tzdata-2026.5.dist-info/licenses/LICENSE",
+          "sha256": "df58f69ea88683035d720b5375bcef0cf5aeaa98a1d098d572e0992c378deb46"
+        },
+        {
+          "path": "tzdata-2026.5.dist-info/licenses/licenses/LICENSE_APACHE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    }
+  ],
+  "unresolved": [
+    "QtCharts/VirtualKeyboard licensing and native notices/source obligations",
+    "IB SDK redistribution permission",
+    "CPython/Qt complete notices",
+    "app/icon licensing",
+    "approved security-patched Python3.11 runtime"
+  ],
+  "scope": "Installed pinned candidate environment and earlier payload findings; not approval or a new artifact audit",
+  "schema_version": 1,
+  "reviewed_on": "2026-10-10",
+  "approved_by": null,
+  "evidence": [],
+  "references": [
+    "https://doc.qt.io/qt-6.8/licensing.html",
+    "https://interactivebrokers.github.io/index.html",
+    "https://docs.python.org/3.11/license.html"
+  ]
+}

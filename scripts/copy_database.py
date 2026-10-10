@@ -4,11 +4,13 @@ import argparse
 from contextlib import closing
 from pathlib import Path
 import sqlite3
-from app.paths import create_portfolio_directory, validate_database_path
+from app.storage.paths import create_portfolio_directory, validate_database_path
 
 
 def copy_database(source, destination):
-    source = validate_database_path(source)
+    # Explicit read-only import may copy legacy/stable data into the active
+    # channel. The destination must always stay inside the active channel.
+    source = Path(source).expanduser().resolve()
     destination = validate_database_path(destination)
     if not source.is_file():
         raise FileNotFoundError("The source database does not exist")
@@ -37,12 +39,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path,
-                        help="SQLite path under data/; omitted creates a new portfolio ID")
+                        help="SQLite path within this channel's data root; omitted creates a new portfolio ID")
     args = parser.parse_args(argv)
     try:
         destination = args.destination
         if destination is None:
-            source = validate_database_path(args.source)
+            source = args.source.expanduser().resolve()
             if not source.is_file():
                 raise FileNotFoundError("The source database does not exist")
             destination = create_portfolio_directory() / "portfolio.sqlite3"
