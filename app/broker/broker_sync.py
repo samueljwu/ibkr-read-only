@@ -99,6 +99,8 @@ class IngestResult:
     duplicates: int = 0
     review: int = 0
     execution_review: int = 0
+    execution_blocking_review: int = 0
+    pending_tax: int = 0
     legacy_inserted: int = 0
     legacy_duplicates: int = 0
     corporate_inserted: int = 0
@@ -160,7 +162,7 @@ def parse_flex_xml(xml_data: bytes, expected_account: str) -> tuple[list[dict], 
             "currency": (raw.get("currency") or "").upper(),
             "multiplier": _effective_multiplier(
                 (raw.get("assetCategory") or "").upper(),
-                raw.get("multiplier") or ("1" if raw.get("assetCategory") == "STK" else None)),
+                raw.get("multiplier") or ("1" if raw.get("assetCategory") in {"STK", "CASH"} else None)),
             "fx_to_usd": _number(raw.get("fxRateToBase")),
             "taxes": _number(raw.get("taxes")),
             "commission": _number(raw.get("ibCommission")),
@@ -439,6 +441,24 @@ class BrokerIngestor:
         return row_id
 
     def _record_source(self, source, source_id, key, trade_row_id, status, issue, record):
+        from app.finance.reconciliation import cash_evidence
+        raw = dict(record.get('raw') or record)
+        if source in {'flex', 'tws', 'activity_statement'}:
+            raw['_portfolio_id'] = self.portfolio_id
+            evidence_record = dict(record, _cash_revision=execution_identity(record)[1],
+                                   _cash_portfolio_id=self.portfolio_id)
+            raw['_cash_evidence'] = cash_evidence(evidence_record)
+            previous = self.db.conn.execute('''SELECT raw_json FROM broker_source_records
+                WHERE account_id=? AND source=? AND source_id=?''',
+                (self.account_id, source, source_id)).fetchone()
+            if previous:
+                prior = json.loads(previous['raw_json'])
+                prior_revision = (prior.get('_cash_evidence') or {}).get('revision',
+                    execution_identity({'ib_exec_id': prior.get('ibExecID')})[1])
+                if prior_revision > raw['_cash_evidence']['revision']:
+                    # A replay of the original must not erase an accepted
+                    # correction when Flex reuses its trade/source identifier.
+                    return
         self.db.conn.execute("""INSERT INTO broker_source_records
             (account_id,source,source_id,execution_key,trade_row_id,status,issue,raw_json)
             VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(account_id,source,source_id) DO UPDATE SET
@@ -446,7 +466,7 @@ class BrokerIngestor:
             status=excluded.status,issue=excluded.issue,raw_json=excluded.raw_json,
             seen_at=CURRENT_TIMESTAMP""",
             (self.account_id, source, source_id, key, trade_row_id, status, issue,
-             json.dumps(record.get("raw") or record, sort_keys=True, default=str, separators=(",", ":"))))
+             json.dumps(raw, sort_keys=True, default=str, separators=(",", ":"))))
 
     def _position(self, record):
         conn = self.db.conn
@@ -476,6 +496,40 @@ class BrokerIngestor:
         if not source_id:
             raise ValueError("IBKR execution source ID is required")
         key, revision = execution_identity(record)
+        if record.get('security_type') == 'CASH':
+            # FX executions are cash evidence, never security positions or lots.
+            owners = conn.execute('''SELECT raw_json FROM broker_source_records
+                WHERE account_id=? AND execution_key=? AND status='cash-only' ''',
+                (self.account_id, key)).fetchall() if key else []
+            other_owner = any((json.loads(owner['raw_json']).get('_cash_evidence') or {}).get('portfolio_id')
+                              not in (None, self.portfolio_id) for owner in owners)
+            if other_owner:
+                issue = 'FX execution belongs to another portfolio; review allocation before importing'
+                self._record_source(source, f'{source_id}:portfolio:{self.portfolio_id}', key, None,
+                                    'review', issue, record)
+                result.review += 1
+                result.execution_review += 1
+                result.execution_blocking_review += 1
+                result.issues.append(f'{source_id}: {issue}')
+                return False
+            pair = (record.get('symbol') or '').upper().split('.')
+            valid = (key and record.get('trade_date') and len(pair) == 2
+                     and all(re.fullmatch(r'[A-Z]{3}', code) for code in pair)
+                     and pair[0] != pair[1] and record.get('currency') == pair[1]
+                     and record.get('side') in {'BUY', 'SELL'}
+                     and (_number(record.get('quantity')) or 0) != 0
+                     and (_number(record.get('price')) or 0) > 0)
+            issue = '' if valid else 'FX cash evidence needs an unambiguous currency pair, side, date, quantity and price'
+            self._record_source(source, source_id, key, None, 'cash-only' if valid else 'review', issue,
+                                dict(record, multiplier=1))
+            if valid:
+                result.duplicates += 1
+            else:
+                result.review += 1
+                result.execution_review += 1
+                result.execution_blocking_review += 1
+                result.issues.append(f'{source_id}: {issue}')
+            return bool(valid)
         problems = []
         for label in ("trade_date", "symbol", "currency", "security_type"):
             if not record.get(label):
@@ -506,12 +560,22 @@ class BrokerIngestor:
             self._record_source(source, source_id, key, None, "review", issue, record)
             result.review += 1
             result.execution_review += 1
+            result.execution_blocking_review += 1
             result.issues.append(f"{source_id}: {issue}")
             return False
         qty = abs(qty)
         record = dict(record, con_id=con_id, quantity=qty, price=price, multiplier=multiplier)
         existing = conn.execute("SELECT * FROM broker_executions WHERE account_id=? AND execution_key=?",
                                 (self.account_id, key)).fetchone()
+        if existing and conn.execute('SELECT portfolio_id FROM trades WHERE id=?',
+                                     (existing['trade_row_id'],)).fetchone()[0] != self.portfolio_id:
+            issue = 'Canonical execution belongs to another portfolio; review allocation before importing'
+            self._record_source(source, f'{source_id}:portfolio:{self.portfolio_id}', key, None, 'review', issue, record)
+            result.review += 1
+            result.execution_review += 1
+            result.execution_blocking_review += 1
+            result.issues.append(f'{source_id}: {issue}')
+            return False
         if not existing:
             potential = conn.execute("""SELECT t.id FROM trades t
                 JOIN positions p ON p.id=t.position_id
@@ -528,6 +592,7 @@ class BrokerIngestor:
                 self._record_source(source, source_id, key, None, "review", issue, record)
                 result.review += 1
                 result.execution_review += 1
+                result.execution_blocking_review += 1
                 result.issues.append(f"{source_id}: {issue}")
                 return False
         fx = _number(record.get("fx_to_usd"))
@@ -566,6 +631,10 @@ class BrokerIngestor:
         if pending:
             result.review += 1
             result.execution_review += 1
+            if source == 'activity_statement' and pending == ['tax']:
+                result.pending_tax += 1
+            else:
+                result.execution_blocking_review += 1
             result.issues.append(f"{source_id}: {status}")
         quality = 2 if source == "flex" else 1
         source_label = ("IBKR Activity Statement" if source == "activity_statement" else "IBKR sync")
@@ -575,13 +644,14 @@ class BrokerIngestor:
             newer = revision > existing["revision"]
             richer = quality > existing["quality"] and revision >= existing["revision"]
             if newer or richer:
-                manual_match = conn.execute("""SELECT 1 FROM trade_matches WHERE origin='manual'
+                protected_match = conn.execute("""SELECT 1 FROM trade_matches WHERE origin NOT IN ('auto','auto_short')
                     AND (buy_trade_id=? OR sell_trade_id=?) LIMIT 1""", (row_id, row_id)).fetchone()
-                if manual_match and (old["quantity"] != qty or old["side"] != record["side"]):
-                    issue = "correction conflicts with manually allocated lots"
+                if protected_match and (old["quantity"] != qty or old["side"] != record["side"]):
+                    issue = "correction conflicts with reviewed or manually allocated lots"
                     self._record_source(source, source_id, key, row_id, "review", issue, record)
                     result.review += 1
                     result.execution_review += 1
+                    result.execution_blocking_review += 1
                     result.issues.append(f"{source_id}: {issue}")
                     return False
                 old_con_id = conn.execute("SELECT con_id FROM positions WHERE id=?",
@@ -591,6 +661,7 @@ class BrokerIngestor:
                     self._record_source(source, source_id, key, row_id, "review", issue, record)
                     result.review += 1
                     result.execution_review += 1
+                    result.execution_blocking_review += 1
                     result.issues.append(f"{source_id}: {issue}")
                     return False
                 position_id = old["position_id"]

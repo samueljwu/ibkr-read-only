@@ -16,12 +16,12 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 APP_MODULES = {
     'broker': ('__init__', 'broker_fees', 'broker_lots', 'broker_sync', 'market_data'),
-    'finance': ('__init__', 'analytics', 'calcs', 'calculations', 'exposure', 'instrument_names', 'returns', 'services', 'trade_costs'),
+    'finance': ('__init__', 'analytics', 'calcs', 'calculations', 'exposure', 'instrument_names', 'reconciliation', 'returns', 'services', 'trade_costs'),
     'imports': ('__init__', 'activity_statement_trades', 'activity_statement_transfers', 'analytics_flex', 'cash_flex', 'excel_io', 'flex_import', 'import_contract'),
     'platform': ('__init__', 'diagnostics', 'package_check', 'runtime'),
     'storage': ('__init__', 'database', 'database_keys', 'encrypted_backup', 'local_files', 'migration', 'paths', 'recovery', 'recovery_code', 'secret_store', 'security_storage', 'storage_operations'),
     'sync': ('__init__', 'history_coverage', 'history_status', 'sync_service', 'sync_timing', 'workers'),
-    'ui': ('__init__', 'analytics_ui', 'calcs_ui', 'cash_ui', 'clipboard_ui', 'exposure_custom_ui', 'exposure_ui', 'header_icons', 'help_visuals', 'returns_ui', 'recovery_ui', 'settings_ui', 'table_ui', 'themed_checkbox', 'ui_theme', 'window'),
+    'ui': ('__init__', 'analytics_ui', 'calcs_ui', 'cash_ui', 'clipboard_ui', 'dialog_ui', 'exposure_custom_ui', 'exposure_ui', 'header_icons', 'help_visuals', 'reconciliation_ui', 'returns_ui', 'recovery_ui', 'settings_ui', 'table_ui', 'themed_checkbox', 'ui_theme', 'window'),
     'updates': ('__init__', 'release_policy', 'update_handoff', 'update_ui', 'updater'),
 }
 APP_PACKAGES = tuple(APP_MODULES)

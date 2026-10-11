@@ -4,9 +4,10 @@ import threading
 import time
 
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout
 
 from app.platform.runtime import build_info
+from app.ui.dialog_ui import ResizableDialog
 from app.updates.updater import NoUpdate, UpdateError, VerifiedFile, cleanup_attempt, discover, download, verify_file
 
 
@@ -55,7 +56,7 @@ class UpdateWorker(QThread):
                 self.problem.emit(self.generation, "Update check failed; retry later")
 
 
-class UpdateDialog(QDialog):
+class UpdateDialog(ResizableDialog):
     def __init__(self, window):
         super().__init__(window)
         self.window = window

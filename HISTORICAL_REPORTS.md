@@ -105,11 +105,23 @@ report source/window; do not promote them to a whole-account claim.
 | Older recovery | English Activity Statement CSV with the expected repeated section headers and contract identity; individual STK/OPT/FUT/BOND executions and verified transferred stock lots | Localized/custom CSV; automatic continuous coverage; older Analytics/Cash reconstruction |
 
 This is a narrow release support boundary, not certification of every row in
-an otherwise supported report. Short-sale opening basis, option exercise and
+an otherwise supported report. Unproven short-sale opening basis, option exercise and
 assignment, reverse splits, mergers/spinoffs, redemptions, transfers without
 verified lots and other unsupported lifecycle events must stay in review.
 The existing parser retains such records for investigation. Declared scope
 does not bypass any account/date/amount/reconciliation checks.
+
+Closed Lots first validate fee- and tax-inclusive basis against the current
+opening execution. A narrowly observed stock-lot representation may omit
+commission only when exact raw quantity, price, proceeds, cost, commission and
+tax evidence proves the proportional difference; execution fees and taxes
+remain in P&L. This is not a general cost-basis convention: [IBKR defines cost
+as including commissions and taxes](https://www.ibkrguides.com/reportingreference/reportguide/financialinformation_fq.htm).
+One proven 2-for-1 split can allocate each closing lot between its original
+purchase and the linked zero-basis additional shares, retaining original
+execution prices and costs. Negative Closed Lots can protect a verified short
+opening SELL and later closing BUY on the exact contract, including expiry at
+zero. Ambiguous, unsupported or conflicting evidence remains in review.
 
 IBKR distinguishes Account Type, Customer Type and Account Capabilities.
 The existing queries do not request or validate all three. Missing evidence
@@ -148,7 +160,43 @@ can obtain and their required fields. Imported executions are discrete records,
 not continuous report coverage. A year with a few trades imported is not a
 verified year of activity. Broker corrections require replay/reconciliation.
 
+Settings > History & Flex > Saved history includes saved CSV trade dates and
+verified transferred-holding snapshot dates in the Trades row, alongside Flex
+report ranges. The CSV span runs from the earliest to the latest saved record;
+the date tooltip and expanded details list the actual dates. It does not claim
+that the statement's whole period was imported or fill gaps in Flex coverage.
+Records with pending transaction tax still have saved dates and retain their
+pending-cost warning. Pending transfers without saved holdings have no saved date.
+
+The older-trades importer uses the unchanged English Activity Statement CSV.
+For ordinary opening stock purchases, its existing Trades Basis can establish
+purchase cost including commission and tax; closing or adjusted Basis cannot
+establish transaction tax. Available independent cost evidence must agree.
+Unknown transaction tax stays unknown, so affected costs and net P&L stay incomplete.
+This follows IBKR's [opening versus closing Basis definition](https://www.ibkrguides.com/reportingreference/reportguide/trades_default.htm).
+
+Transfers are verified against the statement and a complete eligible saved broker
+lot set, including later partial sales reconstructed against one snapshot. The
+importer never substitutes transfer market value or invents missing cost history.
+Valid executions and verified transfers save atomically with unresolved transfers
+as pending source records containing the statement rows, hash, period, portfolio,
+quantities and reason. Pending-only statements can also save. History and import
+dialogs show pending stocks and shares; holdings and affected P&L remain incomplete.
+After importing available broker lot history, retry the same CSV: its pending
+record completes once when evidence suffices. Quantity or basis contradictions,
+overlapping transfers and edited saved holdings still block and roll back the import.
+
 ### Unavailable reports and retries
+
+When a history import stops requesting a source after repeated unavailable reports,
+the result is **History imported with gaps**. It identifies the affected sources
+and dates and directs the user to check IBKR availability before retrying
+**Import history**. **History import paused** and **Resume import** are reserved
+for a pause requested by the user. Available reports remain saved in both cases.
+
+Settings shows current record issues with their reasons and next steps. A historical
+review flag stops appearing when complete saved reports cover its entire date
+range; unresolved execution or lot records still appear even when coverage is saved.
 
 An observed Flex 1003 at either request or retrieval starts a persistent six-hour
 local cooldown for automatic attempts in that portfolio database, scoped to the
@@ -190,8 +238,68 @@ unknown instrument ingestion and a stale `complete_result=true` worker flag.
 Existing wrong-account/base/date, partial report, gap, replay and reconciliation
 tests remain required. No live broker request was used for this change.
 
+### Calculation check details
+
+The Summary warning row and Cash tab now open the same compact **Details**
+view. **Verified**, **Difference**, **Partial**, and **Unavailable** apply to
+the displayed account, portfolio, currency and dated comparison. Expand a cash
+check for its component amounts; earlier saved periods and individual holdings
+are collapsed by default. Missing prices, FX, prior closes, fees, taxes and lot
+basis are identified by holding or lot. Existing subtotal exclusions remain.
+
+**Independent cash** starts from the broker opening balance and calculates
+sales, purchases, both FX conversion legs, original signed native commissions,
+dated refunds, execution taxes and non-trade cash movements from the saved local
+ledger. It compares each component and the closing balance with the matching
+Cash Report, using Decimal and a one-cent tolerance per native currency.
+Component errors remain differences even when their closing effects cancel.
+Detailed transaction tax is counted once, not again as a non-trade movement.
+Canonical executions and their accepted correction prevent Flex/TWS replay
+from counting a trade twice; ambiguous cross-source FX conversions require
+review. Supported older CSV FX rows are retained as cash evidence without
+creating security holdings or lots.
+
+**Statement arithmetic** checks the broker report against its own transactions;
+it does not establish agreement with the independent ledger. Missing execution
+windows (including unproven empty periods), original native fee/tax/proceeds
+fields, unresolved events, unlinked refunds or missing report accounting-basis
+evidence keep the independent check Partial. To repair older saved evidence or
+retrieve broker corrections, open **Settings > Import history**, select the
+affected source and dates, and enable **Recheck saved reports**. Select `all` when
+both execution and Cash evidence need repair. This fetches fresh reports instead
+of reusing the local report cache; the default option still skips completed dates.
+Cash rechecks replay each original saved period in full and import intervening
+gaps. A range cutting a saved Cash period is rejected with its required dates
+before any source is changed. Pause and Resume retain the option and skip windows
+already rechecked in that run. Reports remain subject to IBKR historical
+availability and the existing validation/replay checks. Refunds use their actual posting
+dates and currencies. Splits and verified transferred opening lots are noncash.
+Unsupported lifecycle or margin cash cannot silently become a zero movement.
+
+Latest failed, unavailable, paused or unfinished imports keep the overall cash
+summary Partial while preserving explicitly dated checks for saved intervals.
+Each holding retains its own broker snapshot date; a live update for another
+holding does not refresh it. Quote changes do not rebuild cash comparisons.
+Full NAV, valuation and P&L broker verification remains Partial or Unavailable
+because the retained live account totals do not supply compatible dated
+valuation or P&L snapshots. These checks do not prove complete lifetime history
+or unfiltered account reporting.
+
+Calculation-check explanations group missing report details, unverified lot
+matches, unsupported events and inconsistent amounts separately. They show
+affected securities and dates only when saved source records establish them.
+A pending lot record alone does not prove that an earlier statement is missing.
+An acquisition date is identified as outside Trades coverage only when its
+opening trade is absent and that date has no complete saved execution window.
+**Technical details** and **Copy diagnostics** retain the original source IDs
+and reasons without listing them in the main explanation. Reimporting does not
+add app support for unknown option exercise, assignment or settlement cash.
+An expiration already linked to an unchanged option trade with explicit zero
+price and proceeds is accounted for; ambiguous or changed links remain Partial.
+
 ### Primary references
 
+- [IBKR Cash Report trade-date and settled-cash fields](https://www.ibkrguides.com/reportingreference/reportguide/cashreport.htm)
 - [IBKR account information fields](https://www.ibkrguides.com/reportingreference/reportguide/account%20information%20activity%20flex.htm)
 - [Execution and lot detail fields](https://www.ibkrguides.com/reportingreference/reportguide/tradesfq.htm)
 - [Flex historical availability](https://www.ibkrguides.com/clientportal/performanceandstatements/flex.htm)

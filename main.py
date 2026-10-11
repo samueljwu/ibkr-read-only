@@ -7,6 +7,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox, QFileDialog
 
 from app.ui.window import MainWindow
+from app.ui.dialog_ui import install_dialog_resize_support
 from app.resources import asset_path
 from app.storage.paths import create_portfolio_directory, validate_database_path
 from app.platform.runtime import app_id, app_name, version, channel_mutex
@@ -106,6 +107,7 @@ def _run(argv=None):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id())
     app = QApplication([sys.argv[0]])
+    install_dialog_resize_support()
     app.setApplicationVersion(VERSION)
     app.setApplicationName(app_name())
     app.setApplicationDisplayName(app_name())

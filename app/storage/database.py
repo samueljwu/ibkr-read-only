@@ -711,12 +711,18 @@ class Database:
                 (portfolio_id,con_id,quantity,symbol,currency,as_of) VALUES (?,?,?,?,?,?)""",
                 [(portfolio_id, int(row["con_id"]), float(row["quantity"]), row.get("symbol", ""),
                   row.get("currency", ""), as_of) for row in rows])
+            self.conn.execute('''INSERT INTO app_metadata(key,value) VALUES (?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value''',
+                (f'broker_positions_full_snapshot_{portfolio_id}', as_of))
 
     def save_broker_position_delta(self, portfolio_id, row, as_of):
         with self.conn:
             if abs(float(row["quantity"])) < 1e-9:
                 self.conn.execute("DELETE FROM broker_positions WHERE portfolio_id=? AND con_id=?",
                                   (portfolio_id, int(row["con_id"])))
+                self.conn.execute('''INSERT INTO app_metadata(key,value) VALUES (?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value''',
+                    (f'broker_position_zero_{portfolio_id}_{int(row["con_id"])}', as_of))
             else:
                 self.conn.execute("""INSERT INTO broker_positions
                     (portfolio_id,con_id,quantity,symbol,currency,as_of) VALUES (?,?,?,?,?,?)

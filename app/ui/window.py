@@ -40,10 +40,13 @@ from app.finance.calculations import choose_price, valid_price
 from app.ui.analytics_ui import AnalyticsTab
 from app.ui.cash_ui import CashMovementsTab
 from app.ui.calcs_ui import CalcsTab
+from app.ui.dialog_ui import ResizableDialog, install_dialog_resize_support
 from app.broker.broker_sync import BrokerIngestor
 from app.imports.excel_io import export_workbook
 from app.broker.market_data import IBKRMarketDataProvider, MarketDataProvider, MockMarketDataProvider
 from app.finance.services import PortfolioService
+from app.finance.reconciliation import ReconciliationService
+from app.ui.reconciliation_ui import ReconciliationDialog, cash_summary
 from app.ui.table_ui import InputReportTable, ReportTable, SortItem, fit_option_name_column, handle_table_shortcut
 from app.ui.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           stylesheet, status_link, style_toolbar_dropdown)
@@ -476,7 +479,7 @@ class DisplayAmountSpinBox(QDoubleSpinBox):
         self.lineEdit().setText(display_number(self.value()))
 
 
-class MatchDialog(QDialog):
+class MatchDialog(ResizableDialog):
     def __init__(self, service, sell, parent=None):
         super().__init__(parent)
         name = (InstrumentNames(service.db, service.portfolio_id).trade(sell)
@@ -560,6 +563,7 @@ class MainWindow(QMainWindow):
     def __init__(self, database_path=None):
         super().__init__()
         install_clipboard_support()
+        install_dialog_resize_support()
         available = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1450, max(640, available.width() - 40)),
                     min(850, max(480, available.height() - 40)))
@@ -690,7 +694,18 @@ class MainWindow(QMainWindow):
         self.data_notice = QLabel()
         self.data_notice.setObjectName("notice")
         self.data_notice.setWordWrap(True)
-        summary_layout.addWidget(self.data_notice)
+        notice_row = QHBoxLayout()
+        notice_row.addWidget(self.data_notice, 1)
+        self.reconciliation_button = QPushButton('Details')
+        self.reconciliation_button.setObjectName('secondary')
+        self.reconciliation_button.setProperty('compactDetails', True)
+        self.reconciliation_button.setToolTip('Calculation checks, missing inputs and source differences')
+        self.reconciliation_button.setAccessibleName('Calculation check details')
+        self.reconciliation_button.clicked.connect(self._show_reconciliation_details)
+        notice_row.addWidget(self.reconciliation_button, 0, Qt.AlignRight | Qt.AlignTop)
+        summary_layout.addLayout(notice_row)
+        self.reconciliation_service = ReconciliationService(self.db, self.portfolio_id)
+        self._reconciliation_rows, self._reconciliation_lots = [], []
         root_layout.addWidget(summary)
         self.tabs = QTabWidget()
         self.tabs.setMovable(True)
@@ -1216,7 +1231,11 @@ class MainWindow(QMainWindow):
         except (KeyError, TypeError, ValueError):
             QMessageBox.warning(self, 'Resume import', 'The saved date range is invalid. Start a new import.')
             return
-        self._start_history_import(source, start, end)
+        if status.get('refresh_saved_reports'):
+            self._start_history_import(source, start, end, refresh_saved_reports=True,
+                                       rechecked_windows=status.get('rechecked_windows', {}))
+        else:
+            self._start_history_import(source, start, end)
 
     def show_history_import_details(self, _link=None):
         status = self._read_history_status()
@@ -1615,7 +1634,7 @@ class MainWindow(QMainWindow):
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QScrollArea.NoFrame)
         scroller.setWidget(page)
-        self.settings_dialog = QDialog(self)
+        self.settings_dialog = ResizableDialog(self)
         self.settings_dialog.setWindowTitle("Settings")
         self.settings_dialog.resize(620, 440)
         dialog_layout = QVBoxLayout(self.settings_dialog)
@@ -1643,7 +1662,7 @@ class MainWindow(QMainWindow):
         if not account or account != self.db.setting("ib_account_id"):
             QMessageBox.warning(self, "Flex token", "Save the IBKR account setting first.")
             return
-        dialog = QDialog(self)
+        dialog = ResizableDialog(self)
         dialog.setWindowTitle("Save Flex token")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel("Paste the Flex Web Service token for this account."))
@@ -1672,7 +1691,7 @@ class MainWindow(QMainWindow):
         if self._flex_sync_running():
             QMessageBox.information(self, "Import history", "An IBKR Flex sync is running. Wait for it to finish before importing history.")
             return
-        dialog = QDialog(self)
+        dialog = ResizableDialog(self)
         dialog.setWindowTitle("Import historical Flex data")
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
@@ -1686,6 +1705,11 @@ class MainWindow(QMainWindow):
         form.addRow("From date", first)
         form.addRow("To date", last)
         layout.addLayout(form)
+        recheck = ThemedCheckBox("Recheck saved reports")
+        recheck.setObjectName('recheckSavedReports')
+        recheck.setToolTip('Fetch selected reports again to retain missing evidence or broker corrections. '
+                           'Include complete saved Cash periods in the date range.')
+        layout.addWidget(recheck)
         layout.addWidget(QLabel("Imports dated Activity Flex reports into your local database."))
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -1704,7 +1728,28 @@ class MainWindow(QMainWindow):
         if self._flex_sync_running():
             QMessageBox.information(self, "Import history", "An IBKR Flex sync started while the dialog was open. Wait for it to finish, then retry.")
             return
-        self._start_history_import(source.currentText(), start, end)
+        if recheck.isChecked():
+            self._start_history_import(source.currentText(), start, end, refresh_saved_reports=True)
+        else:
+            self._start_history_import(source.currentText(), start, end)
+
+    def _show_statement_import_error(self, message, error):
+        """Keep large statement diagnostics out of the main modal text."""
+        full = str(error)
+        brief = full[:900]
+        if len(full) > 900:
+            brief += '\nAdditional diagnostics are available in Show Details.'
+        box = QMessageBox(self)
+        box.setWindowTitle('Import older trades')
+        box.setIcon(QMessageBox.Warning)
+        box.setTextFormat(Qt.PlainText)
+        box.setText(message)
+        box.setInformativeText(brief)
+        details = getattr(error, 'details', '') or (full if len(full) > 900 else '')
+        if details:
+            box.setDetailedText(details)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def import_older_statement_trades(self):
         if not self.db.setting("ib_account_id").strip():
@@ -1736,10 +1781,11 @@ class MainWindow(QMainWindow):
         try:
             preview = preview_activity_statement_trades(self.db, path, self.portfolio_id)
         except Exception as exc:
-            QMessageBox.warning(self, "Import older trades",
-                                f"This statement could not be safely imported:\n\n{exc}\n\nNo trades were changed.")
+            self._show_statement_import_error('This statement could not be safely imported. No trades were changed.', exc)
             return
         first, last = preview["period"]
+        verified_transfers = [g for g in preview.get('transfers', []) if g['status'] != 'pending']
+        pending_transfers = [g for g in preview.get('transfers', []) if g['status'] == 'pending']
         question = QMessageBox(self)
         question.setWindowTitle("Review older trades")
         question.setIcon(QMessageBox.Information)
@@ -1747,16 +1793,27 @@ class MainWindow(QMainWindow):
             f"IBKR account: {preview['account']}\n"
             f"Statement dates: {first} to {last}\n"
             f"Executions found: {len(preview['rows']):,}" +
-            (f"\nTransferred holdings found: {len(preview['transfers']):,} stocks "
-             f"({sum(float(g['quantity']) for g in preview['transfers']):g} shares)"
-             if preview.get('transfers') else '') +
+            (f"\nExecutions with unknown transaction tax: {preview['pending_tax']:,}"
+             if preview.get('pending_tax') else '') +
+            (f"\nVerified transferred holdings: {len(verified_transfers):,} stocks "
+             f"({sum(float(g['quantity']) for g in verified_transfers):g} shares)"
+             if verified_transfers else '') +
+            (f"\nTransfers pending verification: {len(pending_transfers):,} stocks "
+             f"({sum(float(g['quantity']) for g in pending_transfers):g} shares)"
+             if pending_transfers else '') +
             (f"\nForex conversion rows not included: {preview['ignored_forex']:,}"
              if preview.get("ignored_forex") else ""))
         question.setInformativeText(
             "Transferred holdings are added only when the statement and saved broker lots verify quantity and cost basis. "
             "They are recorded as holdings at the statement end date, with original acquisition dates retained.\n\n"
             "Existing executions and transferred holdings are skipped. This does not add cash or performance history, "
-            "or mark Flex dates as covered.")
+            "or mark Flex dates as covered.\n\n"
+            "Executions with unknown tax can be saved; their costs and affected net P&L stay incomplete. "
+            "The app uses existing opening Basis, tax and Net Cash evidence; you do not need to edit the CSV. "
+            "Unresolved transfers are saved as pending; holdings and affected P&L remain incomplete. "
+            "Import available broker lot history, then retry this same CSV to complete pending transfers.")
+        if pending_transfers:
+            question.setDetailedText('\n\n'.join(f"{g['symbol']}: {g['quantity']} shares pending — {g['reason']}" for g in pending_transfers))
         question.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         question.setDefaultButton(QMessageBox.Cancel)
         question.button(QMessageBox.Yes).setText("Import trades")
@@ -1765,8 +1822,8 @@ class MainWindow(QMainWindow):
         try:
             outcome = import_activity_statement_trades(self.db, preview, self.portfolio_id)
         except Exception as exc:
-            QMessageBox.warning(self, "Import older trades",
-                                f"No trades were imported because the statement could not be reconciled safely:\n\n{exc}")
+            self._show_statement_import_error(
+                'No trades were imported because the statement could not be reconciled safely.', exc)
             return
         result = outcome["ingest"]
         imported = result.inserted if result else 0
@@ -1775,10 +1832,15 @@ class MainWindow(QMainWindow):
         success_message = (
             f"Executions imported: {imported + updated:,}\n"
             f"Executions already saved: {outcome['duplicates']:,}\n"
+            + (f"Saved older executions with unknown transaction tax: {outcome['pending_tax']:,}; "
+               "costs and affected net P&L remain incomplete.\n" if outcome.get('pending_tax') else '')
             + (f"Transferred holdings added: {outcome['transfers_added']:,} stocks "
                f"({outcome['transfer_quantity']:g} shares)\n"
                f"Transferred holdings already saved: {outcome['transfers_skipped']:,} stocks\n"
                if preview.get('transfers') else '') + "\n"
+            + (f"Transfers saved pending verification: {len(outcome['pending_transfers']):,} stocks "
+               f"({sum(float(g['quantity']) for g in outcome['pending_transfers']):g} shares); "
+               "holdings and affected P&L remain incomplete.\n\n" if outcome.get('pending_transfers') else '')
             + (f"Forex conversion rows not imported: {preview['ignored_forex']:,}\n\n"
                if preview.get("ignored_forex") else "")
             + "These records are saved locally. Activity Statement imports remain separate from Flex coverage; "
@@ -1792,7 +1854,9 @@ class MainWindow(QMainWindow):
             return
         if reconciliation['reconciliation_guidance']:
             box = QMessageBox(self)
-            box.setWindowTitle('Older trades imported; some lots need review')
+            box.setWindowTitle('Older trades imported; transaction costs are incomplete'
+                               if reconciliation.get('statement_pending_tax') else
+                               'Older trades imported; some lots need review')
             box.setIcon(QMessageBox.Information)
             box.setTextFormat(Qt.PlainText)
             box.setText(success_message)
@@ -1808,7 +1872,8 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.information(self, 'Older trades imported', success_message)
 
-    def _start_history_import(self, source, start, end):
+    def _start_history_import(self, source, start, end, *, refresh_saved_reports=False,
+                              rechecked_windows=None):
         if self._update_blocked():
             return
         if self._history_running() or self._flex_sync_running():
@@ -1816,10 +1881,17 @@ class MainWindow(QMainWindow):
             return
         args = ["--source", source, "--from-date", start.isoformat(),
                 "--to-date", end.isoformat(), "--database", str(self.db.path)]
+        if refresh_saved_reports:
+            args.append('--refresh-saved-reports')
+            for label, pairs in (rechecked_windows or {}).items():
+                for first, last in pairs:
+                    args.extend(['--rechecked-window', f'{label}:{first}:{last}'])
         status = dict(state="starting", source=source, from_date=start.isoformat(),
                       to_date=end.isoformat(), started_at=datetime.now().isoformat(timespec="seconds"),
                       pid=None, message="", pause_supported=True, paused_by_user=False,
-                      account_id=self.db.setting('ib_account_id'))
+                      account_id=self.db.setting('ib_account_id'),
+                      refresh_saved_reports=refresh_saved_reports,
+                      rechecked_windows=rechecked_windows or {})
         try:
             pause_request_path(self._history_status_path).unlink(missing_ok=True)
             write_status(self._history_status_path, status)
@@ -1869,7 +1941,7 @@ class MainWindow(QMainWindow):
             self.log.exception("Could not refresh after history import: %s", exc)
 
     def _make_help_dialog(self):
-        self.help_dialog = QDialog(self)
+        self.help_dialog = ResizableDialog(self)
         self.help_dialog.setWindowTitle("Help · Portfolio Monitor")
         self.help_dialog.resize(760, 600)
         dialog_layout = QVBoxLayout(self.help_dialog)
@@ -2523,6 +2595,13 @@ class MainWindow(QMainWindow):
                 dialog.status.setText("Waiting for Setup to open. The app remains protected during handoff…")
             QTimer.singleShot(100, lambda: self._wait_for_setup(dialog))
 
+    def _close_reconciliation_dialogs(self):
+        for owner in (self, getattr(self, 'cash_tab', None)):
+            dialog = getattr(owner, '_reconciliation_dialog', None)
+            if dialog is not None:
+                dialog.timer.stop()
+                dialog.close()
+
     def closeEvent(self, event):
         if self._update_handoff and not getattr(self, "_update_launch_exit", False):
             event.ignore()
@@ -2536,6 +2615,7 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_update_launch_exit", False):
             try:
+                self._close_reconciliation_dialogs()
                 self.db.conn.close()
             except Exception as exc:
                 self._update_launch_exit = False
@@ -2563,6 +2643,7 @@ class MainWindow(QMainWindow):
                 self.db.configure_data_directory(self._pending_data_directory)
             except Exception as exc:
                 if getattr(self.db, "_relocation_retired", False):
+                    self._close_reconciliation_dialogs()
                     self.db.conn.close()
                     message = ("The new portfolio location is selected. Restart the app to open it."
                                if getattr(self.db, "_relocation_selected", False) else
@@ -2576,6 +2657,7 @@ class MainWindow(QMainWindow):
                 self._start_provider()
                 QMessageBox.warning(self, "Database move failed", str(exc))
                 return
+        self._close_reconciliation_dialogs()
         self.db.conn.close()
         super().closeEvent(event)
 
@@ -2748,7 +2830,7 @@ class MainWindow(QMainWindow):
         position = self.selected_row("Portfolio")
         if not position:
             return
-        dialog = QDialog(self)
+        dialog = ResizableDialog(self)
         dialog.setWindowTitle(f"{position['display_ticker']} · position details")
         dialog.resize(950, 650)
         layout = QVBoxLayout(dialog)
@@ -2828,6 +2910,8 @@ class MainWindow(QMainWindow):
         self._update_account_heading()
         rows = rows if rows is not None else self.service.portfolio_rows()
         lots = lots if lots is not None else self.service.lots_rows(rows)
+        self._reconciliation_rows, self._reconciliation_lots = rows, lots
+        self.reconciliation_service.portfolio_id = self.portfolio_id
         active = [r for r in rows if abs(float(r["position_qty"] or 0)) > 1e-9]
         eligible = [r for r in active if r["reconciliation"] != "DIFFERENCE"]
         daily = sum(r["daily_pnl"] for r in eligible if r["daily_pnl"] is not None)
@@ -2913,9 +2997,24 @@ class MainWindow(QMainWindow):
         if cash:
             self.metric_values["cash"].setToolTip(
                 f"IBKR TotalCashValue, as of {cash['as_of']}; includes non-trade cash flows")
+        cash_checks = self.reconciliation_service.cash_checks()
+        cash_message = cash_summary(cash_checks)
+        if ': Difference' in cash_message or ': Partial' in cash_message:
+            issues.append(cash_message)
         self.data_notice.setText(" · ".join(issues) + " — review reconciliation and source data" if issues else "")
         self.data_notice.setVisible(bool(issues))
         self._update_status()
+
+    def _show_reconciliation_details(self):
+        dialog = getattr(self, '_reconciliation_dialog', None)
+        if dialog is None:
+            dialog = ReconciliationDialog(lambda: self.reconciliation_service.checks(
+                self._reconciliation_rows, self._reconciliation_lots), self)
+            self._reconciliation_dialog = dialog
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def match_selected(self):
         sell = self.selected_row("Trades")

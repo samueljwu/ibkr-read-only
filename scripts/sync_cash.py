@@ -19,9 +19,12 @@ def main(database_path=None):
         db.set_metadata("ibkr_cash_sync_status", "running")
         log.info("Cash history sync started")
         result = run_cash_flex_sync(db, db.setting("ib_account_id"), db.setting("cash_flex_query_id"))
-        db.set_metadata("ibkr_cash_sync_status", "complete")
-        db.set_metadata("ibkr_cash_sync_error", "")
-        log.info("Cash history sync complete: %s", result)
+        unavailable = (result or {}).get('unavailable_windows', 0)
+        state = 'partial' if unavailable else 'complete'
+        db.set_metadata("ibkr_cash_sync_status", state)
+        db.set_metadata("ibkr_cash_sync_error", f'{unavailable} requested Cash report windows were unavailable; saved periods are retained.'
+                        if unavailable else "")
+        log.info("Cash history sync %s: %s", state, result)
         return 0
     except Exception as exc:
         db.set_metadata("ibkr_cash_sync_status", "failed")

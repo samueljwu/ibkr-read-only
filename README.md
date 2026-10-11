@@ -8,7 +8,9 @@ A read-only desktop app for an Interactive Brokers account with a USD base curre
 
 Export to Excel, create backups, and customize tables and themes. Press **F1** for the in-app guide.
 
-The Windows v1.0.1 patch candidate encrypts local databases and database backups in stable and Dev builds. Use **File → Export portable recovery backup** and save its recovery code separately to recover after losing your Windows profile. Excel exports and report caches remain unencrypted. The published v1.0.0 installer still uses plaintext databases.
+Windows v1.0.1 and later encrypt local databases and database backups in stable and Dev builds. Use **File → Export portable recovery backup** and save its recovery code separately to recover after losing your Windows profile. Excel exports and report caches remain unencrypted. The published v1.0.0 installer still uses plaintext databases.
+
+The v1.0.2 patch improves Activity Statement imports, broker lot matching, history rechecks, and cash reconciliation, and adds resizable dialogs.
 
 ## Quick start
 

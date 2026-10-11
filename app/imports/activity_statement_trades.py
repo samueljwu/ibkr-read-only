@@ -18,6 +18,14 @@ ASSET_TYPES = {
 }
 
 
+class ActivityStatementImportError(ValueError):
+    """A brief import failure with expandable evidence for the UI."""
+
+    def __init__(self, message, details=''):
+        super().__init__(message)
+        self.details = details
+
+
 def _value(row, columns, *names, required=True):
     for name in names:
         index = columns.get(name.casefold())
@@ -42,6 +50,44 @@ def _number(value, label):
 
 def _decimal_key(value):
     return format(value.normalize(), "f") if value else "0"
+
+
+def _optional_number(value, label):
+    return _number(value, label) if value and value.strip() not in {'--', '-'} else None
+
+
+def purchase_basis(record, opening_context=False):
+    """Interpret IBKR Basis only for ordinary opening stock purchases.
+
+    Closing Basis is the original lot cost, and adjusted/assigned lots may
+    contain amounts unrelated to transaction tax. Keep those as provenance.
+    """
+    raw = record['raw']
+    codes = {code.strip().upper() for code in raw.get('code', '').split(';') if code.strip()}
+    basis = _optional_number(raw.get('basis'), 'trade basis')
+    if (basis is None or record['side'] != 'BUY' or record['security_type'] != 'STK'
+            or not (codes == {'O'} or (not codes and opening_context))):
+        return None
+    proceeds = _optional_number(raw.get('proceeds'), 'proceeds')
+    signed_commission = _optional_number(raw.get('signed_commission'), 'commission')
+    if proceeds is None or signed_commission is None or proceeds >= 0 or signed_commission > 0:
+        return None
+    gross = Decimal(raw['quantity']) * Decimal(raw['price']) * Decimal(str(record['multiplier']))
+    if abs(gross + proceeds) > Decimal('0.02'):
+        raise ValueError(f"{record['symbol']}: purchase proceeds conflict with quantity and price")
+    commission = Decimal(raw['commission'])
+    if record['commission_currency'] == 'USD' and record['currency'] != 'USD':
+        commission /= Decimal(str(record['fx_to_usd']))
+    tax = -proceeds + commission - basis
+    if basis < 0 or tax > Decimal('0.02'):
+        raise ValueError(f"{record['symbol']}: opening purchase basis conflicts with proceeds and commission")
+    if record['taxes'] is not None and abs(Decimal(str(record['taxes'])) - tax) > Decimal('0.02'):
+        raise ValueError(f"{record['symbol']}: opening purchase basis conflicts with transaction tax")
+    if record['taxes'] is None:
+        record['taxes'] = float(tax)
+        record['tax_evidence'] = 'opening_basis'
+        raw.update(taxes=str(tax), tax_evidence='opening_basis')
+    return basis
 
 
 def _execution_time(value):
@@ -87,6 +133,7 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
                                     position["currency"].upper()), []).append(position)
 
     parsed = []
+    forex = []
     ignored_forex = 0
     repeated = Counter()
     flex_start = datetime(datetime.now().year - 4, 1, 1).date()
@@ -109,9 +156,41 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
             continue
         asset = _value(row, columns, "Asset Category").casefold()
         if asset == "forex":
-            # Currency conversions affect cash balances, not the securities and
-            # lot history this recovery import promises to restore.
-            ignored_forex += 1
+            currency = _value(row, columns, 'Currency').upper()
+            symbol = _value(row, columns, 'Symbol').upper()
+            pair = symbol.split('.')
+            day, clock = _execution_time(_value(row, columns, 'Date/Time', 'Trade Date'))
+            quantity = _number(_value(row, columns, 'Quantity'), 'FX quantity')
+            price = _number(_value(row, columns, 'T. Price', 'Price'), 'FX price')
+            proceeds = _number(_value(row, columns, 'Proceeds'), 'FX proceeds')
+            if (len(pair) != 2 or any(len(code) != 3 or not code.isalpha() for code in pair)
+                    or pair[0] == pair[1] or pair[1] != currency or not quantity or price <= 0
+                    or abs(proceeds + quantity * price) > Decimal('0.01')):
+                raise ValueError(f'{symbol}: FX row has ambiguous currency legs or inconsistent proceeds')
+            execution_day = datetime.strptime(day, '%Y-%m-%d').date()
+            if not period_start <= execution_day <= period_end or execution_day >= flex_start:
+                raise ValueError('FX execution is outside the supported older statement period')
+            commission_name = next((name for name in ('Comm/Fee', 'Total Commission', 'Commission', 'Comm in USD')
+                                    if name.casefold() in columns), None)
+            fee = _value(row, columns, commission_name, required=False) if commission_name else None
+            taxes = _value(row, columns, 'Taxes', 'Tax', required=False) or None
+            commission_currency = 'USD' if commission_name == 'Comm in USD' else currency
+            marker = ('FX', symbol, day, clock, _decimal_key(quantity), _decimal_key(price), proceeds, fee)
+            repeated[marker] += 1
+            identity = sha256(json.dumps((account, marker, repeated[marker]), default=str,
+                                        separators=(',', ':')).encode()).hexdigest()
+            source_id = f'AS:FX:{identity}'
+            forex.append({'account_id': account, 'source': 'activity_statement', 'source_id': source_id,
+                'flex_trade_id': _value(row, columns, 'Trade ID', 'TradeID', required=False) or source_id,
+                'ib_exec_id': _value(row, columns, 'IB Exec ID', 'IB Execution ID', required=False),
+                'trade_date': day, 'executed_at': clock,
+                'side': 'BUY' if quantity > 0 else 'SELL', 'quantity': str(abs(quantity)), 'price': str(price),
+                'symbol': symbol, 'currency': currency, 'security_type': 'CASH', 'multiplier': 1,
+                'commission_currency': commission_currency,
+                'raw': {'source': 'IBKR Activity Statement CSV', 'period': period, 'source_hash': sha256(raw_bytes).hexdigest(),
+                        'trade_date': day, 'time': clock, 'quantity': str(abs(quantity)), 'price': str(price),
+                        'proceeds': str(proceeds), 'signed_commission': fee, 'commission_currency': commission_currency,
+                        'taxes': taxes, 'currency': currency, 'symbol': symbol}})
             continue
         security_type = ASSET_TYPES.get(asset)
         if not security_type:
@@ -156,7 +235,8 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
         commission_text = _value(row, columns, commission_name, required=False) if commission_name else ""
         commission = abs(_number(commission_text, "commission")) if commission_text else Decimal(0)
         tax_text = _value(row, columns, "Taxes", "Tax", required=False)
-        taxes = _number(tax_text, "taxes") if tax_text else None
+        taxes = _optional_number(tax_text, "taxes")
+        tax_evidence = 'explicit' if taxes is not None else 'missing'
         commission_currency = "USD" if commission_name and commission_name.casefold() == "comm in usd" else currency
 
         candidates = by_identity.get((symbol.strip().casefold(), security_type, currency), [])
@@ -175,18 +255,23 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
         fx = 1.0 if currency == "USD" else db.fx_rate(currency, day)
         if not fx or fx <= 0:
             raise ValueError(f"No saved USD exchange rate is available for {currency} on {day}")
-        if taxes is None:
-            net_cash_text = _value(row, columns, "Net Cash", required=False)
-            if net_cash_text and proceeds_text and commission_text:
-                commission_lc = (commission / Decimal(str(fx)) if commission_currency == 'USD' and currency != 'USD'
-                                 else commission)
-                taxes = _number(net_cash_text, "net cash") - _number(proceeds_text, "proceeds") + commission_lc
+        net_cash = _optional_number(_value(row, columns, "Net Cash", required=False), 'net cash')
+        if net_cash is not None and proceeds_text and commission_text:
+            commission_lc = (commission / Decimal(str(fx)) if commission_currency == 'USD' and currency != 'USD'
+                             else commission)
+            net_tax = net_cash - _number(proceeds_text, "proceeds") + commission_lc
+            if taxes is not None and abs(taxes - net_tax) > Decimal('0.02'):
+                raise ValueError(f'{symbol}: Net Cash conflicts with explicit transaction tax')
+            if taxes is None:
+                taxes = net_tax
+                tax_evidence = 'net_cash'
         marker = (position["con_id"], day, clock, side, _decimal_key(abs(quantity_signed)),
                   _decimal_key(price), _decimal_key(commission), currency)
         repeated[marker] += 1
         identity = sha256(json.dumps((account, marker, repeated[marker]),
                                      separators=(",", ":")).encode()).hexdigest()
         source_id = f"AS:{identity}"
+        basis = _optional_number(_value(row, columns, 'Basis', required=False), 'trade basis')
         parsed.append({
             "account_id": account, "source": "activity_statement", "source_id": source_id,
             "flex_trade_id": source_id, "trade_date": day, "executed_at": clock,
@@ -195,6 +280,7 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
             "security_type": security_type, "currency": currency,
             "multiplier": position["multiplier"], "fx_to_usd": fx,
             "taxes": float(taxes) if taxes is not None else None,
+            "tax_evidence": tax_evidence,
             "commission": float(commission), "commission_currency": commission_currency,
             "local_symbol": position["local_symbol"],
             "raw": {"source": "IBKR Activity Statement CSV", "account": account,
@@ -202,17 +288,23 @@ def preview_activity_statement_trades(db, path, portfolio_id=1):
                     "statement_symbol": symbol, "trade_date": day, "time": clock,
                     "side": side, "quantity": str(abs(quantity_signed)),
                     "price": str(price), "commission": str(commission), "taxes": str(taxes) if taxes is not None else None,
+                    "tax_evidence": tax_evidence,
+                    "basis": str(basis) if basis is not None else None,
+                    "code": _value(row, columns, 'Code', required=False),
+                    "proceeds": proceeds_text or None, "signed_commission": commission_text or None,
                     "commission_currency": commission_currency,
                     "currency": currency, "con_id": position["con_id"]},
         })
+        purchase_basis(parsed[-1])
     period_days = (period_start.isoformat(), period_end.isoformat())
     transfers = preview_transfers(db, rows, parsed, account, period_days, portfolio_id)
-    if not parsed and not transfers:
+    if not parsed and not transfers and not forex:
         raise ValueError("No supported execution rows were found in the Activity Statement")
     return {"account": account, "period": period_days,
-            "rows": parsed, "ignored_forex": ignored_forex,
+            "rows": parsed, "ignored_forex": ignored_forex, "forex_rows": forex,
             "transfers": transfers, "_statement_rows": rows,
-            "statement_hash": sha256(raw_bytes).hexdigest()}
+            "statement_hash": sha256(raw_bytes).hexdigest(),
+            "pending_tax": sum(record['taxes'] is None for record in parsed)}
 
 
 def import_activity_statement_trades(db, preview, portfolio_id=1):
@@ -231,21 +323,39 @@ def import_activity_statement_trades(db, preview, portfolio_id=1):
         records, duplicates = [], 0
         for record in preview["rows"]:
             validate_contract(db, record, record['currency'], portfolio_id)
-            prior = db.conn.execute("""SELECT t.*,p.con_id FROM broker_source_records r
+            context = f"{record['symbol']} on {record['trade_date']}"
+            prior = db.conn.execute("""SELECT t.*,p.con_id,r.status AS source_status FROM broker_source_records r
                 JOIN trades t ON t.id=r.trade_row_id JOIN positions p ON p.id=t.position_id
                 WHERE r.account_id=? AND r.source='activity_statement' AND r.source_id=?
-                  AND r.status='complete'""", (account, record["source_id"])).fetchone()
-            if prior and prior['tax_usd'] is None:
-                # Legacy imports already own this execution identity. Enrich its
-                # costs in place instead of skipping it or creating another trade.
-                if (prior['con_id'] != record['con_id'] or prior['trade_date'] != record['trade_date']
+                """, (account, record["source_id"])).fetchone()
+            commission_currency = record.get("commission_currency") or record["currency"]
+            commission_fx = (1.0 if commission_currency == "USD" else
+                             record["fx_to_usd"] if commission_currency == record["currency"] else
+                             db.fx_rate(commission_currency, record["trade_date"]))
+            if commission_fx is None or commission_fx <= 0:
+                raise ValueError(f"{context}: no saved USD exchange rate is available for the statement commission")
+            expected_fee = record["commission"] * commission_fx
+            if prior:
+                # Source identity owns this execution even while costs are
+                # pending. Validate it before skipping or enriching in place.
+                if prior['source_status'] not in {'complete', 'pending tax'}:
+                    raise ValueError(f"{context}: the saved execution needs review before importing")
+                if (prior['portfolio_id'] != portfolio_id or
+                        prior['con_id'] != record['con_id'] or prior['trade_date'] != record['trade_date']
                         or prior['side'] != record['side'] or prior['currency'] != record['currency']
+                        or prior['security_type'] != record['security_type']
+                        or prior['executed_at'] != record['executed_at']
+                        or abs(prior['multiplier'] - record['multiplier']) > 1e-9
                         or abs(prior['quantity'] - record['quantity']) > 1e-7
                         or abs(prior['price'] - record['price']) > 1e-8):
-                    raise ValueError("A saved Activity Statement execution changed; review it before enriching transaction tax")
-                records.append(record)
-                continue
-            if prior:
+                    raise ValueError(f"{context}: a saved Activity Statement execution changed; review it before importing")
+                if (abs(prior['commission_usd'] - expected_fee) > 0.01 or
+                        (prior['tax_usd'] is not None and record['taxes'] is not None and
+                         abs(prior['tax_usd'] + record['taxes'] * record['fx_to_usd']) > 0.01)):
+                    raise ValueError(f"{context}: a saved execution has different commission or transaction tax; review it before importing")
+                if prior['tax_usd'] is None and record['taxes'] is not None:
+                    records.append(record)
+                    continue
                 duplicates += 1
                 continue
             sql = """SELECT t.id,t.commission_usd,t.tax_usd FROM trades t
@@ -259,27 +369,37 @@ def import_activity_statement_trades(db, preview, portfolio_id=1):
                 params.append(record["executed_at"])
             matches = db.conn.execute(sql, params).fetchall()
             if len(matches) == 1:
-                commission_currency = record.get("commission_currency") or record["currency"]
-                commission_fx = (1.0 if commission_currency == "USD" else
-                                 record["fx_to_usd"] if commission_currency == record["currency"] else
-                                 db.fx_rate(commission_currency, record["trade_date"]))
-                if commission_fx is None or commission_fx <= 0:
-                    raise ValueError("No saved USD exchange rate is available for the statement commission")
-                expected_fee = record["commission"] * commission_fx
                 if (abs(matches[0]["commission_usd"] - expected_fee) <= 0.01 and
                         matches[0]["tax_usd"] is not None and record["taxes"] is not None and
                         abs(matches[0]["tax_usd"] + record["taxes"] * record["fx_to_usd"]) <= 0.01):
                     duplicates += 1
                     continue
-                raise ValueError("A matching execution already exists with different commission or transaction tax; review it before importing")
+                raise ValueError(f"{context}: a matching execution already exists with different or unknown commission or transaction tax; review it before importing")
             if len(matches) > 1:
-                raise ValueError("An Activity Statement execution matches multiple saved trades")
+                raise ValueError(f"{context}: an Activity Statement execution matches multiple saved trades")
             records.append(record)
         result = (BrokerIngestor(db, account, portfolio_id).ingest_many(
             records, "activity_statement", transaction=False) if records else None)
-        if result and result.execution_review:
-            raise ValueError("Some rows could not be safely matched. No Activity Statement trades were imported. "
-                             + '; '.join(result.issues))
+        if preview.get('forex_rows'):
+            forex_result = BrokerIngestor(db, account, portfolio_id).ingest_many(
+                preview['forex_rows'], 'activity_statement', transaction=False)
+            if forex_result.execution_blocking_review:
+                raise ActivityStatementImportError('FX cash conversions need review. No Activity Statement rows were imported.',
+                                                   '\n'.join(forex_result.issues))
+        if result and result.execution_blocking_review:
+            blocked = db.conn.execute("""SELECT r.source_id,r.status,r.issue FROM broker_source_records r
+                WHERE r.account_id=? AND r.source='activity_statement'
+                  AND r.status NOT IN ('complete','pending tax')""", (account,)).fetchall()
+            by_source = {record['source_id']: record for record in records}
+            descriptions = sorted(f"{by_source[row['source_id']]['symbol']} on "
+                            f"{by_source[row['source_id']]['trade_date']}: {row['issue'] or row['status']}"
+                            for row in blocked if row['source_id'] in by_source)
+            summary = '\n'.join(descriptions[:5])
+            if len(descriptions) > 5:
+                summary += f"\nAnd {len(descriptions) - 5:,} more rows; see Show Details."
+            raise ActivityStatementImportError(
+                f"{result.execution_blocking_review:,} execution rows could not be safely matched. "
+                f"No Activity Statement trades were imported.\n\n{summary}", '\n'.join(result.issues))
         changed = set(result.changed_position_ids if result else ())
         # Recheck against the current ledger/evidence. A preview never authorizes
         # topping up a partially imported or subsequently edited opening.
@@ -297,6 +417,12 @@ def import_activity_statement_trades(db, preview, portfolio_id=1):
         if changed:
             MatchingService(db, portfolio_id).rebuild_auto(changed, transaction=False)
         check_open_lots(db, account, portfolio_id)
+        pending_tax = db.conn.execute("""SELECT COUNT(DISTINCT t.id) FROM broker_source_records r
+            JOIN trades t ON t.id=r.trade_row_id WHERE r.account_id=?
+              AND r.source='activity_statement' AND t.portfolio_id=? AND t.tax_usd IS NULL""",
+            (account, portfolio_id)).fetchone()[0]
     return {"ingest": result, "duplicates": duplicates, "attempted": len(records),
             "transfers_added": transfers_added, "transfers_skipped": transfers_skipped,
-            "transfer_quantity": sum(float(g['quantity']) for g in transfers if not g['already_saved'])}
+            "pending_transfers": [g for g in transfers if g['status'] == 'pending'],
+            "pending_tax": pending_tax,
+            "transfer_quantity": sum(float(g['quantity']) for g in transfers if g['status'] == 'verified')}

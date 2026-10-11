@@ -7,10 +7,12 @@ from decimal import Decimal
 from PySide6.QtCore import QByteArray, QDate, QTimer, Qt
 from PySide6.QtWidgets import (QComboBox, QDateEdit, QFrame, QGridLayout,
                                QHeaderView, QHBoxLayout, QLabel,
-                               QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
+                               QPushButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
                                QWidget)
 
 from app.ui.themed_checkbox import ThemedCheckBox
+from app.finance.reconciliation import ReconciliationService
+from app.ui.reconciliation_ui import ReconciliationDialog, cash_summary
 from app.ui.table_ui import ReportTable, SortItem
 from app.ui.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
@@ -47,6 +49,7 @@ class CashMovementsTab(QWidget):
     def __init__(self, db, portfolio_id, parent=None):
         super().__init__(parent)
         self.db, self.portfolio_id = db, portfolio_id
+        self.reconciliation_service = ReconciliationService(db, portfolio_id)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
@@ -107,6 +110,17 @@ class CashMovementsTab(QWidget):
         self.status.setWordWrap(True)
         status_row.addWidget(self.status, 1)
         layout.addWidget(self.toolbar)
+        independent_row = QHBoxLayout()
+        self.independent_status = QLabel()
+        self.independent_status.setWordWrap(True)
+        independent_row.addWidget(self.independent_status, 1)
+        self.reconciliation_button = QPushButton('Details')
+        self.reconciliation_button.setObjectName('secondary')
+        self.reconciliation_button.setProperty('compactDetails', True)
+        self.reconciliation_button.setAccessibleName('Independent cash check details')
+        self.reconciliation_button.clicked.connect(self._show_reconciliation_details)
+        independent_row.addWidget(self.reconciliation_button)
+        layout.addLayout(independent_row)
         self._toolbar_stacked = None
 
         self.splitter = QSplitter(Qt.Horizontal)
@@ -130,6 +144,7 @@ class CashMovementsTab(QWidget):
         self.summary_scroll.setObjectName("cashBreakdownScroll")
         self.summary_scroll.setFrameShape(QFrame.NoFrame)
         self.summary_scroll.setWidgetResizable(True)
+        self.summary_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.summary_content = QWidget()
         self.summary_content.setObjectName("cashBreakdownContent")
@@ -155,6 +170,7 @@ class CashMovementsTab(QWidget):
         self.empty_status.setObjectName("hint")
         transactions_layout.addWidget(self.empty_status)
         self.table = ReportTable(0, 5)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.table.setHorizontalHeaderLabels(("Reported date", "Type", "Description", "Currency", "Amount"))
         self.table.configure_numbers(self.db, f"cash_transactions_decimals_{portfolio_id}",
                                      {4: (2, "plain")})
@@ -241,6 +257,8 @@ class CashMovementsTab(QWidget):
             self._setting_splitter = True
             try:
                 self.splitter.setOrientation(Qt.Vertical if splitter_stacked else Qt.Horizontal)
+                self.summary_pane.setMinimumHeight(85 if splitter_stacked else 120)
+                self.transactions_pane.setMinimumHeight(100 if splitter_stacked else 135)
                 self.transactions_pane.layout().setContentsMargins(
                     0 if splitter_stacked else 12, 12 if splitter_stacked else 0, 0, 0)
             finally:
@@ -432,7 +450,7 @@ class CashMovementsTab(QWidget):
                 message, state = f"Cash check: OK through {through} · non-USD cash held", "warning"
             else:
                 message, state = f"Cash check: OK through {through}", "ok"
-        self.status.setText(message)
+        self.status.setText(message.replace('Cash check:', 'Statement arithmetic:'))
         self.status.setToolTip(tooltip.strip())
         if self.status.property("cashState") != state:
             self.status.setProperty("cashState", state)
@@ -440,8 +458,15 @@ class CashMovementsTab(QWidget):
             self.status.style().polish(self.status)
 
     def refresh(self, *_):
+        self.independent_status.setText(cash_summary(self.reconciliation_service.cash_checks()))
+        self.independent_status.setToolTip('Independent checks cover exact saved statement intervals; '
+                                          'the activity date filter does not change those checks.')
         all_rows = self.db.cash_movement_rows(self.portfolio_id)
         reconciliations = self.db.cash_reconciliation_rows(self.portfolio_id)
+        account = self.db.setting('ib_account_id').strip()
+        if account:
+            all_rows = [row for row in all_rows if row['account_id'] == account]
+            reconciliations = [row for row in reconciliations if row['account_id'] == account]
         first, last = self._bounds()
         valid = first is None or first <= last
         currencies = self._visible_currencies(all_rows, reconciliations)
@@ -459,3 +484,13 @@ class CashMovementsTab(QWidget):
         empty = valid and not rows
         self.empty_status.setText("No cash transactions in this range." if empty else "")
         self.empty_status.setVisible(empty)
+
+    def _show_reconciliation_details(self):
+        dialog = getattr(self, '_reconciliation_dialog', None)
+        if dialog is None:
+            dialog = ReconciliationDialog(self.reconciliation_service.cash_checks, self)
+            self._reconciliation_dialog = dialog
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()

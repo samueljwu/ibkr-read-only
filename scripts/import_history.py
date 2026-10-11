@@ -38,12 +38,70 @@ def missing_cash_windows(db, first: date, last: date) -> list[tuple[str, str]]:
     return missing_windows(db, db.setting('ib_account_id'), 'cash', first, last, WINDOW_DAYS['cash'])
 
 
+def recheck_windows(db, account, source, first, last):
+    """Recheck selected dates, preserving Cash reports' original whole periods."""
+    if first > last:
+        return []
+    if source != 'cash':
+        return windows(first, last, WINDOW_DAYS[source])
+    saved = sorted(set(tuple(row) for row in covered_windows(db, account, 'cash')))
+    result, cursor = [], first
+    for start_text, end_text in saved:
+        start, end = date.fromisoformat(start_text), date.fromisoformat(end_text)
+        if end < first or start > last:
+            continue
+        if start < first or end > last:
+            raise ValueError(f'Recheck saved Cash reports requires the complete saved period '
+                             f'{start_text} to {end_text}. Include both dates in the selected range.')
+        if (end - start).days >= 365:
+            raise ValueError(f'The saved Cash period {start_text} to {end_text} exceeds '
+                             'IBKR’s 365-day request limit; review this report before rechecking.')
+        if start < cursor:
+            raise ValueError('Saved Cash periods overlap; review them before rechecking.')
+        result.extend(windows(cursor, start - timedelta(days=1), WINDOW_DAYS['cash']))
+        result.append((start_text, end_text))
+        cursor = end + timedelta(days=1)
+    result.extend(windows(cursor, last, WINDOW_DAYS['cash']))
+    return result
+
+
+def rechecked_window(text):
+    """Parse an internal resume marker, without treating saved coverage as refreshed."""
+    try:
+        source, first, last = text.split(':')
+        if source not in WINDOW_DAYS or date.fromisoformat(first) > date.fromisoformat(last):
+            raise ValueError
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('Invalid rechecked report window') from exc
+    return source, first, last
+
+
+def remaining_rechecks(spans, completed):
+    result = []
+    for first, last in spans:
+        cursor, end = date.fromisoformat(first), date.fromisoformat(last)
+        for done_first, done_last in sorted(completed):
+            start, stop = date.fromisoformat(done_first), date.fromisoformat(done_last)
+            if stop < cursor or start > end:
+                continue
+            if start > cursor:
+                result.append((cursor.isoformat(), (start - timedelta(days=1)).isoformat()))
+            cursor = max(cursor, stop + timedelta(days=1))
+        if cursor <= end:
+            result.append((cursor.isoformat(), end.isoformat()))
+    return result
+
+
 def main(argv=None, *, progress=None, should_pause=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=(*WINDOW_DAYS, "all"), required=True)
     parser.add_argument("--from-date", type=date.fromisoformat, required=True)
     parser.add_argument("--to-date", type=date.fromisoformat, required=True)
     parser.add_argument("--database", help="Optional path to an existing local portfolio SQLite file")
+    parser.add_argument("--refresh-saved-reports", action="store_true",
+                        help="Fetch selected saved reports again, including complete original Cash periods")
+    parser.add_argument("--rechecked-window", action="append", type=rechecked_window,
+                        default=[], help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.from_date > args.to_date or args.to_date >= date.today():
         parser.error("Choose an ordered date range ending before today")
@@ -68,8 +126,6 @@ def main(argv=None, *, progress=None, should_pause=None) -> int:
         opened = account_open_day(db, account)
         first_account = max(args.from_date, opened or args.from_date)
         first_eligible = max(first_account, earliest)
-        # An explicit retry may resume a broker pause. Startup never clears it.
-        db.set_metadata('ibkr_flex_paused', '')
         spans_by_source = {}
         for source in sources:
             if opened and args.from_date < opened and progress:
@@ -79,9 +135,19 @@ def main(argv=None, *, progress=None, should_pause=None) -> int:
                 progress("windows_outside_history", source,
                          [[first_account.isoformat(),
                            min(args.to_date, earliest - timedelta(days=1)).isoformat()]])
-            spans_by_source[source] = (
-                missing_windows(db, account, source, first_eligible, args.to_date, WINDOW_DAYS[source],
-                                report_through=date.today() - timedelta(days=1)))
+            if args.refresh_saved_reports:
+                try:
+                    spans = recheck_windows(db, account, source, first_eligible, args.to_date)
+                except ValueError as exc:
+                    parser.error(str(exc))
+                spans_by_source[source] = remaining_rechecks(spans, [
+                    (a, b) for label, a, b in args.rechecked_window if label == source])
+            else:
+                spans_by_source[source] = missing_windows(
+                    db, account, source, first_eligible, args.to_date, WINDOW_DAYS[source],
+                    report_through=date.today() - timedelta(days=1))
+        # Validate every source before changing the saved pause or report evidence.
+        db.set_metadata('ibkr_flex_paused', '')
         schedule = sorted(((source, span) for source in sources
                            for span in spans_by_source[source]),
                           key=lambda item: (item[1][1], item[1][0], -sources.index(item[0])),
@@ -93,7 +159,7 @@ def main(argv=None, *, progress=None, should_pause=None) -> int:
             db.backup()
         pacers = {source: FlexRequestPacer(REQUEST_PACING_SECONDS) for source in sources}
         for source, pacer in pacers.items():
-            pacer.reuse_cached = True
+            pacer.reuse_cached = not args.refresh_saved_reports
             pacer.should_pause = should_pause
             pacer.large_window_recovery = True
         paused = set()
@@ -196,7 +262,7 @@ def main(argv=None, *, progress=None, should_pause=None) -> int:
                 mark_unverified([(source, pair) for pair in pacer.unverified])
                 if progress:
                     progress('stopped_unavailable', source)
-                print(f'{source.title()} backfill paused after repeated unavailable reports. '
+                print(f'{source.title()} requests stopped after repeated unavailable reports from IBKR. '
                       'Other sources can continue; retry this source explicitly after checking report availability.')
                 continue
             if not any(label == source for label, _pair in schedule[index + 1:]) and progress:

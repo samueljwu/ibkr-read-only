@@ -75,7 +75,7 @@ class SettingsStatus(QWidget):
         self.history_section = SettingsSection("History & Flex")
         layout.addWidget(self.history_section)
         history = self.history_section.content_layout
-        history.addWidget(_label("Synced history", "settingsHeading"))
+        history.addWidget(_label("Saved history", "settingsHeading"))
         self.history_account = _label(name="settingsKey")
         history.addWidget(self.history_account)
         self.history_table = ReportTable(3, 3)
@@ -89,6 +89,9 @@ class SettingsStatus(QWidget):
         self.history_table.verticalHeader().setDefaultSectionSize(32)
         self.history_table.setFixedHeight(132)
         history.addWidget(self.history_table)
+        self.history_saved_note = _label(name="settingsKey")
+        self.history_saved_note.hide()
+        history.addWidget(self.history_saved_note)
         self.history_notice = _label(name="settingsWarning")
         history.addWidget(self.history_notice)
         self.history_details_button = self._toggle(history, "Show all date ranges", "Hide date ranges")
@@ -174,19 +177,48 @@ class SettingsStatus(QWidget):
         self.history_details_button.setVisible(bool(account))
         self.history_details.setText(format_synced_history(db, portfolio_id))
         notices = []
+        has_statement = False
+        extra_height = 0
         for index, row in enumerate(coverage):
             ranges = row["ranges"]
             saved = "; ".join(f"{first} to {last}" for first, last in ranges[:1])
             if len(ranges) > 1:
                 saved += f" (+{len(ranges) - 1} more)"
                 notices.append(f"{row['label']}: gaps between saved ranges.")
-            state = "Needs review" if row["review"] else "Gaps" if len(ranges) > 1 else "Saved" if ranges else "No history"
+            saved_lines = [saved] if saved else []
+            saved_tooltip = '\n'.join(f'{first} to {last}' for first, last in ranges)
+            if row['statement_dates']:
+                has_statement = True
+                saved_lines = [f'Flex: {saved}'] if saved else []
+                for kind, statement in row['statement_dates'].items():
+                    dates = statement['ranges']
+                    first, last = dates[0][0], dates[-1][1]
+                    label = 'CSV trades' if kind == 'trades' else 'CSV holdings'
+                    saved_lines.append(f'{label}: ' + (first if first == last else f'{first} to {last}'))
+                    saved_tooltip += '\n' + label + ': ' + '; '.join(
+                        first if first == last else f'{first} to {last}' for first, last in dates)
+                saved = '\n'.join(saved_lines)
+            state = ("Needs review" if row["review"] or row['review_issues'] else
+                     "Pending records" if row['pending_issues'] else
+                     "Gaps" if len(ranges) > 1 else "Saved" if ranges or row['statement_dates'] else "No history")
             if row["review"]:
-                notices.append(f"{row['label']}: broker records need review. See all date ranges.")
+                dates = '; '.join(f'{first} to {last}' for first, last in row['review'])
+                notices.append(f"{row['label']}: these report dates need review because they have no complete replacement: {dates}. "
+                               f"Recheck them with Import history, source {row['label']}. Saved records are kept.")
+            if row['review_issues'] or row['pending_issues']:
+                notices.append(f"{row['label']}: " + '\n'.join(row['review_issues'] + row['pending_issues'] + row['guidance']))
             for column, text in enumerate((row["label"], saved or "No synced history", state)):
                 item = SortItem(text)
-                item.setToolTip("\n".join(f"{first} to {last}" for first, last in ranges) if column == 1 else text)
+                item.setToolTip(saved_tooltip.strip() if column == 1 else
+                                '\n'.join(notices) if column == 2 and state in ('Needs review', 'Pending records') else text)
                 self.history_table.setItem(index, column, item)
+            height = max(32, len(saved_lines) * self.history_table.fontMetrics().height() + 12)
+            self.history_table.setRowHeight(index, height)
+            extra_height += height - 32
+        self.history_table.setFixedHeight(132 + extra_height)
+        self.history_saved_note.setText('CSV dates show saved trade records and holding snapshots. '
+                                        'The days between those records are not verified report coverage.')
+        self.history_saved_note.setVisible(has_statement)
         self.history_notice.setText("\n".join(notices))
         self.history_notice.setVisible(bool(notices))
         self.history_details.setVisible(bool(account) and self.history_details_button.isChecked())

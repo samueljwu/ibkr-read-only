@@ -26,7 +26,14 @@ def read_status(path: Path) -> dict:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    # Older workers called unavailable reports a pause, although there is no
+    # running import to resume. Preserve the report evidence and user pauses.
+    if value.get('state') == 'paused' and not value.get('paused_by_user') and (
+            value.get('stopped_after_unavailable') or value.get('paused_sources')):
+        value['state'] = 'completed_with_gaps'
+    return value
 
 
 def write_status(path: Path, value: dict) -> None:
@@ -63,6 +70,8 @@ def synced_history_coverage(db, portfolio_id: int) -> list[dict]:
     if not account:
         return []
     result = []
+    reconciliation = reconciliation_status(db, portfolio_id)
+    statement_dates = imported_statement_saved_dates(db, portfolio_id)
     for label, source in (("Trades", "flex"), ("Analytics", "flex_analytics"),
                           ("Cash", None)):
         if source:
@@ -78,9 +87,34 @@ def synced_history_coverage(db, portfolio_id: int) -> list[dict]:
             pending = db.conn.execute("""SELECT from_day,to_day FROM broker_sync_windows
                 WHERE account_id=? AND source=? AND status='review'""",
                 (account, source)).fetchall()
-        result.append({"label": label, "ranges": _merged_ranges(windows),
-                       "review": _merged_ranges(pending)})
+        ranges = _merged_ranges(windows)
+        # A review window records the outcome of that historical attempt.
+        # Later complete reports can replace it, even with different boundaries.
+        pending = [(first, last) for first, last in pending
+                   if not any(saved_first <= first and saved_last >= last
+                              for saved_first, saved_last in ranges)]
+        result.append({"label": label, "ranges": ranges,
+                       "statement_dates": statement_dates if label == 'Trades' else {},
+                       "review": _merged_ranges(pending),
+                       "review_issues": reconciliation['review_issues'] if label == 'Trades' else [],
+                       "pending_issues": reconciliation['pending_issues'] if label == 'Trades' else [],
+                       "guidance": reconciliation['reconciliation_guidance'] if label == 'Trades' else [],
+                       "details": reconciliation['reconciliation_details'] if label == 'Trades' else []})
     return result
+
+
+def imported_statement_saved_dates(db, portfolio_id: int) -> dict:
+    """Dates of saved CSV executions and holding snapshots, not report coverage."""
+    groups = {'trades': [], 'holdings': []}
+    for row in db.conn.execute('''SELECT DISTINCT t.id,t.trade_date,r.source
+            FROM broker_source_records r JOIN trades t ON t.id=r.trade_row_id
+            WHERE r.account_id=? AND t.portfolio_id=? AND
+              ((r.source='activity_statement' AND r.status IN ('complete','pending tax'))
+               OR (r.source='activity_statement_transfer_lot' AND r.status='complete'))''',
+            (db.setting('ib_account_id').strip(), portfolio_id)):
+        groups['trades' if row['source'] == 'activity_statement' else 'holdings'].append(row['trade_date'])
+    return {kind: {'count': len(days), 'ranges': _merged_ranges([(day, day) for day in set(days)])}
+            for kind, days in groups.items() if days}
 
 
 def imported_statement_trade_summary(db, portfolio_id: int) -> tuple[int, str, str]:
@@ -89,7 +123,7 @@ def imported_statement_trade_summary(db, portfolio_id: int) -> tuple[int, str, s
         return 0, "", ""
     row = db.conn.execute("""SELECT COUNT(DISTINCT t.id),MIN(t.trade_date),MAX(t.trade_date)
         FROM broker_source_records r JOIN trades t ON t.id=r.trade_row_id
-        WHERE r.account_id=? AND r.source='activity_statement' AND r.status='complete'
+        WHERE r.account_id=? AND r.source='activity_statement' AND r.status IN ('complete','pending tax')
           AND t.portfolio_id=?""", (account, portfolio_id)).fetchone()
     return int(row[0] or 0), row[1] or "", row[2] or ""
 
@@ -103,26 +137,42 @@ def imported_statement_transfer_summary(db, portfolio_id: int) -> tuple[int, flo
     return int(row[0]), float(row[1])
 
 
+def imported_statement_pending_tax_count(db, portfolio_id: int) -> int:
+    return db.conn.execute('''SELECT COUNT(DISTINCT t.id) FROM broker_source_records r
+        JOIN trades t ON t.id=r.trade_row_id WHERE r.account_id=?
+          AND r.source='activity_statement' AND t.portfolio_id=? AND t.tax_usd IS NULL''',
+        (db.setting('ib_account_id').strip(), portfolio_id)).fetchone()[0]
+
+
+def pending_statement_transfers(db, portfolio_id: int = 1) -> list[dict]:
+    records = []
+    for row in db.conn.execute('''SELECT raw_json FROM broker_source_records
+            WHERE account_id=? AND source='activity_statement_transfer' AND status='pending'
+            ORDER BY source_id''', (db.setting('ib_account_id').strip(),)):
+        raw = json.loads(row['raw_json'])
+        if raw.get('portfolio_id') == portfolio_id:
+            records.append(raw)
+    return records
+
+
 def reconciliation_status(db, portfolio_id: int = 1) -> dict:
     """Read current saved evidence, distinguishing missing inputs from failed links."""
     account = db.setting('ib_account_id').strip()
     groups = defaultdict(list)
-    purchases = set()
     saved_trades = set()
     transferred = set()
     for row in db.conn.execute('''SELECT p.con_id,t.trade_date,t.source,t.side FROM trades t
             JOIN positions p ON p.id=t.position_id
             WHERE t.portfolio_id=? ''', (portfolio_id,)):
         saved_trades.add((str(row['con_id']), row['trade_date'], row['side']))
-        if row['side'] == 'BUY':
-            purchases.add((str(row['con_id']), row['trade_date']))
         if row['side'] == 'BUY' and row['source'] in {'IBKR legacy transfer', 'IBKR statement transfer'}:
             transferred.add(str(row['con_id']))
     for row in db.conn.execute('''SELECT r.* FROM broker_source_records r
             LEFT JOIN trades t ON t.id=r.trade_row_id WHERE r.account_id=?
             AND (t.id IS NULL OR t.portfolio_id=?) AND
-            ((r.status='review' AND (r.source IN ('flex_closed_lot','flex_fee','flex_event')
+            ((r.status='review' AND (r.source IN ('flex','flex_closed_lot','flex_fee','flex_event')
                 OR (r.source='flex_open_lot' AND r.issue LIKE 'Broker%')))
+             OR (r.source='flex' AND r.status LIKE 'pending%')
              OR (r.status='pending' AND (r.source='flex_closed_lot'
                 OR (r.source='flex_open_lot' AND r.issue LIKE 'Waiting for earlier%'))))
             ORDER BY r.source,r.issue,r.source_id''', (account, portfolio_id)):
@@ -140,6 +190,19 @@ def reconciliation_status(db, portfolio_id: int = 1) -> dict:
             continue
         symbol = str(raw.get('symbol') or conid or 'Unknown instrument')
         groups[row['status'], row['source'], row['issue'], symbol].append(raw)
+    pending_transfers = pending_statement_transfers(db, portfolio_id)
+    for raw in pending_transfers:
+        groups['pending', 'activity_statement_transfer', raw['reason'], raw['symbol']].append(raw)
+    pending_tax = 0
+    for row in db.conn.execute('''SELECT DISTINCT t.id,t.ib_symbol,t.trade_date,p.con_id
+            FROM broker_source_records r JOIN trades t ON t.id=r.trade_row_id
+            JOIN positions p ON p.id=t.position_id WHERE r.account_id=?
+              AND r.source='activity_statement' AND t.portfolio_id=? AND t.tax_usd IS NULL''',
+            (account, portfolio_id)):
+        pending_tax += 1
+        groups['pending', 'activity_statement', 'Transaction tax is unknown; costs and net P&L are incomplete',
+               row['ib_symbol']].append(dict(symbol=row['ib_symbol'], con_id=row['con_id'],
+                                            dateTime=row['trade_date']))
 
     def day(value):
         value = str(value or '').split(';')[0]
@@ -150,26 +213,56 @@ def reconciliation_status(db, portfolio_id: int = 1) -> dict:
         except ValueError:
             return ''
 
+    def closing_side(raw):
+        try:
+            if float(raw.get('quantity', 0)) < 0:
+                return 'BUY'
+        except (ValueError, TypeError):
+            pass
+        return str(raw.get('buySell') or 'SELL').upper()
+
     result = dict(review_issues=[], pending_issues=[], reconciliation_guidance=[], reconciliation_details=[],
-                  reconciliation_actions=[])
+                  reconciliation_actions=[], statement_pending_tax=pending_tax,
+                  statement_pending_transfer_stocks=len(pending_transfers),
+                  statement_pending_transfer_quantity=sum(float(raw['quantity']) for raw in pending_transfers))
     actions = set()
     for (state, source, issue, symbol), records in groups.items():
         result['review_issues' if state == 'review' else 'pending_issues'].append(
             f'{symbol}: {issue} ({len(records)} records)')
-        sales = sorted({value for raw in records if (value := day(raw.get('dateTime')))})
+        sales = sorted({value for raw in records if (value := day(raw.get('dateTime') or raw.get('trade_date') or raw.get('tradeDate')))})
         opened = sorted({value for raw in records if (value := day(raw.get('openDateTime')))})
         snapshots = sorted({value for raw in records if (value := day(raw.get('reportDate')))})
         lower = issue.casefold()
-        if 'basis' in lower or 'allocation' in lower:
+        if source == 'activity_statement_transfer':
+            next_action = 'Medium - Import available broker lot history, then retry the same unchanged CSV.'
+            needed = 'Transferred quantities and original cost basis verified against complete broker lots.'
+            action = ('The transfer statement is saved as pending; no opening holding was invented. '
+                      'Holdings and affected P&L remain incomplete. Import available Trades history with '
+                      'Open Positions (Lots) and Trades (Closed Lots), then retry the same unchanged CSV. '
+                      'The app will use additional evidence and complete the saved transfer once.')
+        elif source == 'activity_statement' and 'tax' in lower:
+            next_action = 'Medium - The app will use available statement cost evidence; unresolved costs stay pending.'
+            needed = 'Ordinary opening Basis, explicit transaction tax, or Net Cash together with Proceeds and Commission.'
+            action = ('These older executions are saved. Transaction tax remains unknown, so affected net P&L '
+                      'is unavailable. The app uses ordinary opening Basis, Taxes/Tax, or Net Cash together with '
+                      'Proceeds and Commission when present; you do not need to edit the CSV. Repeating a statement without this '
+                      'evidence will keep the tax pending; missing tax is never assumed to be zero.')
+        elif source == 'flex' and state != 'review':
+            next_action = 'Medium - Check the Trades Flex query includes transaction tax, commission and FX rates, then recheck these dates.'
+            needed = 'Transaction tax, commission in USD and a verified currency conversion rate.'
+            action = ('Executions are saved, but transaction costs or currency conversion are incomplete. '
+                      'Check the Trades Flex query includes Taxes, IB Commission, Commission Currency and FX Rate to Base, '
+                      'then use Import history to recheck the listed trade dates. Affected net P&L remains unverified.')
+        elif 'basis' in lower or 'allocation' in lower:
             next_action = 'Medium - Copy diagnostics and share them for review.'
-            needed = 'A verified purchase-lot allocation and cost basis that agree with IBKR.'
+            needed = 'A verified opening-lot allocation and cost basis that agree with IBKR.'
             action = ('Broker lot data is saved, but its cost basis or allocation does not reconcile. '
                       'This needs app-side review; another statement is not known to be missing. '
                       'Copy diagnostics for investigation. Do not change purchase prices or lot matches to force agreement.')
-        elif 'sale execution' in lower:
-            needed = 'One closing execution linked to its broker Closed Lots (purchase dates, quantities and basis).'
+        elif 'sale execution' in lower or 'closing execution' in lower:
+            needed = 'One closing execution linked to its broker Closed Lots (opening dates, quantities and basis).'
             if all((str(raw.get('conid') or raw.get('con_id')), day(raw.get('dateTime')),
-                    str(raw.get('buySell') or 'SELL').upper()) in saved_trades
+                    closing_side(raw)) in saved_trades
                    for raw in records):
                 next_action = 'Medium - Copy diagnostics and share them for review.'
                 action = ('Trades on the listed dates and broker Closed Lots are already saved, '
@@ -179,13 +272,14 @@ def reconciliation_status(db, portfolio_id: int = 1) -> dict:
                 next_action = 'Medium - Check closing trade dates in Show Details; import any missing Trades.'
                 action = ('Some broker Closed Lots are not linked to one closing trade. If the trade is already saved, '
                           'this needs app-side matching; copy diagnostics. Otherwise import Trades for the closing dates in Details.')
-        elif 'earlier' in lower or 'purchase history' in lower:
-            needed = 'The original purchase or transferred opening, including quantity and original cost basis.'
+        elif 'earlier' in lower or 'purchase history' in lower or 'opening history' in lower:
+            needed = 'The original opening trade or transferred holding, including quantity and original cost basis.'
             missing = []
             for raw in records:
                 conid = str(raw.get('conid') or raw.get('con_id') or '')
                 bought = day(raw.get('openDateTime'))
-                if bought and (conid, bought) not in purchases and conid not in transferred:
+                opening_side = 'SELL' if closing_side(raw) == 'BUY' else 'BUY'
+                if bought and (conid, bought, opening_side) not in saved_trades and conid not in transferred:
                     missing.append(bought)
             if missing:
                 next_action = 'Medium - Import missing purchases/openings; see dates and required CSV in Show Details.'
@@ -200,7 +294,7 @@ def reconciliation_status(db, portfolio_id: int = 1) -> dict:
                           f'Current Flex range starts {cutoff}.')
             else:
                 next_action = 'Medium - Copy diagnostics and share them for review.'
-                action = ('Earlier purchases or transferred openings are not linked to these broker lots. '
+                action = ('Earlier opening trades or transferred holdings are not linked to these broker lots. '
                           'Saved holdings may already contain the needed records; copy diagnostics for app-side review '
                           'before downloading another statement.')
         else:
@@ -216,9 +310,12 @@ def reconciliation_status(db, portfolio_id: int = 1) -> dict:
         if sales:
             details.append(('Closing trade dates: ' if source == 'flex_closed_lot' else 'Trade dates: ') + ', '.join(sales))
         if opened:
-            details.append('Original purchase dates: ' + ', '.join(opened))
+            details.append('Original opening dates: ' + ', '.join(opened))
         if snapshots:
             details.append('Position report dates: ' + ', '.join(snapshots))
+        if source == 'activity_statement_transfer':
+            details.append(f"Pending transferred shares: {sum(float(raw['quantity']) for raw in records):g}")
+            details.append('Statement periods: ' + ', '.join(f"{raw['period'][0]} to {raw['period'][1]}" for raw in records))
         result['reconciliation_details'].append('\n'.join(details))
     return result
 
@@ -246,15 +343,33 @@ def format_synced_history(db, portfolio_id: int) -> str:
     for row in synced_history_coverage(db, portfolio_id):
         ranges = "; ".join(f"{first} to {last}" for first, last in row["ranges"])
         lines.append(f"{row['label']}: {ranges or 'No synced history recorded'}")
+        for kind, saved in row['statement_dates'].items():
+            dates = '; '.join(first if first == last else f'{first} to {last}'
+                              for first, last in saved['ranges'])
+            label = 'CSV trade dates' if kind == 'trades' else 'CSV holding snapshot dates'
+            lines.append(f"{row['label']} — {label}: {dates}")
         if row["review"]:
             ranges = "; ".join(f"{first} to {last}" for first, last in row["review"])
             lines.append(f"{row['label']} needs review: {ranges}")
+            lines.append('These report dates have no complete replacement. Recheck these dates with Import history, source '
+                         + row['label'] + '. Saved records are kept.')
+        if row['review_issues'] or row['pending_issues']:
+            lines.extend([*row['review_issues'], *row['pending_issues'], *row['guidance'], *row['details']])
     count, first, last = imported_statement_trade_summary(db, portfolio_id)
     if count:
         lines.append(f"Older Activity Statement executions: {count:,} individual trades ({first} to {last}); this is not continuous date coverage.")
+        pending_tax = imported_statement_pending_tax_count(db, portfolio_id)
+        if pending_tax:
+            lines.append(f"Older executions with unknown transaction tax: {pending_tax:,}; costs and affected net P&L are incomplete. "
+                         "The app uses available opening Basis, tax or Net Cash evidence without editing the CSV.")
     stocks, shares = imported_statement_transfer_summary(db, portfolio_id)
     if stocks:
         lines.append(f"Activity Statement transferred holdings: {stocks:,} stocks ({shares:g} shares); quantity and basis verified from broker lots.")
+    pending = pending_statement_transfers(db, portfolio_id)
+    if pending:
+        shares = sum(float(raw['quantity']) for raw in pending)
+        lines.append(f"Activity Statement transfers pending: {len(pending):,} stocks ({shares:g} shares); holdings and affected P&L are incomplete.")
+        lines.extend(f"{raw['symbol']}: {raw['quantity']} shares pending — {raw['reason']}" for raw in pending)
     lines.append("Separate ranges indicate gaps in Flex coverage; Activity Statement records do not fill continuous Flex coverage.")
     return "\n".join(lines)
 
@@ -274,16 +389,21 @@ def format_history_summary(status: dict) -> tuple[str, str]:
         parts = ['Saved reports are kept.', 'High - Open Show Details, fix the reported error, then retry.']
     elif state == "paused":
         title = "History import paused"
-        parts = ['Saved reports are kept. Select Resume import when ready.']
+        parts = (['Saved reports are kept. Select Resume import when ready.'] if status.get('paused_by_user') else
+                 ['Saved reports are kept. Open Show Details to check why requests stopped before retrying Import history.'])
     elif state in ("starting", "running"):
         title = "History import in progress"
         parts = ["The current report and progress are shown in Details."]
     elif any((status.get('unavailable_windows') or {}).values()) or any((status.get('unverified_windows') or {}).values()) or (
             state == 'completed_with_gaps' and not any(outside.values())):
         title = "History imported with gaps"
-        parts = ['Saved reports are kept.', 'Medium - Open Show Details to check missing dates before retrying.']
+        parts = (['IBKR repeatedly did not provide reports for some requested dates. Available reports were saved.',
+                  'Medium - Open Show Details to check the missing dates and affected sources. Check report availability in IBKR, then retry Import history.']
+                 if status.get('stopped_after_unavailable') else
+                 ['Saved reports are kept.', 'Medium - Open Show Details to check missing dates before retrying.'])
     elif review or pending:
-        title = 'History saved; some lots need review'
+        title = ('History saved; transaction costs are incomplete' if status.get('statement_pending_tax')
+                 and not review else 'History saved; some lots need review')
         parts = []
     elif any(outside.values()) and not has_saved:
         title = 'Older dates are outside Flex'
@@ -299,7 +419,9 @@ def format_history_summary(status: dict) -> tuple[str, str]:
     trade_outside = _merged_ranges(outside.get("trades") or [])
     if trade_outside:
         if status.get('statement_executions') or status.get('statement_transfer_stocks'):
-            parts.append('Low - Older statement records are already saved. No need to import the same statement again.')
+            parts.append('Low - Older executions are saved; the app uses available cost evidence and unresolved costs stay pending.'
+                         if status.get('statement_pending_tax') else
+                         'Low - Older statement records are already saved. No need to import the same statement again.')
         else:
             ranges = '; '.join(f'{first} to {last}' for first, last in trade_outside)
             parts.append(f'Medium - Import older trades… for {ranges}; see the CSV instructions in Show Details.')
@@ -323,7 +445,12 @@ def format_history_details(status: dict) -> str:
                'paused': 'History backfill paused; imported data was saved.',
                "failed": "Import failed.",
                "running": "Import is running.", "starting": "Import is starting."}.get(state, "Import status unknown.")
-    if state == "completed_with_gaps" and not has_saved:
+    if state == 'completed_with_pending_history' and status.get('statement_pending_tax'):
+        heading = 'Saved history has executions with unknown transaction tax; affected net P&L is incomplete.'
+    if state == 'completed_with_pending_history' and status.get('statement_pending_transfer_stocks'):
+        heading = 'Saved statement transfers are pending verification; holdings and affected P&L are incomplete.'
+    if state == "completed_with_gaps" and not has_saved and any((status.get('outside_history_windows') or {}).values()) and not (
+            any((status.get('unavailable_windows') or {}).values()) or any((status.get('unverified_windows') or {}).values())):
         heading = "The requested dates are outside Flex availability; no history was imported."
     if status.get('pause_requested') and state in ('starting', 'running'):
         heading = 'Pausing after the current report is saved.'
@@ -409,8 +536,10 @@ def format_history_details(status: dict) -> str:
                     f"{first} to {last}" for first, last in _merged_ranges(spans)))
     if status.get("stopped_after_unavailable"):
         paused = ', '.join(source.title() for source in status.get('paused_sources') or [])
-        lines.extend(("", f"Paused {paused or 'the affected source'} after repeated unavailable reports. "
-                      "Other sources can continue. A listed unavailable window may still contain some available days."))
+        lines.extend(("", f"Stopped requesting {paused or 'the affected source'} after repeated unavailable reports from IBKR. "
+                      "Available reports were saved and other sources continued. This was not a user pause. "
+                      "Check the missing dates and report availability in IBKR, then retry Import history for the affected source. "
+                      "A listed unavailable window may still contain some available days."))
     failures = status.get('failed_windows') or {}
     if failures:
         lines.extend(('', 'Failed report windows (not saved):'))
@@ -432,8 +561,8 @@ def format_history_details(status: dict) -> str:
                       'These records need investigation in the app; importing the same dates again is unlikely to fix them.',
                       *status['review_issues']))
     if status.get('pending_issues'):
-        lines.extend(('', 'Lots waiting for earlier trades:',
-                      'This affects lot matching and related P&L. The count does not prove all purchases are outside Flex history; some executions may already be saved but need app-side matching. Do not repeat the full import based on this warning alone.',
+        lines.extend(('', 'Pending history or transaction costs:',
+                      'This affects lot matching or related net P&L. Check the evidence needed below. The count does not prove purchases are outside Flex history; executions may already be saved. Repeating an import without the missing evidence will not resolve these records.',
                       *status['pending_issues']))
     if status.get('reconciliation_guidance'):
         lines.extend(('', 'What is needed and what to do next:', *status['reconciliation_guidance'],

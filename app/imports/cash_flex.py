@@ -175,6 +175,10 @@ def parse_cash_flex(xml, account_id, first, last):
             "kind": kind, "currency": code, "amount": str(amount),
             "description": node.get("description") or kind,
             "tradeID": node.get('tradeID') or '',
+            "report_component": field if kind in ('Credit interest', 'Debit interest', 'Stock lending interest') else
+                {'Deposit': 'depositWithdrawals', 'Withdrawal': 'depositWithdrawals', 'Dividend': 'dividends',
+                 'Payment in lieu': 'paymentInLieu', 'Withholding tax': 'withholdingTax',
+                 'Other fee': 'otherFees'}.get(kind),
         })
 
     bridges = []
@@ -231,6 +235,8 @@ def parse_cash_flex(xml, account_id, first, last):
             "trade_tax": str(trade_tax),
             "nontrade_cash": str(nontrade), "closing_cash": str(closing),
             "difference": str(difference), "movements": rows,
+            "report_fields": dict(node.attrib), "accounting_basis": "trade-date",
+            "transaction_taxes": tax_rows,
         })
     return bridges
 
@@ -302,6 +308,19 @@ def run_cash_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=None,
                     db.conn.execute("DELETE FROM broker_source_records WHERE account_id=? AND source='flex_fee' AND source_id=?",
                                     (account_id, key))
                 for bridge in bridges:
+                    # Retain native report components in existing source storage.
+                    # No new encrypted schema, and exact-period replay replaces evidence.
+                    evidence = {"portfolio_id": portfolio_id, "period_from": first, "period_to": last,
+                                "currency": bridge['currency'], "accounting_basis": bridge['accounting_basis'],
+                                "report_fields": bridge['report_fields'], "movements": bridge['movements'],
+                                "transaction_taxes": bridge['transaction_taxes'], "source_hash": digest}
+                    evidence_id = f"{portfolio_id}:{first}:{last}:{bridge['currency']}"
+                    db.conn.execute('''INSERT INTO broker_source_records
+                        (account_id,source,source_id,status,issue,raw_json)
+                        VALUES (?,'cash_report',?,'complete','',?)
+                        ON CONFLICT(account_id,source,source_id) DO UPDATE SET
+                        raw_json=excluded.raw_json,seen_at=CURRENT_TIMESTAMP''',
+                        (account_id, evidence_id, json.dumps(evidence, sort_keys=True)))
                     prior = db.conn.execute("""SELECT closing_cash,period_to FROM cash_reconciliations
                         WHERE portfolio_id=? AND account_id=? AND currency=? AND period_to<?
                         ORDER BY period_to DESC LIMIT 1""",
@@ -319,7 +338,7 @@ def run_cash_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=None,
                         raise CashReconciliationError(f"Cash Flex {bridge['currency']} closing does not match next opening")
                     for row in bridge["movements"]:
                         if row['kind'] == 'Commission adjustment':
-                            raw = {**row, 'source_hash': digest}
+                            raw = {**row, 'source_hash': digest, 'portfolio_id': portfolio_id}
                             db.conn.execute('''INSERT INTO broker_source_records
                                 (account_id,source,source_id,status,issue,raw_json)
                                 VALUES (?,'flex_fee',?,'review','Waiting for source execution',?)

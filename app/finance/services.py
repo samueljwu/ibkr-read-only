@@ -4,6 +4,7 @@ from collections import defaultdict
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import math
 from zoneinfo import ZoneInfo
 
 from app.finance.trade_costs import trade_cost_usd
@@ -82,6 +83,38 @@ class MatchingService:
                 t["multiplier"] == sell["multiplier"] and remaining[t["id"]] > 1e-9]
         buys.sort(key=lambda t: (t["trade_date"], t.get("executed_at") or "", t["id"]))
         return [(buy, remaining[buy["id"]]) for buy in buys]
+
+    def match_closed_short(self, cover_id, allocations, *, transaction=True):
+        """Apply validated broker short lots while keeping both endpoints protected."""
+        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
+        cover = trades.get(cover_id)
+        if not cover or cover['side'] != 'BUY':
+            raise ValueError('Short closing BUY is outside this portfolio')
+        remaining = self.remaining()
+        allocations = [(int(key), float(qty)) for key, qty in allocations]
+        if (any(not math.isfinite(qty) or qty <= 0 for _, qty in allocations)
+                or len({key for key, _ in allocations}) != len(allocations)):
+            raise ValueError('Short opening lots must be unique')
+        if sum(qty for _, qty in allocations) > remaining[cover_id] + 1e-9:
+            raise ValueError('Matched quantity exceeds remaining closing BUY quantity')
+        for key, qty in allocations:
+            opening = trades.get(key)
+            if (not opening or opening['side'] != 'SELL' or qty <= 0 or
+                    opening['position_id'] != cover['position_id'] or
+                    opening['security_type'] != cover['security_type'] or
+                    valid_multiplier(opening['multiplier']) is None or
+                    opening['multiplier'] != cover['multiplier'] or
+                    not opening['currency'] or opening['currency'] != cover['currency']):
+                raise ValueError('Short opening SELL must have the same instrument and currency')
+            if not self._precedes(opening, cover):
+                raise ValueError('Short opening SELL must precede closing BUY')
+            if qty > remaining[key] + 1e-9:
+                raise ValueError('Matched quantity exceeds remaining opening SELL quantity')
+        with self.db.conn if transaction else nullcontext():
+            self.db.conn.executemany('''INSERT INTO trade_matches
+                (buy_trade_id,sell_trade_id,matched_qty,origin)
+                VALUES (?,?,?,'broker_closed_lot_short')''',
+                [(cover_id, key, qty) for key, qty in allocations])
 
     def auto_fifo(self, sell_ids=None):
         trades = [t for t in self.db.rows("trades", self.portfolio_id) if t["side"] == "SELL"]
@@ -619,7 +652,7 @@ class PortfolioService:
                 continue
             qty = match["matched_qty"]
             row = self._base_lot(buy, qty)
-            short = match["origin"] == "auto_short"
+            short = match["origin"] in {"auto_short", "broker_closed_lot_short"}
             row["lot_state"] = "Closed short" if short else "Closed"
             row.update({"match_id": match["match_id"], "sell_trade_id": sell["id"], "sell_date": sell["trade_date"],
                         "sell_qty": qty, "sell_price": sell["price"], "sell_currency": sell["currency"],

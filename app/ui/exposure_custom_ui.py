@@ -1,7 +1,7 @@
 """Editor for named, underlying-based exposure categories."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox,
                                QDialogButtonBox, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QMessageBox, QPushButton,
                                QTableWidgetItem, QVBoxLayout)
@@ -10,9 +10,10 @@ from app.finance.exposure import (add_custom_set, custom_labels, custom_sets,
                           delete_custom_set, exposure_snapshot, rename_custom_set,
                           set_custom_label)
 from app.ui.table_ui import InputReportTable
+from app.ui.dialog_ui import ResizableDialog
 
 
-class CustomSetDialog(QDialog):
+class CustomSetDialog(ResizableDialog):
     """Edit one category per underlying; options share that assignment."""
 
     def __init__(self, panel, set_name):

@@ -119,7 +119,7 @@ The script never commits, pushes, tags, publishes, or installs the app. It:
    are copied. Checks selected text for likely account IDs and embedded tokens.
 2. Records source file hashes, the aggregate source hash, base Git revision,
    dirty state, channel and version. Uncommitted builds are visibly local
-   candidates: `1.0.1+local.<hash>` or `1.0.1-dev+local.<hash>`.
+   candidates: `1.0.2+local.<hash>` or `1.0.2-dev+local.<hash>`.
 3. Builds a PyInstaller one-folder app, with all four workers using that same
    executable and an explicit database path. Includes timezone data and runtime
    package metadata and available licence files, and creates an exact payload
@@ -186,15 +186,15 @@ broker import. Offline synthetic checks alone do not satisfy those live gates.
 Use reviewed `main` and short-lived `codex/...` development branches. Keep
 Windows v1 separate from the existing future macOS Kanban cards. Formal stable
 builds use `--release`; the script requires a clean committed checkout and
-`v1.0.1` pointing at its exact source commit. Update `BASE_VERSION` in
+`v1.0.2` pointing at its exact source commit. Update `BASE_VERSION` in
 `app/platform/runtime.py` for subsequent releases. Never reuse a published tag for changed
 source. Published Dev prereleases use `--channel dev --dev-release N` with a
 positive sequence number `N`, a clean committed checkout, and an exact
-`v1.0.1-dev.N` tag. Stable assets are named
-`PortfolioMonitor-1.0.1-windows-x64-setup.exe`; Dev assets are named
-`PortfolioMonitorDev-1.0.1-dev.N-windows-x64-setup.exe`. The build also emits
+`v1.0.2-dev.N` tag. Stable assets are named
+`PortfolioMonitor-1.0.2-windows-x64-setup.exe`; Dev assets are named
+`PortfolioMonitorDev-1.0.2-dev.N-windows-x64-setup.exe`. The build also emits
 matching `.manifest.json` and `.sha256` files. Stable and local executable
-numeric versions use `1.0.1.0`; published Dev sequence `N` uses `1.0.1.N`
+numeric versions use `1.0.2.0`; published Dev sequence `N` uses `1.0.2.N`
 for downgrade protection. A local candidate or Dev prerelease does not become
 a formal stable release.
 

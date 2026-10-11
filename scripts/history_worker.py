@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from argparse import ArgumentTypeError
 from datetime import datetime
 from io import StringIO
 import os
@@ -13,7 +14,7 @@ import time
 from app.sync.history_status import pause_request_path, read_status, write_status
 from app.platform.diagnostics import configure_diagnostics
 from app.imports.import_contract import CONTRACT_VERSION, COMPLETENESS_LIMIT
-from scripts.import_history import main as import_history
+from scripts.import_history import main as import_history, rechecked_window
 
 
 def main(argv=None) -> int:
@@ -22,7 +23,17 @@ def main(argv=None) -> int:
         return 2
     path = Path(argv[1])
     status = read_status(path)
+    refreshed = {}
+    for index, value in enumerate(argv[2:], 2):
+        if value == '--rechecked-window' and index + 1 < len(argv):
+            try:
+                source, first, last = rechecked_window(argv[index + 1])
+                refreshed.setdefault(source, []).append([first, last])
+            except ArgumentTypeError:
+                pass  # The import argument parser reports invalid markers below.
     status.update(state="running", pid=os.getpid(), pause_supported=True, paused_by_user=False, started_sources=[],
+                  refresh_saved_reports='--refresh-saved-reports' in argv,
+                  rechecked_windows=refreshed,
                   support_contract_version=CONTRACT_VERSION,
                   result_scope="validated_report_windows", complete_result=False,
                   completeness_limit=COMPLETENESS_LIMIT,
@@ -72,6 +83,8 @@ def main(argv=None) -> int:
             status["current_window"] = [first, last]
         elif event == "window_complete":
             status["completed_windows"].setdefault(source, []).append([first, last])
+            if status['refresh_saved_reports']:
+                status['rechecked_windows'].setdefault(source, []).append([first, last])
             status["current_window"] = None
         elif event == "window_unavailable":
             status["unavailable_windows"].setdefault(source, []).append([first, last])
@@ -124,8 +137,8 @@ def main(argv=None) -> int:
     finally:
         gaps = any(status[key] for key in ("unavailable_windows", "unverified_windows",
                                            "outside_history_windows"))
-        status.update(state='paused' if code == 0 and (status['paused_by_user'] or status['paused_sources']) else
-                      "completed_with_gaps" if code == 0 and gaps else
+        status.update(state='paused' if code == 0 and status['paused_by_user'] else
+                      "completed_with_gaps" if code == 0 and (gaps or status['paused_sources']) else
                       'completed_with_review' if code == 0 and status['review_issues'] else
                       'completed_with_pending_history' if code == 0 and status['pending_issues'] else
                       "completed" if code == 0 else "failed", pid=None,

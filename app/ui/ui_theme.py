@@ -109,16 +109,22 @@ QWidget#calcsCashPanel { background: ${surface_alt}; border: 1px solid ${line}; 
 QLabel#calcsCashTitle { font-weight: 600; font-size: 14px; }
 QLabel#calcsFieldLabel { color: ${muted}; font-size: 12px; }
 QLabel#calcsCaseResult { color: ${muted}; font-size: 12px; }
-QPushButton {
+QPushButton, QToolButton#secondary {
     background: ${accent}; color: ${surface}; border: 1px solid ${accent};
     border-radius: 4px; padding: 5px 6px; font-weight: 600; min-height: 19px;
 }
-QPushButton:hover { background: ${accent_hover}; border-color: ${accent_hover}; }
-QPushButton#secondary, QPushButton#themeToggle {
+QPushButton:hover, QToolButton#secondary:hover { background: ${accent_hover}; border-color: ${accent_hover}; }
+QPushButton#secondary, QPushButton#themeToggle, QToolButton#secondary {
     background: ${surface}; color: ${text}; border-color: ${line};
 }
-QPushButton#secondary:hover, QPushButton#themeToggle:hover {
+QPushButton#secondary:hover, QPushButton#themeToggle:hover, QToolButton#secondary:hover {
     background: ${accent_soft}; border-color: ${accent};
+}
+QToolButton#secondary:checked { background: ${selection}; border-color: ${accent}; }
+QToolButton#secondary:focus { border-color: ${accent}; }
+QToolButton#secondary:disabled { color: ${muted}; background: ${surface_alt}; border-color: ${line}; }
+QPushButton#secondary[compactDetails="true"] {
+    min-height: 16px; max-height: 16px; padding: 2px 6px;
 }
 QPushButton#secondary[rebalanceRemove="true"] {
     border-radius: 2px; padding: 1px 4px; min-height: 0;
@@ -195,6 +201,13 @@ QTableView {
 QTableView::item { border-bottom: 1px solid ${line}; padding: 0px 4px; }
 QTableView::item:selected { background: ${selection}; color: ${selection_text}; }
 QTableView::item:focus { border: 1px solid ${accent}; }
+QTreeWidget#reconciliationChecks, QTextBrowser#reconciliationDetails {
+    background: ${surface}; color: ${text}; border: 1px solid ${line};
+    selection-background-color: ${selection}; selection-color: ${selection_text};
+}
+QTreeWidget#reconciliationChecks::item { padding: 3px 4px; }
+QTreeWidget#reconciliationChecks::item:selected { background: ${selection}; color: ${selection_text}; }
+QTreeWidget#reconciliationChecks::item:focus { border: 1px solid ${accent}; }
 QHeaderView { background: ${surface_alt}; }
 QHeaderView::section {
     background: ${surface_alt}; color: ${muted}; padding: 6px;
