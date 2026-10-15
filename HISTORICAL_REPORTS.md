@@ -1,306 +1,74 @@
-# IBKR history setup and support
+# Historical IBKR reports
 
-Create three **Activity Flex Queries**: **Trades**, **Analytics** and **Cash**. The app supports one **USD base account** per database.
+Create **three separate Activity Flex Queries** in IBKR Client Portal under **Performance & Reports → Flex Queries**. Use XML output, select only the account entered in the app, include every currency and instrument, and leave symbol filters empty. The app requests dated reports directly from IBKR Flex Web Service; no report file is uploaded to another service. Enter each query ID and apply the account in **Settings**, then paste the token into the blank password field and click **Save Flex token**. The token is bound to that account in the OS credential store, and the field clears after saving. Repeating this replaces the saved token; the app shows configured status without revealing the token.
 
-## 1. Open Flex Queries
-
-1. Sign in to IBKR Client Portal.
-2. Click **Performance & Reports > Flex Queries**. Another route is **Menu > Reporting > Flex Queries**.
-3. Find **Activity Flex Query** and click its **+** button.
-
-[IBKR's query setup instructions](https://www.ibkrguides.com/clientportal/performanceandstatements/activityflex.htm)
-
-## 2. Create Trades
-
-1. Enter **Trades** in **Query Name**.
-2. Click **Account Information**. Tick **Account ID**, **Currency** and **Date Opened**, then click **Save**. Leave the other fields unticked. **Currency** means your account's base currency.
-3. Click **Trades**. Click **Select All** for the fields. Under **Level of Detail**, select **Executions** and **Closed Lots**. Click **Save**.
-4. Click **Open Positions**. Click **Select All** for the fields, select both **Summary** and **Lot** detail, then **Save**.
-5. Click **Corporate Actions > Select All > Save**.
-6. Click **Option Exercises, Assignments and Expirations > Select All > Save**.
-7. Click **Transfers > Select All > Save**.
-8. Follow **Save each query** below before creating Analytics.
-
-Use **Select All** inside these section pop-ups, not across the whole page. Other sections can stay unselected. The detail choices are separate from the field checkboxes.
-
-[Account Information fields](https://www.ibkrguides.com/reportingreference/reportguide/account%20information%20activity%20flex.htm) | [Trades detail](https://www.ibkrguides.com/reportingreference/reportguide/tradesfq.htm) | [Open Positions detail](https://www.ibkrguides.com/reportingreference/reportguide/open%20positionsfq.htm)
-
-## 3. Create Analytics
-
-1. Return to **Flex Queries**, click **+** under **Activity Flex Query**, and name it **Analytics**.
-2. Click **Account Information**. Tick **Account ID**, **Currency** and **Date Opened**, then **Save**.
-3. Click **Net Asset Value (NAV) in Base > Select All > Save**. This includes **Report Date**, **Total** and **Cash**.
-4. Click **Cash Transactions > Select All > Save**.
-5. Click **Transfers > Select All > Save**.
-6. Follow **Save each query** below. Set **Breakout by Day** to **Yes** for Analytics.
-
-The NAV section may also be labelled **Net Asset Value (NAV) Summary in Base**. It supplies daily account values. [IBKR NAV fields](https://www.ibkrguides.com/reportingreference/reportguide/net%20asset%20value%20(nav)%20summary%20in%20base.htm)
-
-## 4. Create Cash
-
-1. Return to **Flex Queries**, click **+** under **Activity Flex Query**, and name it **Cash**.
-2. Click **Account Information**. Tick **Account ID**, **Currency** and **Date Opened**, then **Save**.
-3. Click **Cash Report > Select All > Save**.
-4. Click **Cash Transactions > Select All > Save**. Keep every transaction type included if a type filter is offered.
-5. Follow **Save each query** below. Set **Breakout by Day** to **No** for Cash.
-
-Commission adjustments come through **Cash Transactions**; you do not need a separate Commission Details query. [IBKR explanation](https://www.interactivebrokers.com/en/?f=%2Fen%2Faccounts%2FreleaseNotes%2FStatement_Notes_Feb2013.php)
-
-## 5. Save each query
-
-Do this for **Trades**, **Analytics** and **Cash**:
-
-1. Leave **Filters > Symbols** empty.
-2. Under **Delivery Configuration**, click **Accounts > Add/Edit Accounts** and select only your app's account. Set **Format** to **XML** and **Period** to **Last 30 Calendar Days**. The app chooses its own dates when importing history.
-3. Under **General Configuration**, use these settings:
-
-   | Setting | Choose |
-   | --- | --- |
-   | Date Format | **yyyyMMdd** |
-   | Time Format | **HHmmss** |
-   | Date/Time Separator | **;** (semicolon) |
-   | Include Currency Rates | **Yes** |
-   | Display Account Alias in Place of Account ID | **No** |
-   | Breakout by Day | **Analytics: Yes. Trades and Cash: No.** |
-
-4. Click **Continue > Create**. Note the saved query's **Query ID**; reopen its details if needed.
-
-[IBKR configuration reference](https://www.ibkrguides.com/reportingreference/reportguide/delivery%20configuration%20and%20general%20configuration.htm)
-
-## 6. Connect the app
-
-1. In Client Portal, find **Flex Web Service Configuration** and click its **gear**.
-2. Turn **Flex Web Service** on. Copy the token shown. If it is expired, use **Generate A New Token**.
-3. In the app, open **Settings > History & Flex**. Paste each Query ID into its matching **Trades**, **Analytics** or **Cash** field.
-4. Click **Save settings**, then **Save Flex token**, and paste the token.
-5. Click **Import history**. First try a short past range with known activity; then import the older range you need.
-
-[IBKR token setup](https://www.ibkrguides.com/clientportal/performanceandstatements/flex-web-service.htm)
-
-Use **Sync IBKR** for later updates. **Pause import** saves the current report before stopping; **Resume import** skips history already saved.
-
-If dates are missing, open **Settings > History & Flex > Show all date ranges**. IBKR may not supply older periods. Use **Import older trades** for an older Activity Statement CSV; follow its instructions. This adds trades and verified transferred holdings only.
-
-## Importer support contract v1
-
-The app handles one selected account per portfolio database and never places
-orders. An import finishing successfully means its validated report windows
-were saved. It does **not** prove a complete account, full lifetime history or
-tax return. Worker results explicitly record `complete_result=false` until
-the account, query and lifecycle acceptance gates below are implemented and
-verified. Old internal `complete` coverage/status values are scoped to that
-report source/window; do not promote them to a whole-account claim.
-
-### Defined scope
-
-| Dimension | v1 scope | Outside the complete-result contract |
+| Query / Settings field | Required sections and fields | Used for |
 | --- | --- | --- |
-| Account structure | One Individual (Single) account; customer Individual or Joint; Cash or ordinary Margin | Advisor/broker/institution masters, consolidated/model/linked multi-account reports, Trust/IRA/company/fund structures and Portfolio Margin |
-| Environment | Live account, or separate paper account for testing | Paper tests do not prove live statement correctness; never mix their IDs |
-| Base currency | Explicit USD evidence in broker reports | Non-USD, absent/conflicting base declarations; do not infer from account ID or traded currency |
-| Instruments | Stocks/ETFs as STK; individually identified equity/index OPT contracts; ordinary BOND executions with verified multiplier/quote convention | CFDs, futures options, crypto, funds with unknown pricing, combos/bags, commodities, complex bonds/TIPS and unsupported corporate actions |
-| Futures | FUT executions can be stored/previewed with explicit multiplier | Futures cash settlement/variation margin and complete performance are outside v1; a parsed execution does not imply full lifecycle support |
-| Native currencies | Currency codes carried by the report; USD values require a verified positive FX rate for each relevant date/fee | No claim that all traded currencies are verified; missing FX/fees/taxes/basis remain provisional |
-| Activity Flex | XML Activity reports; executions/closed lots/open lots and configured event sections; dated daily Analytics; whole-period Cash with successful arithmetic reconciliation | Trade Confirmation Flex, PDF, HTML, summarized/order-level rows, symbol-filtered or aliased/consolidated reports |
-| Older recovery | English Activity Statement CSV with the expected repeated section headers and contract identity; individual STK/OPT/FUT/BOND executions and verified transferred stock lots | Localized/custom CSV; automatic continuous coverage; older Analytics/Cash reconstruction |
+| **Trades** / Trades Flex query ID | **Trades** at **Executions** detail: Account ID, Trade ID or IB Execution ID, Trade Date/Time, Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Category, Currency, Multiplier, FX Rate to Base, IB Commission and Commission Currency. For options, also Local Symbol, Expiry, Put/Call, and Strike. Include **Corporate Actions**, **Option Exercises/Assignments/Expirations**, and **Transfers** with account, transaction ID, date, action/direction, asset class, contract ID, symbol, quantity, currency, cost or proceeds, multiplier and FX Rate to Base where offered. Include **Account Information → Currency** (the account base currency), or a USD base declaration or USD conversion evidence. | Completed executions, transferred opening lots, supported security events, and reconciliation review. Unsupported events stay flagged for review. |
+| **Analytics** / Analytics Flex query ID | **NAV Summary in Base** with daily Report Date, Total NAV, Currency, and Cash; **Cash Transactions** with Report Date or Date/Time, Type, Amount, Currency, FX Rate to Base and Transaction ID; **Transfers** with date, direction, asset class, Position Amount in Base or cash amount, Currency, FX Rate to Base, and Transaction ID. Include **Account Information → Currency** (the account base currency), or a USD base declaration in each statement. | Completed daily NAV, cash balance, deposits/withdrawals, security transfers and flow-adjusted returns. Daily NAV rows and complete requested date coverage are needed. |
+| **Cash** / Cash Flex query ID | **Cash Transactions**: Account ID, Currency, Report Date or Date/Time, Type, Amount, Description, Transaction ID, Conid, Symbol, and FX Rate to Base. Include every currency and instrument. | Dated nontrade cash activity. Conid or a unique Symbol links income and tax to a Return instrument; missing links remain unattributed. Unsupported transaction types stop that period's import. |
 
-This is a narrow release support boundary, not certification of every row in
-an otherwise supported report. Unproven short-sale opening basis, option exercise and
-assignment, reverse splits, mergers/spinoffs, redemptions, transfers without
-verified lots and other unsupported lifecycle events must stay in review.
-The existing parser retains such records for investigation. Declared scope
-does not bypass any account/date/amount/reconciliation checks.
+IBKR's field labels can vary by portal version. The importer validates report identity, dates, and financial fields before marking a period complete. Conid, Symbol, and transaction FX are optional in individual cash rows; absent identity leaves income unattributed, and absent FX can leave its USD return unavailable. The app currently expects a **USD base account** and one account per database. The Flex query must allow custom date requests and return the requested account and full date interval. Check the in-app sync status if IBKR cannot provide a section or older period. [IBKR Activity Flex reference](https://www.ibkrguides.com/reportingreference/reportguide/activity%20flex%20query%20reference.htm)
 
-Closed Lots first validate fee- and tax-inclusive basis against the current
-opening execution. A narrowly observed stock-lot representation may omit
-commission only when exact raw quantity, price, proceeds, cost, commission and
-tax evidence proves the proportional difference; execution fees and taxes
-remain in P&L. This is not a general cost-basis convention: [IBKR defines cost
-as including commissions and taxes](https://www.ibkrguides.com/reportingreference/reportguide/financialinformation_fq.htm).
-One proven 2-for-1 split can allocate each closing lot between its original
-purchase and the linked zero-basis additional shares, retaining original
-execution prices and costs. Negative Closed Lots can protect a verified short
-opening SELL and later closing BUY on the exact contract, including expiry at
-zero. Ambiguous, unsupported or conflicting evidence remains in review.
+The Return subtab uses all recorded trades and their matched lots. Its total adds attributable dividends, payments in lieu, and bond interest, then subtracts attributable withholding tax. It requires complete imported Cash windows from the first recorded trade through the last recorded trade or income posting for a closed position, or through yesterday for an open position. Missing Cash windows, unlinked income, unmatched sales, and missing valuation or FX make affected totals unavailable. Reimport older Cash periods after adding Conid, Symbol, and FX Rate to Base to the Cash query; unchanged financial amounts may still gain instrument attribution. The percentage is cumulative total return divided by all purchase costs and purchase commissions, not an annualized or time-weighted return. It is unavailable for short positions.
 
-IBKR distinguishes Account Type, Customer Type and Account Capabilities.
-The existing queries do not request or validate all three. Missing evidence
-therefore blocks an overall completeness claim; never infer these fields from
-an ID prefix. Before enabling `complete_result=true`, request the three fields,
-validate their actual XML schema using broker fixtures, and persist per-report
-provenance consistently across Trades, Analytics and Cash. The helper in
-`app/imports/import_contract.py` assesses normalized explicit evidence only; it is not
-a new parser and passing it alone cannot prove completeness.
+NAV Summary in Base is represented by `EquitySummaryInBase` / `EquitySummaryByReportDateInBase` in XML. Analytics accepts daily reports that skip Saturday and Sunday only when NAV context establishes the adjacent Friday-to-Monday chain; omitted weekdays and unverified date edges stop validation. A multi-day statement must contain every weekday NAV date within its bounds. Wholly empty early windows are accepted only when no NAV is already stored for that window. It imports reported NAV dates only. Cash imports dated Cash Transactions and tracks complete requested windows without checking statement balances. Commission Adjustments are separate cash transactions, so Return uses the trade fee adjustment ledger to avoid counting them twice.
 
-### Time and report limits
+## Import and coverage
 
-Activity Flex availability is the current calendar year plus four previous
-calendar years; on 10 October 2026 the lower bound is 1 January 2022. Each
-requested `fd`/`td` range is at most 365 inclusive days, even in a leap year.
-Automatic Trades, Analytics and Cash requests end on the previous Monday to Friday
-calendar date strictly before today in America/New_York. Hong Kong midnight
-therefore does not advance a request while New York is still on the same day.
-This conservative application policy has no holiday calendar and does not
-guarantee broker publication. IBKR describes Activity data through the previous business day in
-its [Activity Flex configuration guidance](https://www.ibkrguides.com/clientportal/configure-flex-with-ai.htm).
-Deferred weekend dates remain gaps until later reports cover them.
-An explicit `today` supplied to a runner retains calendar-yesterday behavior,
-including weekends. Explicit Import history ranges are not clipped to the
-automatic cutoff. Missing local timezone data stops automatic planning with an
-actionable error; explicit dated history remains available.
+### Before Flex history: older CSV reports
 
-Account opening, query configuration, broker availability, errors and local 30,000,000-byte report
-limits may narrow actual coverage further. A bounded split/retry can recover
-smaller intervals; every unavailable, failed or unchecked interval stays a gap.
-Never treat pre-account dates or unavailable reports as verified empty periods
-without broker evidence.
+For pre-2022 history, export a **PortfolioAnalyst since-inception Detailed CSV** and an
+**Activity Statement CSV** covering account inception through a month end. In
+**File → Import Data**, click **Import older CSV history** and select both files
+together (Ctrl-click in the file picker). The app identifies each report by its
+contents; selection order does not matter.
+The app checks the account, USD base currency, statement NAV bridge, and shared
+month-end NAV before saving. It also checks that PortfolioAnalyst's cash
+allocation equals the statement's cash plus dividend accruals. Changed imports
+create a local database backup. A conflicting report needs review instead of
+silently replacing saved history.
 
-CSV recovery has no app-imposed Flex cutoff but depends on statements the user
-can obtain and their required fields. Imported executions are discrete records,
-not continuous report coverage. A year with a few trades imported is not a
-verified year of activity. Broker corrections require replay/reconciliation.
+To replace a conflicting older CSV pair, expand **Imported periods (all runs)**
+in **Import Data** and choose **Remove older CSV history…**. After confirmation,
+the app backs up the database and removes the saved older CSV monthly history,
+statement evidence, closing stock quantity anchors, and reported since-inception
+return for the current account. This clears all older CSV imports for that
+account; it leaves Flex history, later trades, and the original CSV files in
+place. Import the intended pair again afterward.
 
-Settings > History & Flex > Saved history includes saved CSV trade dates and
-verified transferred-holding snapshot dates in the Trades row, alongside Flex
-report ranges. The CSV span runs from the earliest to the latest saved record;
-the date tooltip and expanded details list the actual dates. It does not claim
-that the statement's whole period was imported or fill gaps in Flex coverage.
-Records with pending transaction tax still have saved dates and retain their
-pending-cost warning. Pending transfers without saved holdings have no saved date.
+The **Analytics → Monthly history** tab shows monthly NAV and the monthly return
+reported by PortfolioAnalyst. An inception month is a partial month. The
+Activity Statement's dated trades, transfers, cash events, and closing positions
+are retained as local source evidence. The statement's reconciled closing stock
+quantities anchor the position ledger; later trades change those quantities.
+PortfolioAnalyst's reported since-inception return is shown separately from the
+daily Flex return, with its report end date. The statement rows are not treated
+as execution-level Flex trades or as complete daily NAV, cash, or flow coverage.
+Position-specific cost and return can remain unavailable when the opening lots
+cannot be matched to executions. **Daily analysis is
+unavailable for the imported 2021 period**, including daily P&L, daily extremes,
+Sharpe ratio, and capital deployment across that period. The import does not
+fill missing daily observations by interpolation. Protect the source CSVs,
+database, and backups; SQLite and backups are currently unencrypted.
 
-The older-trades importer uses the unchanged English Activity Statement CSV.
-For ordinary opening stock purchases, its existing Trades Basis can establish
-purchase cost including commission and tax; closing or adjusted Basis cannot
-establish transaction tax. Available independent cost evidence must agree.
-Unknown transaction tax stays unknown, so affected costs and net P&L stay incomplete.
-This follows IBKR's [opening versus closing Basis definition](https://www.ibkrguides.com/reportingreference/reportguide/trades_default.htm).
+1. Start the app once, enter the account and three query IDs in Settings, and save the Flex token. Use a local, unsynchronized data folder if changing the default.
+2. To fetch older history, choose **File → Import Data**, select **All reports**, **Trades**, **Analytics**, or **Cash**, and choose an ordered date range ending before today. Click **Import history**. Wait for any current sync to finish first; Flex sync and Settings changes are paused during the import. Keep the app open to let the import finish. Closing the import dialog lets the worker continue; reopen it from File to review progress and results. Closing the app interrupts the worker and saves an interrupted result; completed windows remain in the database, while the window in progress must be requested again. Review imported, unavailable, unrequested, and outside-history windows separately. A completed import with gaps does not establish full historical coverage. Reports are fetched and validated again: unchanged financial data is skipped, and supported corrections update existing records. Cash combines adjacent saved periods into the largest possible checks of at most 365 days. A check covers whole saved periods that intersect the selection, so its boundaries may extend beyond the selected dates and appear in the progress details. Uncovered Cash gaps also use windows of at most 365 days.
 
-Transfers are verified against the statement and a complete eligible saved broker
-lot set, including later partial sales reconstructed against one snapshot. The
-importer never substitutes transfer market value or invents missing cost history.
-Valid executions and verified transfers save atomically with unresolved transfers
-as pending source records containing the statement rows, hash, period, portfolio,
-quantities and reason. Pending-only statements can also save. History and import
-dialogs show pending stocks and shares; holdings and affected P&L remain incomplete.
-After importing available broker lot history, retry the same CSV: its pending
-record completes once when evidence suffices. Quantity or basis contradictions,
-overlapping transfers and edited saved holdings still block and roll back the import.
+   For command-line use, close the app and run, for example:
 
-### Unavailable reports and retries
+   ```powershell
+   python -m scripts.import_history --source all --from-date 2023-01-01 --to-date 2023-12-31
+   ```
 
-When a history import stops requesting a source after repeated unavailable reports,
-the result is **History imported with gaps**. It identifies the affected sources
-and dates and directs the user to check IBKR availability before retrying
-**Import history**. **History import paused** and **Resume import** are reserved
-for a pause requested by the user. Available reports remain saved in both cases.
+   You can use `--source trades`, `analytics`, or `cash` to import one report type. Use `--database C:\path\to\portfolio.sqlite3` only when you deliberately use a nondefault database. The UI always passes its current database to the worker and defaults to the most recent 30 completed days. The importer processes dated windows, newest first, and stops when IBKR reports an unavailable window; remaining windows are marked unrequested. Backups are created before applying changed reports; unchanged reports preserve stored financial rows and timestamps without another backup. Rechecked Cash periods replace their transactions and completion records in one transaction. Missing existing currencies or executions require review because omitted rows may reflect query filters. Invalid Cash transactions preserve previous data. Trades retain broker execution identities and revision precedence; validated same-revision Flex corrections can update economic fields, while manual trade and lot conflicts require review. Analytics replaces only its own dated NAV and flow scope (including replaced CSV flows); incomplete or empty corrections preserve existing data. Results distinguish Updated, Unchanged, and Needs review. These comparison safeguards apply to Import Data; Sync IBKR retains its existing replay behavior.
+   To stop an import, click **Pause import**. The worker finishes the current report (or connected Cash group) before stopping, and the dialog shows the dates still unrequested. Click **Resume import** in the same app session to continue without requesting completed windows again. The app can be closed after the paused result appears. If the app is restarted, select the dates and import again; unchanged reports are compared before their saved data is updated.
+3. The UI refreshes the views when the worker exits, including any periods saved before a pause or failure. Press **Sync IBKR** to catch up completed days through yesterday. Without an older import, the first automatic Trades and Cash sync starts with recent 30 day windows; Analytics starts at the beginning of the fourth previous calendar year. Review **Trades**, **Analytics**, **Cash**, and sync status for missing dates or events needing review.
 
-Settings shows current record issues with their reasons and next steps. A historical
-review flag stops appearing when complete saved reports cover its entire date
-range; unresolved execution or lot records still appear even when coverage is saved.
+Before requesting a history window, the importer moves a Saturday or Sunday end date to the preceding Friday. The omitted weekend remains explicitly unverified in the result; the app does not mark unrequested days as covered. A window containing only weekend dates is skipped and shown as a gap.
 
-An observed Flex 1003 at either request or retrieval starts a persistent six-hour
-local cooldown for automatic attempts in that portfolio database, scoped to the
-account and query ID. Six hours is an application backoff choice, not an IBKR
-recovery interval. IBKR identifies 1003 as unavailable in its
-[Flex error codes](https://www.interactivebrokers.com/docs/web-api/flex-web-service/error-codes);
-[report generation guidance](https://www.interactivebrokers.com/docs/web-api/flex-web-service/using-flex-web-service/generate-the-report)
-documents date overrides and pacing. The existing request pacing and generation
-polling remain unchanged. Restarting a worker, changing the requested dates or
-using Sync IBKR does not bypass it. Skipped attempts perform no credential loading,
-backup or broker request and do not extend the deadline. Successful older slices
-or other queries do not clear it. Invalid saved cooldown state becomes one
-bounded six-hour deferral instead of an indefinite pause.
+Each new override window stays within IBKR's 365-day maximum. Activity Flex history is generally available for the current year and four previous calendar years; older requested dates are recorded as outside history. See [IBKR date override limits](https://www.ibkrguides.com/brokerportal/performanceandstatements/flex3.htm) and [Flex availability](https://www.ibkrguides.com/brokerportal/performanceandstatements/flex.htm). [Account Information Currency](https://www.ibkrguides.com/reportingreference/reportguide/account%20information%20activity%20flex.htm) identifies the base currency.
 
-The current invocation retains its existing bounded splitting/retry budget and
-saves validated partial success. Use **Import history** with explicit dates for
-an immediate intentional retry; history keeps its existing recovery budgets and
-records any subsequent 1003. Expiry allows another bounded automatic attempt,
-but neither local midnight nor expiry proves broker availability. Configuration
-errors and 1025 still stop immediately and remain paused until an explicit retry.
-Every unavailable or unverified interval remains a gap, never verified empty
-history. The observed live 1025 restriction remains unresolved; this prevention
-change makes no claim to remove or recover from a broker restriction.
+IBKR controls the oldest available Flex history; an unavailable period cannot be reconstructed by this app. Live TWS/Gateway data supplies current positions, prices, FX, account values and recent executions, but not complete historical NAV or cash transactions. The app stores imported records in local SQLite, keeps backups and diagnostic logs locally, and does not save downloaded XML reports by default. SQLite files and backups are currently unencrypted; protect the local Windows account and backup folder.
 
-### Conditions for a future complete result
-
-All of these must be demonstrated for a clearly labelled account/source/date
-scope: supported explicit account/base provenance; unfiltered expected sections
-and execution-level data; continuous actual report coverage (including proven
-empty intervals); no unsupported/skipped instruments/events; all original
-opening holdings and balances; linked purchase/closed lots and fees/taxes/FX;
-cash and holdings reconciliation; and no review/pending/failed/unverified rows.
-Full lifetime performance additionally needs proven account-opening history.
-Trades-only success cannot prove Analytics or Cash completeness. Existing
-legacy rows without this evidence do not gain it through schema migration.
-
-Tests reject unsupported normalized scope, rollover of Flex availability,
-unknown instrument ingestion and a stale `complete_result=true` worker flag.
-Existing wrong-account/base/date, partial report, gap, replay and reconciliation
-tests remain required. No live broker request was used for this change.
-
-### Calculation check details
-
-The Summary warning row and Cash tab now open the same compact **Details**
-view. **Verified**, **Difference**, **Partial**, and **Unavailable** apply to
-the displayed account, portfolio, currency and dated comparison. Expand a cash
-check for its component amounts; earlier saved periods and individual holdings
-are collapsed by default. Missing prices, FX, prior closes, fees, taxes and lot
-basis are identified by holding or lot. Existing subtotal exclusions remain.
-
-**Independent cash** starts from the broker opening balance and calculates
-sales, purchases, both FX conversion legs, original signed native commissions,
-dated refunds, execution taxes and non-trade cash movements from the saved local
-ledger. It compares each component and the closing balance with the matching
-Cash Report, using Decimal and a one-cent tolerance per native currency.
-Component errors remain differences even when their closing effects cancel.
-Detailed transaction tax is counted once, not again as a non-trade movement.
-Canonical executions and their accepted correction prevent Flex/TWS replay
-from counting a trade twice; ambiguous cross-source FX conversions require
-review. Supported older CSV FX rows are retained as cash evidence without
-creating security holdings or lots.
-
-**Statement arithmetic** checks the broker report against its own transactions;
-it does not establish agreement with the independent ledger. Missing execution
-windows (including unproven empty periods), original native fee/tax/proceeds
-fields, unresolved events, unlinked refunds or missing report accounting-basis
-evidence keep the independent check Partial. To repair older saved evidence or
-retrieve broker corrections, open **Settings > Import history**, select the
-affected source and dates, and enable **Recheck saved reports**. Select `all` when
-both execution and Cash evidence need repair. This fetches fresh reports instead
-of reusing the local report cache; the default option still skips completed dates.
-Cash rechecks replay each original saved period in full and import intervening
-gaps. A range cutting a saved Cash period is rejected with its required dates
-before any source is changed. Pause and Resume retain the option and skip windows
-already rechecked in that run. Reports remain subject to IBKR historical
-availability and the existing validation/replay checks. Refunds use their actual posting
-dates and currencies. Splits and verified transferred opening lots are noncash.
-Unsupported lifecycle or margin cash cannot silently become a zero movement.
-
-Latest failed, unavailable, paused or unfinished imports keep the overall cash
-summary Partial while preserving explicitly dated checks for saved intervals.
-Each holding retains its own broker snapshot date; a live update for another
-holding does not refresh it. Quote changes do not rebuild cash comparisons.
-Full NAV, valuation and P&L broker verification remains Partial or Unavailable
-because the retained live account totals do not supply compatible dated
-valuation or P&L snapshots. These checks do not prove complete lifetime history
-or unfiltered account reporting.
-
-Calculation-check explanations group missing report details, unverified lot
-matches, unsupported events and inconsistent amounts separately. They show
-affected securities and dates only when saved source records establish them.
-A pending lot record alone does not prove that an earlier statement is missing.
-An acquisition date is identified as outside Trades coverage only when its
-opening trade is absent and that date has no complete saved execution window.
-**Technical details** and **Copy diagnostics** retain the original source IDs
-and reasons without listing them in the main explanation. Reimporting does not
-add app support for unknown option exercise, assignment or settlement cash.
-An expiration already linked to an unchanged option trade with explicit zero
-price and proceeds is accounted for; ambiguous or changed links remain Partial.
-
-### Primary references
-
-- [IBKR Cash Report trade-date and settled-cash fields](https://www.ibkrguides.com/reportingreference/reportguide/cashreport.htm)
-- [IBKR account information fields](https://www.ibkrguides.com/reportingreference/reportguide/account%20information%20activity%20flex.htm)
-- [Execution and lot detail fields](https://www.ibkrguides.com/reportingreference/reportguide/tradesfq.htm)
-- [Flex historical availability](https://www.ibkrguides.com/clientportal/performanceandstatements/flex.htm)
-- [Flex date override limit](https://www.ibkrguides.com/advisorportal/ug/flex3.htm)
+Import Data writes a rotating `logs/history-import.log` beside the selected database. It records the report source, requested dates, outcome, and IBKR response code and endpoint stage for unavailable or failed requests. It does not record report contents, account IDs, query IDs, tokens, or IBKR's free-form response text.

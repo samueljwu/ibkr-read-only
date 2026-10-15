@@ -1,22 +1,17 @@
-"""Authenticated encrypted portfolio store. Raw trades retain their meaning."""
+"""Small SQLite store. Raw trades are never rewritten by lot matching."""
 
-from sqlcipher3 import dbapi2 as sqlite3
+import sqlite3
 import json
 import math
 import os
-from uuid import UUID, uuid4
+from uuid import uuid4
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from app.platform.runtime import channel
-from app.storage import database_keys
-from app.storage.security_storage import connect, verify_integrity
-from app.storage.encrypted_backup import export_database, _publish
-from app.storage.storage_operations import SessionLease
-
-from app.storage.paths import (default_data_dir, select_data_directory,
-                       selected_data_directory, validate_database_path, validate_data_directory)
+from app.platform.paths import (default_data_dir, legacy_source_dir, local_config_path,
+                                new_portfolio_dir, user_data_dir)
+from app.finance.option_labels import option_label
 
 
 DEFAULTS = {
@@ -31,191 +26,89 @@ POSITION_FIELDS = ("display_ticker", "ib_symbol", "security_type", "exchange", "
                    "currency", "local_symbol", "expiry", "option_right", "strike", "trading_class",
                    "multiplier", "position_qty", "average_cost", "fx_to_usd", "notes")
 TRADE_FIELDS = ("trade_id", "trade_date", "display_ticker", "ib_symbol", "side", "quantity",
-                "price", "security_type", "multiplier", "currency", "fx_to_usd", "commission_usd", "tax_lc", "tax_usd", "notes")
-
-
-APPLICATION_ID = 0x4349424D
-SCHEMA_VERSION = 1
-TABLE_NAMES = frozenset({
-    "portfolios", "positions", "trades", "trade_matches", "contracts",
-    "historical_prices", "benchmark_prices", "market_quotes", "exposure_facts",
-    "exposure_custom", "exposure_custom_sets", "settings", "app_metadata",
-    "broker_positions", "fx_rates", "account_values", "account_history",
-    "external_flows", "cash_movements", "trade_fee_adjustments",
-    "cash_reconciliations", "broker_executions", "broker_source_records",
-    "broker_sync_windows", "broker_sync_runs",
-})
-
-
-def validate_schema_objects(conn, *, allow_legacy=False):
-    """Reject executable or unrecognized schema objects before adoption."""
-    tables = set()
-    for object_type, name, sql in conn.execute("SELECT type,name,sql FROM sqlite_master"):
-        if object_type == "index":
-            if name.startswith("sqlite_autoindex_") or name in {
-                "idx_positions_portfolio", "idx_trades_portfolio", "idx_trades_position"
-            }:
-                continue
-            raise ValueError("Unsupported database index")
-        if object_type != "table" or name not in TABLE_NAMES:
-            raise ValueError("Unsupported database schema object")
-        if not sql or " ".join(sql.upper().split()).startswith("CREATE VIRTUAL TABLE"):
-            raise ValueError("Unsupported virtual table")
-        tables.add(name)
-    if not allow_legacy and tables != TABLE_NAMES:
-        raise ValueError("Incomplete database application schema")
-
-
-class LegacyDatabaseError(ValueError):
-    pass
-
-
-class IncompleteDatabaseError(ValueError):
-    pass
-
-
-def identity_path(path):
-    path = Path(path)
-    return path.with_name(path.name + ".identity.json")
-
-
-def read_identity(path):
-    sidecar = identity_path(path)
-    if sidecar.is_symlink() or not sidecar.is_file():
-        raise ValueError("Portfolio identity is missing; restore or explicit migration is required")
-    if sidecar.stat().st_size > 1024:
-        raise ValueError("Unsupported portfolio identity")
-    identity = json.loads(sidecar.read_text(encoding="utf-8"))
-    if not isinstance(identity, dict) or set(identity) != {"version", "channel", "portfolio_uuid"}:
-        raise ValueError("Unsupported portfolio identity")
-    if identity["version"] != 1 or identity["channel"] != channel():
-        raise ValueError("Unsupported portfolio identity or different app channel")
-    if str(UUID(identity["portfolio_uuid"])) != identity["portfolio_uuid"]:
-        raise ValueError("Unsupported portfolio identity")
-    return identity
-
-
-def write_identity(path, identity):
-    """Reserve an identity exclusively; metadata contains no key or account ID."""
-    with identity_path(path).open("x", encoding="utf-8") as output:
-        json.dump(identity, output, sort_keys=True)
-        output.flush()
-        os.fsync(output.fileno())
-
-
-def validate_schema(conn, portfolio_uuid):
-    if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
-        raise ValueError("Unsupported database application")
-    if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-        raise ValueError("Unsupported database schema version")
-    validate_schema_objects(conn)
-    row = conn.execute("SELECT value FROM app_metadata WHERE key='portfolio_uuid'").fetchone()
-    if row is None or row[0] != portfolio_uuid:
-        raise ValueError("Portfolio identity does not match the encrypted database")
-
-
-class PortfolioConnection(sqlite3.Connection):
-    _storage_lease = None
-
-    def close(self):
-        try:
-            super().close()
-        finally:
-            if self._storage_lease is not None:
-                self._storage_lease.close()
-                self._storage_lease = None
+                "price", "security_type", "multiplier", "currency", "fx_to_usd", "commission_usd", "notes")
 
 
 class Database:
     def __init__(self, path=None):
-        new_selection = path is None and selected_data_directory() is None
-        self.path = validate_database_path(path if path is not None else default_data_dir() / "portfolio.sqlite3")
+        self.path = Path(path) if path is not None else self._default_path()
+        if self.path.is_file():
+            self._require_plain_sqlite(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lease = SessionLease(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self._init()
+
+    @staticmethod
+    def _require_plain_sqlite(path):
+        with Path(path).open("rb") as source:
+            header = source.read(16)
+        if header and header != b"SQLite format 3\x00":
+            raise ValueError(f"Portfolio database is encrypted or unsupported: {path}. "
+                             "The current app needs a readable SQLite export.")
+
+    @staticmethod
+    def _configured_database(config_path):
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        directory = config.get("data_directory")
+        if not directory:
+            raise ValueError(f"No portfolio directory in {config_path}")
+        database = Path(directory) / "portfolio.sqlite3"
+        if not database.is_file():
+            raise FileNotFoundError(f"Configured portfolio database is missing: {database}")
+        return database
+
+    @classmethod
+    def _legacy_database(cls):
+        base = user_data_dir()
+        profile = default_data_dir().parent.name
+        config_paths = ([base / "stable" / "data" / "local_config.json"] if profile == "prod" else [])
+        config_paths += [base / "local_config.json", legacy_source_dir() / "local_config.json"]
+        for config in config_paths:
+            if config.is_file():
+                candidate = cls._configured_database(config)
+                if candidate.is_file():
+                    return candidate
+        candidates = ([base / "stable" / "data" / "portfolio.sqlite3"] if profile == "prod" else [])
+        candidates += [base / "portfolio.sqlite3", legacy_source_dir() / "data" / "portfolio.sqlite3"]
+        return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+    @classmethod
+    def _default_path(cls):
+        config_path = local_config_path()
+        if config_path.is_file():
+            return cls._configured_database(config_path)
+        root = default_data_dir()
+        folder = new_portfolio_dir(root)
+        target = folder / "portfolio.sqlite3"
         try:
-            self._open_encrypted(new_selection)
-        except BaseException:
-            self._lease.close()
+            source = cls._legacy_database()
+            if source is not None:
+                cls._require_plain_sqlite(source)
+                with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as original:
+                    with closing(sqlite3.connect(target)) as copied:
+                        original.backup(copied)
+                        if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                            raise RuntimeError("Copied portfolio database failed integrity check")
+                        with copied:
+                            copied.execute("UPDATE settings SET value='' WHERE key='data_directory'")
+            else:
+                with closing(sqlite3.connect(target)):
+                    pass
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with config_path.open("x", encoding="utf-8") as config:
+                json.dump({"data_directory": str(folder)}, config)
+        except FileExistsError:
+            target.unlink(missing_ok=True)
+            folder.rmdir()
+            return cls._configured_database(config_path)
+        except Exception:
+            target.unlink(missing_ok=True)
+            folder.rmdir()
             raise
-
-    def _open_connection(self):
-        connection = connect(self.path, self._key, factory=PortfolioConnection)
-        connection._storage_lease = self._lease
-        return connection
-
-    def _open_encrypted(self, new_selection):
-        if self.path.exists():
-            with self.path.open("rb") as source:
-                if source.read(16) == b"SQLite format 3\x00":
-                    raise LegacyDatabaseError("Unencrypted portfolio requires explicit preserved-original migration")
-            identity = read_identity(self.path)
-            self.portfolio_uuid = identity["portfolio_uuid"]
-            self._key = database_keys.load_key(channel(), self.portfolio_uuid)
-            if self._key is None:
-                raise ValueError("Database key is missing; restore using your recovery code")
-            # Validate authentication, schema and identity before writable settings
-            # (including journal mode) or any upgrade can mutate existing data.
-            with closing(connect(self.path, self._key, read_only=True)) as check:
-                validate_schema(check, self.portfolio_uuid)
-                verify_integrity(check)
-                from app.storage.migration import validate_application
-                validate_application(check)
-            self.conn = self._open_connection()
-            try:
-                self._init()
-            except BaseException:
-                self.conn.close()
-                raise
-        else:
-            self._create_encrypted()
-        if new_selection:
-            try:
-                select_data_directory(self.path.parent)
-            except BaseException:
-                self.conn.close()
-                raise
-
-    def _create_encrypted(self):
-        if identity_path(self.path).exists() or identity_path(self.path).is_symlink():
-            raise IncompleteDatabaseError("Interrupted portfolio initialization; existing identity was preserved")
-        self.portfolio_uuid = str(uuid4())
-        identity = {"version": 1, "channel": channel(), "portfolio_uuid": self.portfolio_uuid}
-        write_identity(self.path, identity)
-        temporary = self.path.with_name(f".portfolio-{uuid4().hex}.pending")
-        key_created = published = False
-        try:
-            self._key = database_keys.create_key(channel(), self.portfolio_uuid)
-            key_created = True
-            # Reserve an owned temporary file exclusively, avoiding path races.
-            with temporary.open("xb"):
-                pass
-            self.conn = connect(temporary, self._key, create=True, journal_mode="DELETE")
-            try:
-                self._init()
-                with self.conn:
-                    self.conn.execute("INSERT INTO app_metadata(key,value) VALUES ('portfolio_uuid',?)", (self.portfolio_uuid,))
-                    self.conn.execute(f"PRAGMA application_id={APPLICATION_ID}")
-                    self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                validate_schema(self.conn, self.portfolio_uuid)
-                verify_integrity(self.conn)
-            finally:
-                self.conn.close()
-            with temporary.open("r+b") as completed:
-                os.fsync(completed.fileno())
-            _publish(temporary, self.path)
-            published = True
-            self.conn = self._open_connection()
-        except BaseException:
-            # After publication retain the authenticated portfolio and key for
-            # retry. Before it, roll back only artifacts owned by this creator.
-            if not published:
-                if key_created:
-                    database_keys.delete_key(channel(), self.portfolio_uuid)
-                identity_path(self.path).unlink(missing_ok=True)
-            raise
-        finally:
-            temporary.unlink(missing_ok=True)
-            Path(str(temporary) + "-journal").unlink(missing_ok=True)
+        return target
 
     def _init(self):
         self.conn.executescript("""
@@ -316,6 +209,42 @@ class Database:
           source TEXT NOT NULL, flow_covered INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY(portfolio_id, day)
         );
+        CREATE TABLE IF NOT EXISTS account_monthly_history (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+          account_id TEXT NOT NULL, month TEXT NOT NULL, period_from TEXT NOT NULL,
+          period_to TEXT NOT NULL, nav_usd TEXT NOT NULL, return_pct TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          PRIMARY KEY(portfolio_id, account_id, month)
+        );
+        CREATE TABLE IF NOT EXISTS legacy_account_performance (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), account_id TEXT NOT NULL,
+          period_from TEXT NOT NULL, period_to TEXT NOT NULL,
+          cumulative_return_pct TEXT NOT NULL, ending_nav_usd TEXT NOT NULL,
+          measure TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          PRIMARY KEY(portfolio_id, account_id, period_to)
+        );
+        CREATE TABLE IF NOT EXISTS legacy_position_openings (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), account_id TEXT NOT NULL,
+          position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE, as_of TEXT NOT NULL,
+          symbol TEXT NOT NULL, currency TEXT NOT NULL,
+          quantity TEXT NOT NULL, source_hash TEXT NOT NULL,
+          PRIMARY KEY(portfolio_id, account_id, as_of, symbol, currency)
+        );
+        CREATE TABLE IF NOT EXISTS legacy_statement_sources (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), account_id TEXT NOT NULL,
+          period_from TEXT NOT NULL, period_to TEXT NOT NULL, source_hash TEXT NOT NULL,
+          ending_nav_usd TEXT NOT NULL, ending_cash_usd TEXT NOT NULL,
+          dividend_accrual_usd TEXT NOT NULL, event_count INTEGER NOT NULL,
+          PRIMARY KEY(portfolio_id, account_id, period_from, period_to)
+        );
+        CREATE TABLE IF NOT EXISTS legacy_statement_rows (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), account_id TEXT NOT NULL,
+          period_from TEXT NOT NULL, period_to TEXT NOT NULL,
+          section TEXT NOT NULL, row_number INTEGER NOT NULL, reported_day TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          PRIMARY KEY(portfolio_id, account_id, period_from, period_to, section, row_number)
+        );
         CREATE TABLE IF NOT EXISTS external_flows (
           portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), source_id TEXT NOT NULL,
           day TEXT NOT NULL, amount_usd REAL NOT NULL, kind TEXT NOT NULL,
@@ -327,6 +256,9 @@ class Database:
           reported_day TEXT NOT NULL, period_from TEXT NOT NULL, period_to TEXT NOT NULL,
           kind TEXT NOT NULL, currency TEXT NOT NULL, amount TEXT NOT NULL,
           description TEXT NOT NULL, source_section TEXT NOT NULL,
+          con_id INTEGER, symbol TEXT NOT NULL DEFAULT '',
+          transaction_id TEXT NOT NULL DEFAULT '', fx_to_usd TEXT,
+          income_type TEXT NOT NULL DEFAULT '',
           source_hash TEXT NOT NULL, PRIMARY KEY(portfolio_id, account_id, source_key)
         );
         CREATE TABLE IF NOT EXISTS trade_fee_adjustments (
@@ -336,16 +268,6 @@ class Database:
           reported_day TEXT NOT NULL, refund_usd TEXT NOT NULL,
           description TEXT NOT NULL, source_hash TEXT NOT NULL,
           PRIMARY KEY(portfolio_id, account_id, source_key)
-        );
-        CREATE TABLE IF NOT EXISTS cash_reconciliations (
-          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
-          account_id TEXT NOT NULL, period_from TEXT NOT NULL, period_to TEXT NOT NULL,
-          currency TEXT NOT NULL, opening_cash TEXT NOT NULL, trade_sales TEXT NOT NULL,
-          trade_purchases TEXT NOT NULL, trade_commissions TEXT NOT NULL,
-          nontrade_cash TEXT NOT NULL, closing_cash TEXT NOT NULL,
-          difference TEXT NOT NULL, nav_usd TEXT, source_hash TEXT NOT NULL,
-          checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY(portfolio_id, account_id, period_from, period_to, currency)
         );
         CREATE TABLE IF NOT EXISTS broker_executions (
           account_id TEXT NOT NULL, execution_key TEXT NOT NULL,
@@ -387,12 +309,24 @@ class Database:
             "position_id": "INTEGER",
             "source": "TEXT NOT NULL DEFAULT 'manual'",
             "executed_at": "TEXT NOT NULL DEFAULT ''",
-            "security_type": "TEXT NOT NULL DEFAULT 'STK'", "multiplier": "REAL DEFAULT 1",
-            "tax_lc": "REAL DEFAULT 0", "tax_usd": "REAL DEFAULT 0"})
-        self._add_missing_columns("cash_reconciliations", {"trade_tax": "TEXT NOT NULL DEFAULT '0'"})
+            "security_type": "TEXT NOT NULL DEFAULT 'STK'", "multiplier": "REAL DEFAULT 1"})
         self._add_missing_columns("trade_matches", {"origin": "TEXT NOT NULL DEFAULT 'manual'"})
         self._add_missing_columns("account_history", {"daily_pnl_usd": "REAL"})
+        self._add_missing_columns("cash_movements", {
+            "con_id": "INTEGER", "symbol": "TEXT NOT NULL DEFAULT ''",
+            "transaction_id": "TEXT NOT NULL DEFAULT ''", "fx_to_usd": "TEXT",
+            "income_type": "TEXT NOT NULL DEFAULT ''"})
+        added_opening_fields = self._add_missing_columns("legacy_position_openings", {
+            "symbol": "TEXT NOT NULL DEFAULT ''", "currency": "TEXT NOT NULL DEFAULT ''"})
         with self.conn:
+            if "symbol" in added_opening_fields:
+                self.conn.execute("""UPDATE legacy_position_openings SET symbol=COALESCE((
+                    SELECT UPPER(TRIM(COALESCE(NULLIF(p.ib_symbol,''),p.display_ticker)))
+                    FROM positions AS p WHERE p.id=legacy_position_openings.position_id), '')""")
+            if "currency" in added_opening_fields:
+                self.conn.execute("""UPDATE legacy_position_openings SET currency=COALESCE((
+                    SELECT UPPER(TRIM(p.currency)) FROM positions AS p
+                    WHERE p.id=legacy_position_openings.position_id), '')""")
             if "multiplier" in added_positions:
                 self.conn.execute("UPDATE positions SET multiplier=NULL, con_id=NULL WHERE UPPER(security_type)!='STK'")
                 self.conn.execute("DELETE FROM contracts WHERE position_id IN (SELECT id FROM positions WHERE UPPER(security_type)!='STK')")
@@ -409,6 +343,25 @@ class Database:
                     AND p.display_ticker=trades.display_ticker ORDER BY p.id LIMIT 1)""")
         with self.conn:
             self.conn.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", DEFAULTS.items())
+            legacy_cash_table = self.conn.execute("""SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='cash_reconciliations'""").fetchone()
+            if self.setting("cash_windows_migrated") != "1":
+                # Preserve completed periods, including reports with no transactions,
+                # when upgrading a database that used Cash Report balance records.
+                if legacy_cash_table:
+                    self.conn.execute("""INSERT OR IGNORE INTO broker_sync_windows
+                        (account_id,source,from_day,to_day,status)
+                        SELECT DISTINCT account_id,'flex_cash',period_from,period_to,'complete'
+                        FROM cash_reconciliations""")
+                self.conn.execute("""INSERT OR IGNORE INTO broker_sync_windows
+                    (account_id,source,from_day,to_day,status)
+                    SELECT DISTINCT account_id,'flex_cash',period_from,period_to,'complete'
+                    FROM cash_movements""")
+                self.conn.execute("""INSERT INTO settings(key,value)
+                    VALUES ('cash_windows_migrated','1')
+                    ON CONFLICT(key) DO UPDATE SET value='1'""")
+            if legacy_cash_table:
+                self.conn.execute("DROP TABLE cash_reconciliations")
             legacy_nav = self.setting("portfolio_nav_usd")
             if legacy_nav and self.portfolio_nav(1) is None:
                 self.set_portfolio_nav(1, float(legacy_nav))
@@ -417,6 +370,11 @@ class Database:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_portfolio ON positions(portfolio_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id)")
+            # Ingest and matching look these up per record; without them SQLite
+            # scans broker_source_records and trade_matches on every write.
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_source_records_trade ON broker_source_records(trade_row_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_buy ON trade_matches(buy_trade_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_sell ON trade_matches(sell_trade_id)")
         for row in self.conn.execute("""SELECT DISTINCT portfolio_id,display_ticker,ib_symbol FROM trades
             WHERE position_id IS NULL AND display_ticker<>''""").fetchall():
             position = self.conn.execute("""SELECT id FROM positions WHERE portfolio_id=? AND display_ticker=?
@@ -428,17 +386,33 @@ class Database:
                 self.conn.execute("""UPDATE trades SET position_id=? WHERE portfolio_id=?
                     AND display_ticker=? AND position_id IS NULL""",
                     (position_id, row["portfolio_id"], row["display_ticker"]))
+        self._normalize_option_labels()
 
-        from app.finance.trade_costs import upgrade_saved_trade_taxes
-        if ('tax_usd' in added_trades and self.conn.execute('SELECT 1 FROM trades LIMIT 1').fetchone()
-                and not getattr(self, "_pre_upgrade_snapshot", None)):
-            self.backup()
+    def _normalize_option_labels(self):
+        option_ids = [row[0] for row in self.conn.execute(
+            "SELECT id FROM positions WHERE UPPER(security_type)='OPT'")]
         with self.conn:
-            if 'tax_usd' in added_trades:
-                self.conn.execute('''UPDATE trades SET tax_lc=NULL,tax_usd=NULL
-                    WHERE source IN ('IBKR sync','IBKR Activity Statement') OR
-                    EXISTS (SELECT 1 FROM broker_executions e WHERE e.trade_row_id=trades.id)''')
-            upgrade_saved_trade_taxes(self)
+            for position_id in option_ids:
+                self._set_option_label(position_id)
+
+    def _set_option_label(self, position_id):
+        position = self.conn.execute("""SELECT id,portfolio_id,display_ticker,ib_symbol,
+            expiry,option_right,strike,con_id FROM positions WHERE id=?""", (position_id,)).fetchone()
+        if position is None:
+            return
+        label = option_label(position["ib_symbol"], position["expiry"],
+                             position["option_right"], position["strike"])
+        if label is None:
+            return
+        conflict = self.conn.execute("""SELECT 1 FROM positions WHERE portfolio_id=?
+            AND display_ticker=? AND id<>? LIMIT 1""",
+            (position["portfolio_id"], label, position_id)).fetchone()
+        if conflict:
+            label = f"{label} [{position['con_id'] or position_id}]"
+        if label != position["display_ticker"]:
+            self.conn.execute("UPDATE positions SET display_ticker=? WHERE id=?", (label, position_id))
+            self.conn.execute("UPDATE trades SET display_ticker=? WHERE position_id=?",
+                              (label, position_id))
 
     def _add_missing_columns(self, table, columns):
         existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -465,7 +439,6 @@ class Database:
                 row["raw_commission_usd"] = row["commission_usd"]
                 row["commission_refund_usd"] = refunds.get(row["id"], 0.0)
                 row["commission_usd"] -= row["commission_refund_usd"]
-                row["cost_complete"] = row["commission_complete"] and row["tax_usd"] is not None
             return raw
         if portfolio_id is not None:
             if table == "trade_matches":
@@ -481,33 +454,6 @@ class Database:
     def add_portfolio(self, name):
         with self.conn:
             return self.conn.execute("INSERT INTO portfolios(name) VALUES (?)", (name,)).lastrowid
-
-    def portfolio_name(self, portfolio_id):
-        row = self.conn.execute("SELECT name FROM portfolios WHERE id=?", (portfolio_id,)).fetchone()
-        if row is None:
-            raise ValueError("Unknown portfolio")
-        return row[0]
-
-    def validate_portfolio_name(self, portfolio_id, name):
-        self.portfolio_name(portfolio_id)
-        name = name.strip()
-        if not name:
-            raise ValueError("Enter a portfolio name")
-        if self.conn.execute("SELECT 1 FROM portfolios WHERE name=? AND id<>?",
-                             (name, portfolio_id)).fetchone():
-            raise ValueError("A portfolio with this name already exists in this database")
-        return name
-
-    def rename_portfolio(self, portfolio_id, name):
-        name = self.validate_portfolio_name(portfolio_id, name)
-        try:
-            with self.conn:
-                cur = self.conn.execute("UPDATE portfolios SET name=? WHERE id=?", (name, portfolio_id))
-                if cur.rowcount != 1:
-                    raise ValueError("Unknown portfolio")
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("A portfolio with this name already exists in this database") from exc
-        return name
 
     def portfolio_nav(self, portfolio_id):
         row = self.conn.execute("SELECT nav_usd FROM portfolios WHERE id=?", (portfolio_id,)).fetchone()
@@ -586,6 +532,18 @@ class Database:
                 day=excluded.day,amount_usd=excluded.amount_usd,kind=excluded.kind""",
                 (portfolio_id, source_id, day, float(amount_usd), kind))
 
+    def completed_flex_windows(self, account_id):
+        """Saved complete periods for the selected account, including prior runs."""
+        sources = {"flex": "trades", "flex_analytics": "analytics", "flex_cash": "cash"}
+        periods = {label: [] for label in sources.values()}
+        if account_id:
+            for row in self.conn.execute("""SELECT source,from_day,to_day FROM broker_sync_windows
+                    WHERE account_id=? AND status='complete'
+                      AND source IN ('flex','flex_analytics','flex_cash')
+                    ORDER BY source,from_day,to_day""", (account_id,)):
+                periods[sources[row["source"]]].append((row["from_day"], row["to_day"]))
+        return periods
+
     def analytics_history(self, portfolio_id):
         snapshots = [dict(row) for row in self.conn.execute(
             "SELECT * FROM account_history WHERE portfolio_id=? ORDER BY day", (portfolio_id,))]
@@ -600,22 +558,52 @@ class Database:
                ORDER BY day""", (portfolio_id, account_id, account_id))]
         return snapshots, flows
 
+    def monthly_history(self, portfolio_id):
+        account_id = self.setting("ib_account_id")
+        return [dict(row) for row in self.conn.execute(
+            """SELECT month,period_from,period_to,nav_usd,return_pct
+               FROM account_monthly_history WHERE portfolio_id=? AND account_id=?
+               ORDER BY month""", (portfolio_id, account_id))]
+
+    def reported_account_performance(self, portfolio_id):
+        account_id = self.setting("ib_account_id")
+        row = self.conn.execute(
+            """SELECT period_from,period_to,cumulative_return_pct,ending_nav_usd,measure
+               FROM legacy_account_performance WHERE portfolio_id=? AND account_id=?
+               ORDER BY period_to DESC LIMIT 1""", (portfolio_id, account_id)).fetchone()
+        return dict(row) if row else None
+
+    def legacy_opening_quantities(self, portfolio_id):
+        account_id = self.setting("ib_account_id")
+        rows = self.conn.execute(
+            """SELECT position_id,as_of,quantity FROM legacy_position_openings
+               WHERE portfolio_id=? AND account_id=? ORDER BY position_id,as_of DESC""",
+            (portfolio_id, account_id))
+        result = {}
+        for row in rows:
+            result.setdefault(row["position_id"], dict(row))
+        return result
+
+    def legacy_statement_periods(self, portfolio_id):
+        account_id = self.setting("ib_account_id")
+        return [dict(row) for row in self.conn.execute(
+            """SELECT period_from,period_to,event_count FROM legacy_statement_sources
+               WHERE portfolio_id=? AND account_id=? ORDER BY period_from""",
+            (portfolio_id, account_id))]
+
+    def has_legacy_history(self, portfolio_id):
+        account_id = self.setting("ib_account_id")
+        return any(self.conn.execute(
+            f"SELECT 1 FROM {table} WHERE portfolio_id=? AND account_id=? LIMIT 1",
+            (portfolio_id, account_id)).fetchone() for table in (
+                "account_monthly_history", "legacy_account_performance",
+                "legacy_position_openings", "legacy_statement_sources",
+                "legacy_statement_rows"))
+
     def cash_movement_rows(self, portfolio_id):
         return [dict(row) for row in self.conn.execute(
             """SELECT * FROM cash_movements WHERE portfolio_id=?
                ORDER BY reported_day DESC, source_section, source_key""", (portfolio_id,))]
-
-    def cash_reconciliation(self, portfolio_id):
-        row = self.conn.execute("""SELECT * FROM cash_reconciliations
-            WHERE portfolio_id=? AND currency='USD'
-            ORDER BY period_to DESC, period_from DESC LIMIT 1""",
-            (portfolio_id,)).fetchone()
-        return dict(row) if row else None
-
-    def cash_reconciliation_rows(self, portfolio_id):
-        return [dict(row) for row in self.conn.execute("""SELECT * FROM cash_reconciliations
-            WHERE portfolio_id=? ORDER BY period_to DESC, period_from DESC, currency DESC""",
-            (portfolio_id,))]
 
     def account_value(self, portfolio_id, metric):
         row = self.conn.execute("""SELECT * FROM account_values WHERE portfolio_id=? AND metric=?""",
@@ -676,7 +664,7 @@ class Database:
             self.conn.execute("""INSERT INTO fx_rates(currency,day,usd_per_unit,source) VALUES (?,?,?,?)
                 ON CONFLICT(currency,day) DO UPDATE SET usd_per_unit=excluded.usd_per_unit,source=excluded.source""",
                 (currency.upper(), day, usd_per_unit, source))
-        self.backfill_missing_fx(currency)
+        return self.backfill_missing_fx(currency)
 
     def save_fx_history(self, currency, bars, source="IBKR historical"):
         with self.conn:
@@ -684,18 +672,20 @@ class Database:
                 ON CONFLICT(currency,day) DO UPDATE SET usd_per_unit=excluded.usd_per_unit,source=excluded.source""",
                 [(currency.upper(), bar["day"], bar["close"], source)
                  for bar in bars if bar["close"] > 0])
-        self.backfill_missing_fx(currency)
+        return self.backfill_missing_fx(currency)
 
     def backfill_missing_fx(self, currency):
+        """Fill trades whose FX rate was unknown; returns how many trades changed."""
         with self.conn:
-            self.conn.execute("""UPDATE trades SET fx_to_usd=(
+            updated = self.conn.execute("""UPDATE trades SET fx_to_usd=(
                 SELECT f.usd_per_unit FROM fx_rates f WHERE f.currency=trades.currency
                 AND f.day<=trades.trade_date AND julianday(trades.trade_date)-julianday(f.day)<=7
                 ORDER BY f.day DESC LIMIT 1)
                 WHERE currency=? AND fx_to_usd<=0 AND EXISTS (
                 SELECT 1 FROM fx_rates f WHERE f.currency=trades.currency AND f.day<=trades.trade_date
                 AND julianday(trades.trade_date)-julianday(f.day)<=7)""",
-                (currency.upper(),))
+                (currency.upper(),)).rowcount
+        return updated
 
     def fx_rate(self, currency, day):
         if currency.upper() == "USD":
@@ -711,18 +701,12 @@ class Database:
                 (portfolio_id,con_id,quantity,symbol,currency,as_of) VALUES (?,?,?,?,?,?)""",
                 [(portfolio_id, int(row["con_id"]), float(row["quantity"]), row.get("symbol", ""),
                   row.get("currency", ""), as_of) for row in rows])
-            self.conn.execute('''INSERT INTO app_metadata(key,value) VALUES (?,?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value''',
-                (f'broker_positions_full_snapshot_{portfolio_id}', as_of))
 
     def save_broker_position_delta(self, portfolio_id, row, as_of):
         with self.conn:
             if abs(float(row["quantity"])) < 1e-9:
                 self.conn.execute("DELETE FROM broker_positions WHERE portfolio_id=? AND con_id=?",
                                   (portfolio_id, int(row["con_id"])))
-                self.conn.execute('''INSERT INTO app_metadata(key,value) VALUES (?,?)
-                    ON CONFLICT(key) DO UPDATE SET value=excluded.value''',
-                    (f'broker_position_zero_{portfolio_id}_{int(row["con_id"])}', as_of))
             else:
                 self.conn.execute("""INSERT INTO broker_positions
                     (portfolio_id,con_id,quantity,symbol,currency,as_of) VALUES (?,?,?,?,?,?)
@@ -750,6 +734,11 @@ class Database:
                                                    "local_symbol", "expiry", "option_right", "strike", "trading_class"):
                 self.conn.execute("DELETE FROM contracts WHERE position_id=?", (row_id,))
                 self.conn.execute("UPDATE positions SET con_id=NULL WHERE id=?", (row_id,))
+            if table == "positions" and field in ("ib_symbol", "security_type", "expiry", "option_right", "strike"):
+                security_type = self.conn.execute("SELECT security_type FROM positions WHERE id=?",
+                                                  (row_id,)).fetchone()
+                if security_type and security_type[0] == "OPT":
+                    self._set_option_label(row_id)
 
     def delete(self, table, row_id):
         if table not in ("positions", "trades"):
@@ -768,7 +757,8 @@ class Database:
             return
         populated = any(self.conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
                         for table in ("positions", "trades", "broker_positions", "account_values",
-                                      "account_history", "cash_movements", "broker_executions"))
+                                      "account_history", "account_monthly_history", "legacy_account_performance",
+                                      "legacy_statement_sources", "cash_movements", "broker_executions"))
         if populated:
             raise ValueError("This database already contains portfolio data. Use a separate database for another IBKR account.")
 
@@ -779,7 +769,9 @@ class Database:
         if configured and configured != account_id:
             raise ValueError("IBKR account differs from the selected portfolio account")
         for table in ("broker_executions", "broker_source_records", "broker_sync_windows",
-                      "cash_movements", "cash_reconciliations", "trade_fee_adjustments"):
+                      "cash_movements", "trade_fee_adjustments", "account_monthly_history",
+                      "legacy_account_performance", "legacy_position_openings",
+                      "legacy_statement_sources", "legacy_statement_rows"):
             if self.conn.execute(f"SELECT 1 FROM {table} WHERE account_id<>? LIMIT 1",
                                  (account_id,)).fetchone():
                 raise ValueError("This database contains records from another IBKR account. Use a separate database.")
@@ -840,7 +832,7 @@ class Database:
         # A Flex sync may hold the writer lock. Quote caching is optional, so skip
         # that batch rather than blocking the UI behind the main 30-second timeout.
         try:
-            with SessionLease(self.path), closing(connect(self.path, self._key, timeout=0.05)) as cache_conn:
+            with closing(sqlite3.connect(self.path, timeout=0.05)) as cache_conn:
                 with cache_conn:
                     cache_conn.executemany("""INSERT INTO market_quotes
                         (portfolio_id,account_id,position_id,con_id,price,source,as_of)
@@ -879,20 +871,47 @@ class Database:
                     if details.get(source) not in (None, ""):
                         self.conn.execute(f"UPDATE positions SET {field}=? WHERE id=?",
                                           (details[source], position_id))
+                if details.get("security_type") == "OPT":
+                    self._set_option_label(position_id)
 
     def backup(self, directory=None):
-        target_dir = validate_data_directory(directory or self.setting("backup_directory") or self.path.parent / "backups")
+        target_dir = Path(directory or self.setting("backup_directory") or self.path.parent / "backups")
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"portfolio-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3"
-        identity = read_identity(self.path)
-        write_identity(target, identity)
+        destination = sqlite3.connect(target)
         try:
-            export_database(self.conn, target, self._key)
-        except BaseException:
-            identity_path(target).unlink(missing_ok=True)
-            raise
+            self.conn.backup(destination)
+        finally:
+            destination.close()
         return target
 
     def configure_data_directory(self, directory):
-        from app.storage.migration import relocate_portfolio
-        return relocate_portfolio(self, directory)
+        """Copy a quiescent database and select the verified copy for next launch."""
+        root = Path(directory) if directory else default_data_dir()
+        target_dir = new_portfolio_dir(root)
+        target = target_dir / "portfolio.sqlite3"
+        temporary = target_dir / f".portfolio-{uuid4().hex}.sqlite3"
+        created = False
+        try:
+            with closing(sqlite3.connect(temporary)) as destination:
+                self.conn.backup(destination)
+                if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise RuntimeError("Copied portfolio database failed integrity check")
+            os.replace(temporary, target)
+            created = True
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            target_dir.rmdir()
+            raise
+        config_path = local_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_temp = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
+        try:
+            config_temp.write_text(json.dumps({"data_directory": str(target_dir)}), encoding="utf-8")
+            os.replace(config_temp, config_path)
+        except Exception:
+            config_temp.unlink(missing_ok=True)
+            if created:
+                target.unlink(missing_ok=True)
+                target_dir.rmdir()
+            raise

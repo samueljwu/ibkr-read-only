@@ -1,14 +1,12 @@
 """All financial conventions used by the pilot live here."""
 
-from datetime import date
+from datetime import date, timedelta
 from math import isfinite
 from decimal import Decimal, InvalidOperation
 import re
 
 import pandas as pd
 import numpy as np
-
-from app.finance.trade_costs import trade_cost_usd
 
 
 def looks_like_option_ticker(display_ticker):
@@ -79,27 +77,54 @@ def advx(qty, adv):
     return abs(float(qty or 0)) / adv if adv and adv > 0 else None
 
 
+def prepare_history(history, as_of):
+    """Parse completed daily bars and the comparison dates once for one instrument.
+
+    Reusing the result across the rows or lots of the same instrument avoids
+    re-parsing identical bars on every lookup.
+    """
+    bars = []
+    for row in history:
+        day = date.fromisoformat(str(row["day"]))
+        close = row["close"]
+        if day < as_of and valid_price(close):
+            bars.append((day, float(close)))
+    bars.sort()
+    stamp = pd.Timestamp(as_of)
+    targets = {
+        "1m": (stamp - pd.DateOffset(months=1)).date(),
+        "3m": (stamp - pd.DateOffset(months=3)).date(),
+        "6m": (stamp - pd.DateOffset(months=6)).date(),
+        "mtd": as_of.replace(day=1) - timedelta(days=1),
+        "ytd": date(as_of.year - 1, 12, 31),
+    }
+    return bars, targets
+
+
+def window_returns(current, bars, targets):
+    """Return the 5d/1m/3m/6m/mtd/ytd changes for a history prepared once."""
+    if not bars:
+        return {key: None for key in ("5d", "1m", "3m", "6m", "mtd", "ytd")}
+
+    def on_or_before(target):
+        return next((close for day, close in reversed(bars) if day <= target), None)
+
+    reference = {
+        "5d": bars[-5][1] if len(bars) >= 5 else None,
+        "1m": on_or_before(targets["1m"]),
+        "3m": on_or_before(targets["3m"]),
+        "6m": on_or_before(targets["6m"]),
+        "mtd": on_or_before(targets["mtd"]),
+        "ytd": on_or_before(targets["ytd"]),
+    }
+    return {key: ratio(current, value) for key, value in reference.items()}
+
+
 def historical_returns(current, history, as_of=None):
     """History contains completed daily bars only; reference dates use prior sessions."""
     as_of = as_of or date.today()
-    rows = sorted((date.fromisoformat(str(r["day"])), float(r["close"]))
-                  for r in history if date.fromisoformat(str(r["day"])) < as_of and valid_price(r["close"]))
-    if not rows:
-        return {k: None for k in ("5d", "1m", "3m", "6m", "mtd", "ytd")}
-
-    def on_or_before(target):
-        return next((close for day, close in reversed(rows) if day <= target), None)
-
-    stamp = pd.Timestamp(as_of)
-    targets = {
-        "5d": rows[-5][1] if len(rows) >= 5 else None,
-        "1m": on_or_before((stamp - pd.DateOffset(months=1)).date()),
-        "3m": on_or_before((stamp - pd.DateOffset(months=3)).date()),
-        "6m": on_or_before((stamp - pd.DateOffset(months=6)).date()),
-        "mtd": on_or_before(as_of.replace(day=1) - pd.Timedelta(days=1)),
-        "ytd": on_or_before(date(as_of.year - 1, 12, 31)),
-    }
-    return {key: ratio(current, reference) for key, reference in targets.items()}
+    bars, targets = prepare_history(history, as_of)
+    return window_returns(current, bars, targets)
 
 
 def closed_lot(buy, sell, qty):
@@ -110,24 +135,17 @@ def closed_lot(buy, sell, qty):
     if (buy_multiplier is None or sell_multiplier is None or buy_multiplier != sell_multiplier or
         buy_fx is None or sell_fx is None):
         return {key: None for key in ("buy_value_usd", "sell_value_usd", "buy_commission",
-                                      "sell_commission", "buy_tax", "sell_tax", "realized_gross", "realized_net", "realized_pct")}
+                                      "sell_commission", "realized_gross", "realized_net", "realized_pct")}
     buy_value = qty * float(buy["price"]) * buy_multiplier * buy_fx
     sell_value = qty * float(sell["price"]) * sell_multiplier * sell_fx
     buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
     sell_comm = float(sell["commission_usd"] or 0) * qty / float(sell["quantity"])
     gross = sell_value - buy_value
-    buy_tax = buy.get('tax_usd', 0)
-    sell_tax = sell.get('tax_usd', 0)
-    buy_tax = buy_tax * qty / float(buy['quantity']) if buy_tax is not None else None
-    sell_tax = sell_tax * qty / float(sell['quantity']) if sell_tax is not None else None
-    complete = trade_cost_usd(buy) is not None and trade_cost_usd(sell) is not None
-    net = gross - buy_comm - sell_comm - buy_tax - sell_tax if complete else None
-    basis = buy_value + buy_comm + buy_tax if complete else None
+    net = gross - buy_comm - sell_comm
     return {"buy_value_usd": buy_value, "sell_value_usd": sell_value,
             "buy_commission": buy_comm, "sell_commission": sell_comm,
-            "buy_tax": buy_tax, "sell_tax": sell_tax,
             "realized_gross": gross, "realized_net": net,
-            "realized_pct": net / basis if net is not None and basis else None}
+            "realized_pct": net / (buy_value + buy_comm) if buy_value + buy_comm else None}
 
 
 def open_lot(buy, qty, current, current_fx):
@@ -136,19 +154,16 @@ def open_lot(buy, qty, current, current_fx):
     multiplier = valid_multiplier(buy.get("multiplier", 1))
     buy_fx, current_fx = valid_price(buy.get("fx_to_usd")), valid_price(current_fx)
     if multiplier is None or buy_fx is None or current_fx is None:
-        return {key: None for key in ("buy_value_usd", "buy_commission", "buy_tax", "current_value",
+        return {key: None for key in ("buy_value_usd", "buy_commission", "current_value",
                                       "net_unrealized", "unrealized_pct")}
     buy_value = qty * float(buy["price"]) * multiplier * buy_fx
     buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
     gross = qty * multiplier * (current * current_fx - float(buy["price"]) * buy_fx) if current else None
-    buy_tax = buy.get('tax_usd', 0)
-    buy_tax = buy_tax * qty / float(buy['quantity']) if buy_tax is not None else None
-    net = gross - buy_comm - buy_tax if gross is not None and trade_cost_usd(buy) is not None else None
-    basis = buy_value + buy_comm + buy_tax if buy_tax is not None else None
-    return {"buy_value_usd": buy_value, "buy_commission": buy_comm, "buy_tax": buy_tax,
+    net = gross - buy_comm if gross is not None else None
+    return {"buy_value_usd": buy_value, "buy_commission": buy_comm,
             "current_value": qty * multiplier * current * current_fx if current else None,
             "net_unrealized": net,
-            "unrealized_pct": net / basis if net is not None and basis else None}
+            "unrealized_pct": net / (buy_value + buy_comm) if net is not None and buy_value + buy_comm else None}
 
 
 def flow_adjusted_daily_pnl(current_qty, current_price, current_fx, prior_price, prior_fx,
@@ -158,25 +173,31 @@ def flow_adjusted_daily_pnl(current_qty, current_price, current_fx, prior_price,
         current_price, prior_price = valid_price(current_price), valid_price(prior_price)
         current_fx, prior_fx = valid_price(current_fx), valid_price(prior_fx)
         multiplier = valid_multiplier(multiplier)
-        if None in (current_price, prior_price, current_fx, prior_fx, multiplier):
+        if multiplier is None:
             return None
         prior_qty = Decimal(str(current_qty))
         trade_cash = Decimal(0)
         for trade in today_trades:
+            if not trade.get("commission_complete", True):
+                return None
             fx = valid_price(trade.get("fx_to_usd"))
             trade_mult = valid_multiplier(trade.get("multiplier"))
             if fx is None or trade_mult != multiplier:
-                return None
-            costs = trade_cost_usd(trade)
-            if costs is None:
                 return None
             units = Decimal(str(trade["quantity"]))
             sign = 1 if trade["side"] == "SELL" else -1
             prior_qty -= units if trade["side"] == "BUY" else -units
             trade_cash += (sign * units * Decimal(str(trade["price"])) * Decimal(str(fx)) *
-                           Decimal(str(multiplier)) - Decimal(str(costs)))
-        current_value = Decimal(str(current_qty)) * Decimal(str(current_price)) * Decimal(str(current_fx)) * Decimal(str(multiplier))
-        prior_value = prior_qty * Decimal(str(prior_price)) * Decimal(str(prior_fx)) * Decimal(str(multiplier))
+                           Decimal(str(multiplier)) - Decimal(str(trade["commission_usd"] or 0)))
+        current_qty = Decimal(str(current_qty))
+        if current_qty and (current_price is None or current_fx is None):
+            return None
+        if prior_qty and (prior_price is None or prior_fx is None):
+            return None
+        current_value = (current_qty * Decimal(str(current_price)) * Decimal(str(current_fx)) *
+                         Decimal(str(multiplier)) if current_qty else Decimal(0))
+        prior_value = (prior_qty * Decimal(str(prior_price)) * Decimal(str(prior_fx)) *
+                       Decimal(str(multiplier)) if prior_qty else Decimal(0))
         return float(current_value - prior_value + trade_cash)
     except (TypeError, ValueError, InvalidOperation, ArithmeticError):
         return None

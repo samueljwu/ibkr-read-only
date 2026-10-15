@@ -1,55 +1,61 @@
-# Security design and verification
+# Security design and release gates
 
-Status: encrypted storage is integrated in the Windows v1.0.1 patch candidate for stable and Dev. The published v1.0.0 installer uses plaintext SQLite. Verification uses disposable synthetic portfolios; it has not migrated an existing user portfolio. The owner has authorized patch publication with the recorded distribution review deferral; the runtime and license findings remain unresolved.
+Status: design in progress. The current application uses unencrypted SQLite
+and unencrypted SQLite backups. It must not be described as production secure.
 
-## Scope and boundaries
+## Assets and boundaries
 
-The app is read-only with respect to Interactive Brokers and cannot place orders. Flex tokens stay in Windows Credential Manager, separate from database keys and separate between stable and Dev. The app never asks for an IBKR login password. Report requests reject redirects and diagnostics must not print token-bearing URLs.
+The sensitive assets are Flex Web Service tokens, account and query identifiers,
+trades, positions, cash movements, reports, exports, backups, and diagnostic
+logs. User data belongs in a per-user local data directory, separate from
+installed application files and source control. A user-selected directory may
+be synchronized by another service; the application must explain that choice.
 
-Source runs use Dev storage under `%LOCALAPPDATA%\CustomIBMonitor\dev\data\`; stable builds use `stable\data\`. Every portfolio has an immutable random UUID. Its nonsecret identity sidecar records the UUID and channel; the encrypted database must contain the same UUID. Names and account identifiers never determine database-key targets. Opening an existing portfolio with missing identity, a missing key, a wrong key, an unsupported schema or failed page authentication stops before writable admission. Keys are never silently regenerated over existing data.
+IBKR account credentials are never requested by this application. Flex tokens
+are stored in Windows Credential Manager and used only for direct report
+requests. The token travels in IBKR's required query parameter, so requests
+must reject redirects and diagnostics must never print full request URLs.
+Live broker connections are local TWS or IB Gateway socket connections and
+must remain read-only.
 
-Encryption protects database pages and database backups at rest. It does not protect against malware running as the signed-in user. Filenames, file sizes, timestamps, locking information and the identity sidecar remain visible. Flex XML/report caches, diagnostic logs, Excel exports, old databases and old backups remain separate plaintext artifacts. Workbook export is labelled unencrypted. Migration preserves the original plaintext copy; it cannot erase historical cloud storage copies, snapshots or recycle-bin contents. Do not describe the whole application directory as encrypted.
+## Threats to address before publication
 
-## Native engine and connection policy
+1. A public commit or release accidentally contains account data, a report,
+   a database, or a token.
+2. A copied database, temporary file, export, or backup exposes finances.
+3. A malformed report exhausts resources, bypasses account checks, or creates
+   incomplete ledger entries that appear reconciled.
+4. A token leaks through logs, errors, redirects, command arguments, or a
+   support bundle.
+5. An installer or update is replaced or built from unreviewed dependencies.
+6. A failed upgrade corrupts the only copy of the portfolio.
 
-The Windows CPython 3.11 x64 runtime uses the third-party `sqlcipher3==0.6.3` wheel. The reviewed wheel reports SQLCipher `4.12.0 community`, SQLite `3.51.1` and OpenSSL `3.6.0`. This is not a Zetetic-supported Windows binary. Its SHA-256 is pinned in `requirements-security-qa.txt`; packaging additionally checks the installed native extension against the reviewed wheel contents and records native versions and hashes. A package-version pin alone is insufficient provenance.
+The application cannot protect data from malware already running with the
+same user's access while the portfolio is open. Encryption at rest and the
+Windows credential store address different risks; both require review.
 
-All production connections use `app/storage/security_storage.py`. There is no plaintext SQLite fallback. Connections require a raw random 32-byte key, SQLCipher 4 authenticated pages with no plaintext header, memory-only SQL temporary storage, disabled memory mapping, FULL synchronization and foreign keys. Extension loading is disabled, `trusted_schema=OFF` and `cell_size_check=ON`. The adapter authenticates a schema read and confirms `cipher_status` before journal or schema writes. Application admission rejects unexpected executable schema objects, including triggers, views and virtual tables. Key-bearing SQL must never be traced or logged; keys must not enter command arguments, environment variables, configuration, filenames or diagnostics.
+## Decisions still required
 
-Production uses **DELETE rollback journals**. The bundled SQLite predates the [WAL-reset corruption fix](https://www.sqlite.org/wal.html#walreset); production WAL concurrency is therefore unsupported. The explicit WAL tests exercise the SQLCipher reference boundary and do not approve WAL mode for the application. Database pages in rollback journals and encrypted pending exports remain encrypted. Memory-only sorts and temporary SQL tables are checked with synthetic sentinels. Filesystem traces are outside that test's proof.
+- Select a vetted encrypted SQLite approach and a key storage method. Include
+  journals, temporary files, and crash recovery in tests.
+- Design encrypted backups that can be restored on a different computer after
+  the original Windows profile is lost. Test wrong key, interrupted export,
+  and restoration against a fresh installation.
+- Define supported IBKR account types, base currencies, instruments, report
+  formats, and historical coverage limits before the importer can claim a
+  complete result.
+- Decide whether source and release builds will run only in an isolated CI
+  environment or also through a reproducible local build environment. Pin
+  dependencies and review licenses before shipping.
 
-The optional `cipher_memory_security=ON` setting caused a native Windows stack-overflow crash with this wheel and remains disabled. There is no locked-memory or comprehensive memory-wiping claim. Python key copies, process memory, swap, hibernation and dumps are outside the at-rest encryption boundary. The reviewed production settings require repeated native and packaged usability checks; a future native dependency replacement must repeat them.
+## Required verification
 
-Primary sources checked for this dependency include the [SQLCipher changelog](https://github.com/sqlcipher/sqlcipher/blob/master/CHANGELOG.md), [SQLCipher design](https://www.zetetic.net/sqlcipher/design/), [SQLCipher APIs](https://www.zetetic.net/sqlcipher/sqlcipher-api/), [binding source](https://github.com/coleifer/sqlcipher3), [SQLite release history](https://www.sqlite.org/changes.html) and [OpenSSL advisories](https://openssl-library.org/news/vulnerabilities/). Review scopes the actual fixed aliases and AES-CBC/HMAC/SHA-512/random-number paths; it does not clear every Python HTTPS or Qt TLS dependency. Native-version age is recorded, not hidden by successful tests.
-
-## Local key custody
-
-Each new portfolio receives a random 256-bit key in Windows Credential Manager at `custom-ib-monitor:<channel>:database-key:<UUID>:v1`. Custody is written and read back before an encrypted candidate is published. Flex-token targets are independent. Unsupported custody platforms fail explicitly rather than storing a plaintext key. Existing portfolio keys are read only from their validated exact target; the application does not enumerate credentials or search another channel as a fallback.
-
-Creation reserves identity metadata and a temporary encrypted candidate exclusively. Authentication, schema and integrity are verified before non-overwriting publication; the selection pointer changes last. Failed or interrupted operations retain enough nonsecret identity/operation metadata to distinguish an incomplete candidate from a finalized portfolio. Rollback removes only artifacts owned by that operation. Missing keys require a portable recovery backup and its separately held code.
-
-## Preserved-original migration, copies and relocation
-
-Legacy migration is explicit at startup. It validates a recognized application schema and account provenance, denies concurrent Windows writers, and exports through SQLCipher into a newly keyed encrypted portfolio. The original database is never rekeyed, renamed or deleted. Nonempty WAL, SHM or journal sidecars cause a refusal: close the old app so it finishes checkpoint/recovery, then retry. Migration never discards committed WAL records or recovers an original on the user's behalf.
-
-A verified encrypted pre-upgrade snapshot precedes candidate schema changes. Admission locks coordinate GUI sessions, quote-cache connections and workers; maintenance refuses other active sessions. The app verifies integrity and data from the exported snapshot, publishes without overwriting and selects last. A crash can leave an unselected encrypted candidate and an operation receipt; an incomplete candidate is never adopted.
-
-Explicit copies and recovery restores receive a new UUID and key, clear storage paths and automatic Flex references, and start with the Mock provider. Relocation preserves UUID/key, blocks admission to the retained old path, and changes selection last. Recovery from a finalized relocation requires the source's retirement marker; an unretired copy may be stale and must not replace a newer source. Startup offers recovery from a validated finalized operation receipt. Both identities and integrity are rechecked under maintenance before adoption.
-
-## Local backups and portable recovery
-
-**Create encrypted local backup** uses an authenticated SQLCipher snapshot under the portfolio's local key, with its nonsecret identity sidecar. It preserves committed data and refuses an existing destination. It requires the original Windows profile key; copying that backup to another computer does not copy the key. **Restore encrypted local backup** validates the original identity/key and installs a new portfolio under new local custody.
-
-**Export portable recovery backup** generates a separate random 256-bit recovery key for each export. The printable `PMR1` code is an encoding with a transcription checksum, not a password KDF or custom encryption envelope. The GUI displays it deliberately, requires re-entry from the saved copy, exports the encrypted database, then tests restoration into an isolated new portfolio with a new local key before reporting success. The app never saves the code in settings, credentials, logs, the backup, or beside it and does not automatically copy it to the clipboard. Keep the code separately from the backup and independently of the Windows profile.
-
-Export uses a dedicated authenticated connection and a consistent committed snapshot. It never commits the caller's unfinished transaction. Temporary files and journals are encrypted; the finalized file is reopened, authenticated, integrity checked and flushed before atomic non-overwriting publication. A handled failure removes its owned pending files. A hard crash may leave an encrypted pending file; it is not a completed export. Backups are limited to 512 MiB.
-
-**Restore portable recovery backup** requires only the finalized backup and separately held code. It does not depend on the original computer, profile, local database or local key. The GUI authenticates the backup, validates supported application/schema/account context and asks the user to confirm the account. Restore creates a fresh portfolio and local key, verifies custody and integrity, clears copied storage/automatic connection settings, and selects last. It never overwrites the current portfolio or changes the backup. Wrong codes, corrupt files, unsupported schemas and existing destinations fail closed. Portable restore remains available when startup cannot open the selected portfolio because its local key is missing.
-
-## Verification and distribution limitations
-
-Reusable tests cover authenticated files, rollback/WAL reference journals, SQL temporary storage, wrong and missing keys, tampered pages, interrupted export, process crashes, executable/unknown schemas, admission coordination, preserved originals, copies, relocation, backup UI custody/cancel behavior and profile-independent recovery. Native key tests create random synthetic exact targets and remove only those targets. Changing LOCALAPPDATA is a disposable storage-root simulation, not a new Windows security profile. Tests that skip native encryption or custody do not establish acceptance.
-
-Run the integrated suite with the pinned native dependency, and use an empty disposable Dev root for the installed package's `--verify-package` checks. Verification receipts belong under ignored `build/qa/`; do not commit synthetic databases, reports or recovery codes. Source and payload allowlists exclude portfolio identities, operation receipts, databases, sidecars and recovery backups.
-
-Patch publication requires review of the final combined change, the full native suite, and installed package and upgrade/uninstall retention checks. Actual clean-Windows-profile/other-computer recovery acceptance remains outstanding and must be recorded separately. Same-machine key deletion proves recovery independence for the tested data; it does not substitute for another installation's acceptance. Keep the [importer support contract](HISTORICAL_REPORTS.md#importer-support-contract-v1) and coverage limits; encryption does not make a historical import complete. Builds must preserve the pinned isolated Python 3.11 runtime, explicit allowlist, exact committed-tag/source checks and native provenance. The owner has explicitly deferred distribution-license and runtime review for publication; that status remains deferred/blocked rather than approved. Python 3.11.4 and the recorded SQLCipher/SQLite/OpenSSL versions are retained under this deferral; passing synthetic checks does not resolve their age or licensing findings. See [development and packaging](DEVELOPMENT.md#windows-packaging-and-releases).
+- Audit the full public Git history and every release artifact, not only the
+  working tree. Use synthetic fixtures; do not run CI with live tokens or data.
+- Test wrong-account, malformed, oversized, repeated, and partial reports.
+- Test direct HTTPS behavior, redirect rejection, token redaction, expiry, and
+  revocation handling.
+- Test schema migrations, encrypted backup and restore, clean install, upgrade,
+  offline startup, and uninstall data retention on a clean Windows account.
+- Review the build dependency list, sign release packages, verify provenance,
+  and inspect the exact files shipped.

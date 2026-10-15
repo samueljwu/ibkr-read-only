@@ -1,39 +1,45 @@
 """Make a disposable SQLite copy for debugging without changing the source."""
 
 import argparse
+from contextlib import closing
 from pathlib import Path
-from app.storage.paths import create_portfolio_directory, validate_database_path
-from app.storage.migration import copy_portfolio
-from sqlcipher3.dbapi2 import Error as DatabaseError
+import sqlite3
 
 
-def copy_database(source, destination, source_channel=None):
-    # Explicit read-only import may copy legacy/stable data into the active
-    # channel. The destination must always stay inside the active channel.
+def copy_database(source, destination):
     source = Path(source).expanduser().resolve()
-    destination = validate_database_path(destination)
+    destination = Path(destination).expanduser().resolve()
     if not source.is_file():
         raise FileNotFoundError("The source database does not exist")
-    return copy_portfolio(source, destination, source_channel=source_channel)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Reserve the path exclusively; never overwrite a previous copy or source.
+    with destination.open("xb"):
+        pass
+    try:
+        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
+            with closing(sqlite3.connect(destination)) as copied:
+                original.backup(copied)
+                if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ValueError("Copied database failed its integrity check")
+                # A debug copy must not move itself or write backups to the
+                # original database's configured folders.
+                with copied:
+                    copied.execute("UPDATE settings SET value='' WHERE key IN "
+                                   "('data_directory', 'backup_directory')")
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--source-channel", choices=("dev", "stable"),
-                        help="Explicit custody channel for an encrypted cross-channel source")
-    parser.add_argument("--destination", type=Path,
-                        help="SQLite path within this channel's data root; omitted creates a new portfolio ID")
+    parser.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        destination = args.destination
-        if destination is None:
-            source = args.source.expanduser().resolve()
-            if not source.is_file():
-                raise FileNotFoundError("The source database does not exist")
-            destination = create_portfolio_directory() / "portfolio.sqlite3"
-        print(copy_database(args.source, destination, args.source_channel))
-    except (OSError, RuntimeError, ValueError, DatabaseError) as exc:
+        print(copy_database(args.source, args.destination))
+    except (OSError, sqlite3.Error, ValueError) as exc:
         parser.exit(1, f"Copy failed: {exc}\n")
     return 0
 

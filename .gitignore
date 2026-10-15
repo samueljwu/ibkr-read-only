@@ -17,6 +17,8 @@ backups/
 reports/
 logs/
 history-import-status.json
+history-import-*.json
+.history-import-*.json-*.tmp
 secrets/
 local_config.json
 .env*

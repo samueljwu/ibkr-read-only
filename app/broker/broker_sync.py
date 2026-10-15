@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Iterable
-from contextlib import nullcontext
 import xml.etree.ElementTree as ET
+
+from app.flex.flex_import import FlexValidationError, flex_day, require_usd_base
+from app.finance.option_labels import option_label
 
 
 def _number(value):
@@ -22,10 +25,7 @@ def _number(value):
 
 
 def _day(value):
-    value = str(value or "").strip()
-    if len(value) >= 8 and value[:8].isdigit():
-        return date(int(value[:4]), int(value[4:6]), int(value[6:8])).isoformat()
-    return date.fromisoformat(value[:10]).isoformat()
+    return flex_day(value)
 
 
 def _clock(value):
@@ -84,7 +84,6 @@ def record_from_tws(contract, execution, account_id: str) -> dict:
         "multiplier": _effective_multiplier(
             security_type, contract.multiplier or ("1" if security_type in {"STK", "CASH"} else None)),
         "fx_to_usd": 1.0 if str(contract.currency).upper() == "USD" else None,
-        "taxes": None,
         "commission": None, "commission_currency": str(contract.currency or "").upper(),
         "local_symbol": str(contract.localSymbol or ""),
         "expiry": str(contract.lastTradeDateOrContractMonth or ""),
@@ -99,8 +98,6 @@ class IngestResult:
     duplicates: int = 0
     review: int = 0
     execution_review: int = 0
-    execution_blocking_review: int = 0
-    pending_tax: int = 0
     legacy_inserted: int = 0
     legacy_duplicates: int = 0
     corporate_inserted: int = 0
@@ -108,22 +105,30 @@ class IngestResult:
     changed_position_ids: set[int] = field(default_factory=set)
 
 
-def parse_flex_xml(xml_data: bytes, expected_account: str) -> tuple[list[dict], list[dict]]:
+def parse_flex_root(xml_data: bytes):
+    """Parse one report, rejecting oversized payloads and document types.
+
+    A document type can only appear in the prolog, so the check reads the start
+    of the payload rather than upper-casing the whole report.
+    """
+    if len(xml_data) > 30_000_000 or b"<!DOCTYPE" in xml_data[:4096].upper():
+        raise FlexValidationError("Flex XML is too large or contains an unsupported document type")
+    try:
+        return ET.fromstring(xml_data)
+    except ET.ParseError:
+        raise FlexValidationError("Flex XML is invalid; request a fresh XML report") from None
+
+
+def parse_flex_xml(xml_data: bytes, expected_account: str, *, root=None) -> tuple[list[dict], list[dict]]:
     """Keep every execution and lifecycle event for ingestion or explicit review."""
-    if len(xml_data) > 30_000_000 or b"<!DOCTYPE" in xml_data.upper():
-        raise ValueError("Flex XML is too large or contains an unsupported document type")
-    root = ET.fromstring(xml_data)
+    if root is None:
+        root = parse_flex_root(xml_data)
     statements = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "FlexStatement"]
     accounts = {node.get("accountId", "") for node in statements}
     if accounts != {expected_account}:
-        raise ValueError("Flex report account does not match the selected IBKR account")
-    declared_bases = {node.get("baseCurrency", "").upper() for node in statements if node.get("baseCurrency")}
-    conversion_targets = {node.get("toCurrency", "").upper() for node in root.iter()
-                          if node.tag.rsplit("}", 1)[-1] == "ConversionRate"}
-    if declared_bases and declared_bases != {"USD"}:
-        raise ValueError("Flex import requires USD base currency")
-    if not declared_bases and conversion_targets != {"USD"}:
-        raise ValueError("Flex report does not establish USD base currency")
+        raise FlexValidationError("Flex report account does not match the selected IBKR account")
+    for statement in statements:
+        require_usd_base(statement, expected_account, conversion_evidence=True)
     executions, events = [], []
     for node in root.iter():
         tag = node.tag.rsplit("}", 1)[-1]
@@ -131,13 +136,13 @@ def parse_flex_xml(xml_data: bytes, expected_account: str) -> tuple[list[dict], 
         if tag in {"CorporateAction", "OptionEAE", "Transfer"}:
             if raw:
                 if raw.get("accountId") and raw["accountId"] != expected_account:
-                    raise ValueError("Flex event account does not match the selected IBKR account")
+                    raise FlexValidationError("Flex event account does not match the selected IBKR account")
                 events.append({"kind": tag, "raw": raw})
             continue
         if tag != "Trade":
             continue
         if raw.get("accountId") and raw["accountId"] != expected_account:
-            raise ValueError("Flex execution account does not match the selected IBKR account")
+            raise FlexValidationError("Flex execution account does not match the selected IBKR account")
         detail = (raw.get("levelOfDetail") or raw.get("levelOfDetailCode") or "").upper()
         if detail not in {"EXECUTION", "EXECUTIONS"}:
             continue
@@ -162,9 +167,8 @@ def parse_flex_xml(xml_data: bytes, expected_account: str) -> tuple[list[dict], 
             "currency": (raw.get("currency") or "").upper(),
             "multiplier": _effective_multiplier(
                 (raw.get("assetCategory") or "").upper(),
-                raw.get("multiplier") or ("1" if raw.get("assetCategory") in {"STK", "CASH"} else None)),
+                raw.get("multiplier") or ("1" if raw.get("assetCategory") == "STK" else None)),
             "fx_to_usd": _number(raw.get("fxRateToBase")),
-            "taxes": _number(raw.get("taxes")),
             "commission": _number(raw.get("ibCommission")),
             "commission_currency": (raw.get("ibCommissionCurrency") or "").upper(),
             "local_symbol": raw.get("localSymbol") or "",
@@ -177,7 +181,7 @@ def parse_flex_xml(xml_data: bytes, expected_account: str) -> tuple[list[dict], 
 
 
 class BrokerIngestor:
-    def __init__(self, db, account_id: str, portfolio_id: int = 1):
+    def __init__(self, db, account_id: str, portfolio_id: int = 1, *, allow_flex_corrections=False):
         if not account_id:
             raise ValueError("IBKR account ID is required")
         configured = db.setting("ib_account_id")
@@ -185,14 +189,140 @@ class BrokerIngestor:
             raise ValueError("IBKR account differs from the selected portfolio account")
         db.validate_account_ownership(account_id)
         self.db, self.account_id, self.portfolio_id = db, account_id, portfolio_id
+        self.allow_flex_corrections = allow_flex_corrections
 
-    def ingest_many(self, records: Iterable[dict], source: str, window=None, events=(), *, transaction=True) -> IngestResult:
-        if source not in {"flex", "tws", "activity_statement"}:
+    def _economics(self, record, source):
+        fx = _number(record.get("fx_to_usd"))
+        if record["currency"] == "USD":
+            fx = 1.0
+        commission = _number(record.get("commission"))
+        currency = record.get("commission_currency") or record["currency"]
+        commission_usd = _number(record.get("commission_usd"))
+        if commission_usd is None and commission is not None:
+            rate = 1.0 if currency == "USD" else (fx if currency == record["currency"]
+                else self.db.fx_rate(currency, record["trade_date"]))
+            if rate is not None and rate > 0:
+                commission_usd = (-commission if source == "flex" else commission) * rate
+        return fx, commission_usd
+
+    @staticmethod
+    def _same_economics(old, record, fx, commission_usd):
+        expected = {name: record.get(name) for name in (
+            "trade_date", "side", "price", "currency", "security_type", "multiplier")}
+        expected.update(executed_at=record.get("executed_at") or "",
+                        quantity=abs(record.get("quantity") or 0), fx_to_usd=fx,
+                        commission_usd=commission_usd)
+        return all(old[name] == value for name, value in expected.items())
+
+    def flex_report_matches(self, records, events, window):
+        """Compare normalized economic rows, preserving omitted executions for review."""
+        first, last = window
+        prior = self.db.conn.execute("""SELECT DISTINCT e.execution_key FROM broker_executions e
+            JOIN trades t ON t.id=e.trade_row_id JOIN broker_source_records r
+            ON r.account_id=e.account_id AND r.execution_key=e.execution_key AND r.source='flex'
+            WHERE e.account_id=? AND t.portfolio_id=? AND t.trade_date BETWEEN ? AND ?""",
+            (self.account_id, self.portfolio_id, first, last)).fetchall()
+        keys = [execution_identity(record)[0] for record in records]
+        if {row[0] for row in prior} - set(keys):
+            raise FlexValidationError("Needs review: Trades report omits a previously imported execution; check query filters")
+        if len(set(keys)) != len(keys):
+            raise FlexValidationError("Needs review: Trades report contains repeated execution identities")
+        reviewed = {}
+        incoming_ids = {record.get("source_id") for record in records}
+        for row in self.db.conn.execute("""SELECT r.execution_key,r.source_id,r.raw_json
+                FROM broker_source_records r WHERE r.account_id=? AND r.source='flex'
+                AND r.status='review' AND r.trade_row_id IS NULL AND NOT EXISTS (
+                    SELECT 1 FROM broker_executions e WHERE e.account_id=r.account_id
+                    AND e.execution_key=r.execution_key)""", (self.account_id,)):
+            raw = json.loads(row["raw_json"])
+            day = raw.get("tradeDate") or raw.get("dateTime") or raw.get("trade_date")
+            if not day or not first <= _day(day) <= last:
+                continue
+            key = row["execution_key"]
+            if (key and key not in keys) or (not key and row["source_id"] not in incoming_ids):
+                raise FlexValidationError("Needs review: Trades report omits a previously reviewed execution; check query filters")
+            identity = key or ("source", row["source_id"])
+            reviewed.setdefault(identity, []).append(raw)
+
+        def reviewed_contents(raw):
+            numeric = {"quantity", "tradePrice", "price", "conid", "conId", "con_id",
+                       "multiplier", "fxRateToBase", "fx_to_usd", "ibCommission", "commission",
+                       "commission_usd", "strike"}
+            def normalized(name, value):
+                if name in numeric:
+                    return _number(value)
+                if value and name in {"tradeDate", "trade_date"}:
+                    return _day(value)
+                if value and name in {"tradeTime", "executed_at"}:
+                    return _clock(value)
+                if value and name == "dateTime":
+                    return (_day(value), _clock(value))
+                return value
+            return tuple(sorted((name, normalized(name, value)) for name, value in raw.items()))
+
+        same = True
+        review = 0
+        for record in records:
+            key, revision = execution_identity(record)
+            old = self.db.conn.execute("""SELECT t.*,e.revision,e.status AS execution_status,p.con_id
+                FROM broker_executions e JOIN trades t ON t.id=e.trade_row_id
+                JOIN positions p ON p.id=t.position_id WHERE e.account_id=? AND e.execution_key=?
+                AND t.portfolio_id=?""", (self.account_id, key, self.portfolio_id)).fetchone()
+            if old is None:
+                previous = reviewed.get(key or ("source", record.get("source_id")), [])
+                contents = reviewed_contents(record.get("raw") or record)
+                if any(reviewed_contents(raw) == contents for raw in previous):
+                    review += 1
+                else:
+                    same = False
+                continue
+            if revision < old["revision"]:
+                continue
+            fx, commission_usd = self._economics(record, "flex")
+            if fx is None or fx <= 0 or commission_usd is None:
+                if self._same_economics(old, record,
+                        fx if fx is not None and fx > 0 else old["fx_to_usd"],
+                        commission_usd if commission_usd is not None else old["commission_usd"]):
+                    review += 1
+                    continue
+                raise FlexValidationError("Needs review: incomplete execution correction; include commission and FX fields")
+            if (str(old["con_id"]) != str(record.get("con_id")) or
+                    not self._same_economics(old, record, fx, commission_usd) or
+                    revision > old["revision"] or old["execution_status"] != "complete"):
+                same = False
+
+        def event_contents(raw):
+            numeric = {"quantity", "tradePrice", "proceeds", "cost", "multiplier", "fxRateToBase",
+                       "positionAmountInBase", "cashTransfer"}
+            return tuple(sorted((name, _number(value) if name in numeric else value)
+                                for name, value in raw.items()))
+
+        old_events = []
+        for row in self.db.conn.execute("""SELECT raw_json,status FROM broker_source_records
+                WHERE account_id=? AND source='flex_event'""", (self.account_id,)):
+            raw = json.loads(row["raw_json"])
+            day = raw.get("reportDate") or raw.get("date") or raw.get("dateTime")
+            try:
+                day = _day(day) if day else None
+            except FlexValidationError:
+                # Older unsupported events may not carry a usable date.
+                continue
+            if day and first <= day <= last:
+                old_events.append(event_contents(raw))
+                if row["status"] == "review":
+                    review += 1
+        new_events = Counter(event_contents(event["raw"]) for event in events)
+        if Counter(old_events) - new_events:
+            raise FlexValidationError("Needs review: Trades report omits or changes a previously imported broker event")
+        return same and Counter(old_events) == new_events, review
+
+    def ingest_many(self, records: Iterable[dict], source: str, window=None, events=()) -> IngestResult:
+        if source not in {"flex", "tws"}:
             raise ValueError("Unsupported IBKR execution source")
         records = list(records)
         result = IngestResult()
         conn = self.db.conn
-        with conn if transaction else nullcontext():
+        with conn:
             accepted_count = 0
             for record in records:
                 if record.get("account_id") != self.account_id:
@@ -200,17 +330,8 @@ class BrokerIngestor:
                 if record.get("source", source) != source:
                     raise ValueError("Execution source mismatch")
                 accepted_count += bool(self._ingest_one(record, source, result))
-            # History arrives newest first. Retry splits once earlier purchases
-            # or transferred opening positions supply their missing share basis.
-            pending = [dict(kind="CorporateAction", raw=json.loads(row[0]))
-                       for row in conn.execute("""SELECT raw_json FROM broker_source_records
-                           WHERE account_id=? AND source='flex_event' AND status='review'
-                           AND issue LIKE 'Forward split requires ledger review:%'""",
-                                               (self.account_id,))]
-            event_by_id = {self._event_source_id(event): event for event in pending}
-            event_by_id.update((self._event_source_id(event), event) for event in events)
             split_groups = {}
-            for event in event_by_id.values():
+            for event in events:
                 raw = event.get("raw") or {}
                 if (event.get("kind") == "CorporateAction" and raw.get("type") == "FS" and
                     re.search(r"\bSPLIT\s+\d+\s+FOR\s+\d+\b", raw.get("actionDescription") or "", re.I)):
@@ -384,10 +505,16 @@ class BrokerIngestor:
             position_id = position[0]
             before = self.db.conn.execute("""SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN quantity ELSE -quantity END),0)
                 FROM trades WHERE position_id=? AND trade_date<?""", (position_id, trade_day)).fetchone()[0]
+            after = self.db.conn.execute("""SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN quantity ELSE -quantity END),0)
+                FROM trades WHERE position_id=?""", (position_id,)).fetchone()[0]
             stable_key = sha256(f"{con_id}|{trade_day}|{description}".encode()).hexdigest()[:16]
             trade_id = f"IBKR:{self.account_id}:CA:FS:{stable_key}"
-            if abs(float(quantity - Decimal(str(before)) * (ratio - 1))) > 1e-6:
-                raise ValueError("split shares do not reconcile with the pre-split holding")
+            prior = self.db.conn.execute("SELECT id FROM trades WHERE trade_id=?", (trade_id,)).fetchone()
+            if prior:
+                after -= self.db.conn.execute("SELECT quantity FROM trades WHERE id=?", (prior[0],)).fetchone()[0]
+            if (abs(float(quantity - Decimal(str(before)) * (ratio - 1))) > 1e-6 or
+                abs(after + float(quantity)) > 1e-6):
+                raise ValueError("split shares or eventual closing quantity do not reconcile")
             currency = (raw.get("currency") or "").upper()
             fx = 1.0 if currency == "USD" else _number(raw.get("fxRateToBase"))
             if not currency or not fx or fx <= 0:
@@ -441,24 +568,6 @@ class BrokerIngestor:
         return row_id
 
     def _record_source(self, source, source_id, key, trade_row_id, status, issue, record):
-        from app.finance.reconciliation import cash_evidence
-        raw = dict(record.get('raw') or record)
-        if source in {'flex', 'tws', 'activity_statement'}:
-            raw['_portfolio_id'] = self.portfolio_id
-            evidence_record = dict(record, _cash_revision=execution_identity(record)[1],
-                                   _cash_portfolio_id=self.portfolio_id)
-            raw['_cash_evidence'] = cash_evidence(evidence_record)
-            previous = self.db.conn.execute('''SELECT raw_json FROM broker_source_records
-                WHERE account_id=? AND source=? AND source_id=?''',
-                (self.account_id, source, source_id)).fetchone()
-            if previous:
-                prior = json.loads(previous['raw_json'])
-                prior_revision = (prior.get('_cash_evidence') or {}).get('revision',
-                    execution_identity({'ib_exec_id': prior.get('ibExecID')})[1])
-                if prior_revision > raw['_cash_evidence']['revision']:
-                    # A replay of the original must not erase an accepted
-                    # correction when Flex reuses its trade/source identifier.
-                    return
         self.db.conn.execute("""INSERT INTO broker_source_records
             (account_id,source,source_id,execution_key,trade_row_id,status,issue,raw_json)
             VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(account_id,source,source_id) DO UPDATE SET
@@ -466,7 +575,7 @@ class BrokerIngestor:
             status=excluded.status,issue=excluded.issue,raw_json=excluded.raw_json,
             seen_at=CURRENT_TIMESTAMP""",
             (self.account_id, source, source_id, key, trade_row_id, status, issue,
-             json.dumps(raw, sort_keys=True, default=str, separators=(",", ":"))))
+             json.dumps(record.get("raw") or record, sort_keys=True, default=str, separators=(",", ":"))))
 
     def _position(self, record):
         conn = self.db.conn
@@ -475,7 +584,9 @@ class BrokerIngestor:
                            (self.portfolio_id, con_id)).fetchone()
         if row:
             return row[0]
-        ticker = record.get("local_symbol") if record.get("security_type") == "OPT" else record["symbol"]
+        ticker = (option_label(record["symbol"], record.get("expiry"),
+                               record.get("option_right"), record.get("strike"))
+                  or record.get("local_symbol")) if record.get("security_type") == "OPT" else record["symbol"]
         ticker = ticker or record["symbol"]
         if conn.execute("SELECT 1 FROM positions WHERE portfolio_id=? AND display_ticker=?",
                         (self.portfolio_id, ticker)).fetchone():
@@ -496,47 +607,10 @@ class BrokerIngestor:
         if not source_id:
             raise ValueError("IBKR execution source ID is required")
         key, revision = execution_identity(record)
-        if record.get('security_type') == 'CASH':
-            # FX executions are cash evidence, never security positions or lots.
-            owners = conn.execute('''SELECT raw_json FROM broker_source_records
-                WHERE account_id=? AND execution_key=? AND status='cash-only' ''',
-                (self.account_id, key)).fetchall() if key else []
-            other_owner = any((json.loads(owner['raw_json']).get('_cash_evidence') or {}).get('portfolio_id')
-                              not in (None, self.portfolio_id) for owner in owners)
-            if other_owner:
-                issue = 'FX execution belongs to another portfolio; review allocation before importing'
-                self._record_source(source, f'{source_id}:portfolio:{self.portfolio_id}', key, None,
-                                    'review', issue, record)
-                result.review += 1
-                result.execution_review += 1
-                result.execution_blocking_review += 1
-                result.issues.append(f'{source_id}: {issue}')
-                return False
-            pair = (record.get('symbol') or '').upper().split('.')
-            valid = (key and record.get('trade_date') and len(pair) == 2
-                     and all(re.fullmatch(r'[A-Z]{3}', code) for code in pair)
-                     and pair[0] != pair[1] and record.get('currency') == pair[1]
-                     and record.get('side') in {'BUY', 'SELL'}
-                     and (_number(record.get('quantity')) or 0) != 0
-                     and (_number(record.get('price')) or 0) > 0)
-            issue = '' if valid else 'FX cash evidence needs an unambiguous currency pair, side, date, quantity and price'
-            self._record_source(source, source_id, key, None, 'cash-only' if valid else 'review', issue,
-                                dict(record, multiplier=1))
-            if valid:
-                result.duplicates += 1
-            else:
-                result.review += 1
-                result.execution_review += 1
-                result.execution_blocking_review += 1
-                result.issues.append(f'{source_id}: {issue}')
-            return bool(valid)
         problems = []
         for label in ("trade_date", "symbol", "currency", "security_type"):
             if not record.get(label):
                 problems.append(f"missing {label}")
-        from app.imports.import_contract import EXECUTION_TYPES
-        if record.get("security_type") and record["security_type"] not in EXECUTION_TYPES:
-            problems.append("unsupported instrument type")
         if not key:
             problems.append("missing broker execution identity")
         if record.get("side") not in {"BUY", "SELL"}:
@@ -560,22 +634,12 @@ class BrokerIngestor:
             self._record_source(source, source_id, key, None, "review", issue, record)
             result.review += 1
             result.execution_review += 1
-            result.execution_blocking_review += 1
             result.issues.append(f"{source_id}: {issue}")
             return False
         qty = abs(qty)
         record = dict(record, con_id=con_id, quantity=qty, price=price, multiplier=multiplier)
         existing = conn.execute("SELECT * FROM broker_executions WHERE account_id=? AND execution_key=?",
                                 (self.account_id, key)).fetchone()
-        if existing and conn.execute('SELECT portfolio_id FROM trades WHERE id=?',
-                                     (existing['trade_row_id'],)).fetchone()[0] != self.portfolio_id:
-            issue = 'Canonical execution belongs to another portfolio; review allocation before importing'
-            self._record_source(source, f'{source_id}:portfolio:{self.portfolio_id}', key, None, 'review', issue, record)
-            result.review += 1
-            result.execution_review += 1
-            result.execution_blocking_review += 1
-            result.issues.append(f'{source_id}: {issue}')
-            return False
         if not existing:
             potential = conn.execute("""SELECT t.id FROM trades t
                 JOIN positions p ON p.id=t.position_id
@@ -592,37 +656,10 @@ class BrokerIngestor:
                 self._record_source(source, source_id, key, None, "review", issue, record)
                 result.review += 1
                 result.execution_review += 1
-                result.execution_blocking_review += 1
                 result.issues.append(f"{source_id}: {issue}")
                 return False
-        fx = _number(record.get("fx_to_usd"))
-        if record["currency"] == "USD":
-            fx = 1.0
-        commission = _number(record.get("commission"))
-        commission_currency = record.get("commission_currency") or record["currency"]
-        commission_usd = _number(record.get("commission_usd"))
-        if commission_usd is None and commission is not None:
-            commission_fx = 1.0 if commission_currency == "USD" else (
-                fx if commission_currency == record["currency"] else
-                self.db.fx_rate(commission_currency, record["trade_date"]))
-            if commission_fx is not None and commission_fx > 0:
-                commission_usd = (-commission if source == "flex" else commission) * commission_fx
-        # Flex/CSV tax amounts are signed cash flows. Store positive charges.
-        taxes = _number(record.get('taxes', 0))
-        tax_lc = -taxes if taxes is not None else None
-        tax_usd = tax_lc * fx if tax_lc is not None and fx and fx > 0 else None
-        if existing and tax_usd is None:
-            saved = conn.execute('SELECT * FROM trades WHERE id=?',
-                                 (existing['trade_row_id'],)).fetchone()
-            same_execution = (revision == existing['revision'] and saved['side'] == record['side']
-                              and saved['quantity'] == qty and saved['price'] == price
-                              and saved['trade_date'] == record['trade_date']
-                              and saved['currency'] == record['currency'])
-            if same_execution:
-                tax_lc, tax_usd = saved['tax_lc'], saved['tax_usd']
+        fx, commission_usd = self._economics(record, source)
         pending = []
-        if tax_usd is None:
-            pending.append('tax')
         if fx is None or fx <= 0:
             pending.append("FX")
         if commission_usd is None:
@@ -631,49 +668,53 @@ class BrokerIngestor:
         if pending:
             result.review += 1
             result.execution_review += 1
-            if source == 'activity_statement' and pending == ['tax']:
-                result.pending_tax += 1
-            else:
-                result.execution_blocking_review += 1
             result.issues.append(f"{source_id}: {status}")
         quality = 2 if source == "flex" else 1
-        source_label = ("IBKR Activity Statement" if source == "activity_statement" else "IBKR sync")
         if existing:
             row_id = existing["trade_row_id"]
-            old = conn.execute("SELECT * FROM trades WHERE id=?", (row_id,)).fetchone()
+            old = conn.execute("""SELECT t.*,p.con_id AS existing_con_id FROM trades t
+                JOIN positions p ON p.id=t.position_id WHERE t.id=?""", (row_id,)).fetchone()
+            old_con_id = old["existing_con_id"]
             newer = revision > existing["revision"]
             richer = quality > existing["quality"] and revision >= existing["revision"]
-            if newer or richer:
-                protected_match = conn.execute("""SELECT 1 FROM trade_matches WHERE origin NOT IN ('auto','auto_short')
-                    AND (buy_trade_id=? OR sell_trade_id=?) LIMIT 1""", (row_id, row_id)).fetchone()
-                if protected_match and (old["quantity"] != qty or old["side"] != record["side"]):
-                    issue = "correction conflicts with reviewed or manually allocated lots"
+            corrected = (self.allow_flex_corrections and source == "flex" and
+                         revision == existing["revision"] and quality >= existing["quality"] and
+                         (old_con_id != con_id or
+                          not self._same_economics(old, record, fx, commission_usd)))
+            if newer or richer or corrected:
+                if old["source"] != "IBKR sync":
+                    issue = "correction conflicts with a manually edited trade"
                     self._record_source(source, source_id, key, row_id, "review", issue, record)
                     result.review += 1
                     result.execution_review += 1
-                    result.execution_blocking_review += 1
+                    result.issues.append(issue)
+                    return False
+                manual_match = conn.execute("""SELECT 1 FROM trade_matches WHERE origin='manual'
+                    AND (buy_trade_id=? OR sell_trade_id=?) LIMIT 1""", (row_id, row_id)).fetchone()
+                if manual_match and (old["quantity"] != qty or old["side"] != record["side"]):
+                    issue = "correction conflicts with manually allocated lots"
+                    self._record_source(source, source_id, key, row_id, "review", issue, record)
+                    result.review += 1
+                    result.execution_review += 1
                     result.issues.append(f"{source_id}: {issue}")
                     return False
-                old_con_id = conn.execute("SELECT con_id FROM positions WHERE id=?",
-                                          (old["position_id"],)).fetchone()[0]
                 if old_con_id != con_id:
                     issue = "correction changed contract; review position allocation"
                     self._record_source(source, source_id, key, row_id, "review", issue, record)
                     result.review += 1
                     result.execution_review += 1
-                    result.execution_blocking_review += 1
                     result.issues.append(f"{source_id}: {issue}")
                     return False
                 position_id = old["position_id"]
                 conn.execute("""DELETE FROM trade_matches WHERE origin='auto'
                     AND (buy_trade_id=? OR sell_trade_id=?)""", (row_id, row_id))
                 conn.execute("""UPDATE trades SET trade_date=?,executed_at=?,side=?,quantity=?,price=?,
-                    currency=?,security_type=?,multiplier=?,fx_to_usd=?,commission_usd=?,source=?,
+                    currency=?,security_type=?,multiplier=?,fx_to_usd=?,commission_usd=?,source='IBKR sync',
                     updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                     (record["trade_date"], record.get("executed_at") or "", record["side"], qty,
                      price, record["currency"], record["security_type"], multiplier,
                      fx if fx is not None else old["fx_to_usd"],
-                     commission_usd if commission_usd is not None else old["commission_usd"], source_label, row_id))
+                     commission_usd if commission_usd is not None else old["commission_usd"], row_id))
                 conn.execute("""UPDATE broker_executions SET latest_exec_id=?,revision=?,quality=?,
                     status=?,updated_at=CURRENT_TIMESTAMP WHERE account_id=? AND execution_key=?""",
                     (record.get("ib_exec_id") or existing["latest_exec_id"], max(revision, existing["revision"]),
@@ -681,7 +722,6 @@ class BrokerIngestor:
                 result.updated += 1
                 result.changed_position_ids.add(position_id)
             elif quality >= existing["quality"] and revision >= existing["revision"] and (
-                (tax_usd is not None and (old["tax_usd"] is None or abs(old["tax_usd"] - tax_usd) > 1e-9)) or
                 (commission_usd is not None and abs(old["commission_usd"] - commission_usd) > 1e-9) or
                 (commission_usd is not None and "commission" in existing["status"] and status != existing["status"]) or
                 (record["security_type"] == "BOND" and abs(old["multiplier"] - multiplier) > 1e-9) or
@@ -698,6 +738,8 @@ class BrokerIngestor:
                 result.changed_position_ids.add(old["position_id"])
             else:
                 result.duplicates += 1
+                if self.allow_flex_corrections:
+                    return True
         else:
             position_id = self._position(record)
             cur = conn.execute("""INSERT INTO trades
@@ -708,7 +750,7 @@ class BrokerIngestor:
                  record["trade_date"], record.get("executed_at") or "",
                  conn.execute("SELECT display_ticker FROM positions WHERE id=?", (position_id,)).fetchone()[0],
                  record["symbol"], record["side"], qty, price, record["security_type"], multiplier,
-                 record["currency"], fx or 0.0, commission_usd or 0.0, source_label))
+                 record["currency"], fx or 0.0, commission_usd or 0.0, "IBKR sync"))
             row_id = cur.lastrowid
             conn.execute("""INSERT INTO broker_executions
                 (account_id,execution_key,trade_row_id,latest_exec_id,revision,quality,status)
@@ -716,10 +758,5 @@ class BrokerIngestor:
                 (self.account_id, key, row_id, record.get("ib_exec_id") or "", revision, quality, status))
             result.inserted += 1
             result.changed_position_ids.add(position_id)
-        # Lower quality or older callbacks must not erase verified Flex taxes.
-        if not existing or revision > existing['revision'] or (quality >= existing['quality'] and revision >= existing['revision']):
-            accepted_fx = conn.execute('SELECT fx_to_usd FROM trades WHERE id=?', (row_id,)).fetchone()[0]
-            tax_usd = tax_lc * accepted_fx if tax_lc is not None and accepted_fx and accepted_fx > 0 else None
-            conn.execute('UPDATE trades SET tax_lc=?,tax_usd=? WHERE id=?', (tax_lc, tax_usd, row_id))
         self._record_source(source, source_id, key, row_id, status, "", record)
         return True

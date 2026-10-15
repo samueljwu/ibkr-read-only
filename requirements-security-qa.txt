@@ -1,9 +1,0 @@
-# Hash-pinned native security QA. The same SQLCipher wheel is used by Windows Dev.
-# Windows x64 Python 3.11.4 wheels; sqlcipher3 embeds SQLCipher 4.12.0 community.
-sqlcipher3==0.6.3 --hash=sha256:136b04e6e481c0a2a0b63f13d16b05419714a4368355c93ab10f9c4d99aab4fb
-pytest==9.0.3 --hash=sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9
-colorama==0.4.6 --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
-iniconfig==2.3.1 --hash=sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7
-packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-pluggy==1.6.0 --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
-Pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9

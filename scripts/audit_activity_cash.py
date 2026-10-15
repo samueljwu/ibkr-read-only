@@ -2,7 +2,7 @@
 
 Read-only: the report, SQLite database, and any broker account are never changed.
 Usage: python -m scripts.audit_activity_cash path/to/activity.csv
-The JSON result is written under ignored data/reports/.
+The JSON result is written beside the selected portfolio under reports/.
 """
 
 import argparse
@@ -11,17 +11,24 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
-from contextlib import closing, ExitStack
-from app.storage.paths import selected_data_directory, validate_database_path
-from app.storage.database import read_identity, validate_schema
-from app.storage.database_keys import load_key
-from app.storage.security_storage import connect
-from app.storage.storage_operations import SessionLease
+import sqlite3
 
+from app.platform.paths import local_config_path
 
-ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "data" / "reports" / "activity_cash_audit.json"
 CENT = Decimal("0.01")
+
+
+def selected_database():
+    config = local_config_path()
+    if not config.is_file():
+        raise FileNotFoundError("No selected portfolio; pass --database")
+    directory = json.loads(config.read_text(encoding="utf-8")).get("data_directory")
+    if not directory:
+        raise ValueError("Selected portfolio directory is missing")
+    database = Path(directory) / "portfolio.sqlite3"
+    if not database.is_file():
+        raise FileNotFoundError(f"Selected portfolio database is missing: {database}")
+    return database
 
 
 def amount(value):
@@ -64,7 +71,7 @@ def local_usd_executions(connection, first_day, last_day):
     sales = purchases = commissions = Decimal(0)
     count = 0
     query = """SELECT * FROM trades WHERE trade_date BETWEEN ? AND ?
-               AND portfolio_id=1 AND source NOT IN ('IBKR legacy transfer','IBKR statement transfer')"""
+               AND portfolio_id=1 AND source!='IBKR legacy transfer'"""
     for trade in connection.execute(query, (first_day, last_day)):
         if trade["currency"] != "USD":
             continue  # AUD commissions and proceeds are translated in base summary.
@@ -89,12 +96,7 @@ def local_usd_executions(connection, first_day, last_day):
 
 
 def audit(report, database=None):
-    if database is None:
-        selected = selected_data_directory()
-        if selected is None:
-            raise ValueError("No portfolio is selected; supply --database with a path under data/")
-        database = selected / "portfolio.sqlite3"
-    database = validate_database_path(database)
+    database = Path(database) if database is not None else selected_database()
     rows = statement_rows(Path(report))
     account = one_value(rows, "Account Information", "Account")
     if one_value(rows, "Account Information", "Base Currency") != "USD":
@@ -106,18 +108,9 @@ def audit(report, database=None):
     if first > last:
         raise ValueError("Report period is reversed")
 
-    identity = read_identity(database)
-    key = load_key(identity["channel"], identity["portfolio_uuid"])
-    if key is None:
-        raise ValueError("Database key is missing; restore using your recovery code")
-    registered = ExitStack()
-    registered.enter_context(SessionLease(database))
-    try:
-        connection = registered.enter_context(closing(connect(database, key, read_only=True)))
-        validate_schema(connection, identity["portfolio_uuid"])
-    except BaseException:
-        registered.close()
-        raise
+    uri = f"file:{database.resolve().as_posix()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
     try:
         saved_account = connection.execute(
             "SELECT value FROM settings WHERE key='ib_account_id'").fetchone()
@@ -136,7 +129,7 @@ def audit(report, database=None):
             if abs(qty) > Decimal("0.00000001"):
                 local_stocks[position["display_ticker"]] = qty
     finally:
-        registered.close()
+        connection.close()
 
     usd = cash_values(rows, "USD")
     base = cash_values(rows, "Base Currency Summary")
@@ -159,7 +152,6 @@ def audit(report, database=None):
                                    "Starting Collateral Value", "Net Securities Lent Activity",
                                    "Ending Collateral Value", "Net Cash Balance",
                                    "Net Settled Cash Balance"}), Decimal(0))
-    close(usd["Starting Cash"] + activity, usd["Ending Cash"], "USD cash bridge")
     nontrade = activity - usd["Trades (Sales)"] - usd["Trades (Purchase)"] - usd["Commissions"]
 
     nav = {row[2].strip(): amount(row[6]) for row in section(rows, "Net Asset Value")
@@ -219,9 +211,11 @@ def main():
     parser.add_argument("report", type=Path, help="IBKR Activity Statement CSV")
     parser.add_argument("--database", type=Path)
     args = parser.parse_args()
-    result = audit(args.report, args.database)
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    database = args.database or selected_database()
+    result = audit(args.report, database)
+    output = database.parent / "reports" / "activity_cash_audit.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))
 
 
