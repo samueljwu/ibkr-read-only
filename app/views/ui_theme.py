@@ -107,10 +107,11 @@ QPlainTextEdit {
 QWidget#historyImportForm { background: ${surface}; border: 1px solid ${line}; border-radius: 6px; }
 QLabel#historyFieldLabel { color: ${muted}; font-size: 12px; }
 QLabel#historyProgressLabel { color: ${text}; font-size: 12px; }
-QToolButton#historyHelpButton, QToolButton#historyTextAction {
+QToolButton#historyHelpButton, QToolButton#historyTextAction, QToolButton#returnNotesButton {
     color: ${accent}; border: 0; padding: 2px 0;
 }
-QToolButton#historyHelpButton:hover, QToolButton#historyTextAction:hover { color: ${accent_hover}; }
+QToolButton#historyHelpButton:hover, QToolButton#historyTextAction:hover,
+QToolButton#returnNotesButton:hover { color: ${accent_hover}; }
 QToolButton#historyCalendarButton {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 4px; padding: 4px 6px;

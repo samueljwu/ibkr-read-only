@@ -3,7 +3,8 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QSizePolicy, QSplitter, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from app.finance.position_returns import position_return_rows
 from app.views import widgets
@@ -46,6 +47,14 @@ class ReturnPanel(QWidget):
         horizontal = db.setting(f"{self._split_key}_orientation") == "horizontal"
         self.layout_combo.setCurrentIndex(1 if horizontal else 0)
         toolbar.addWidget(self.layout_combo)
+        self.notes_button = QToolButton()
+        self.notes_button.setObjectName("returnNotesButton")
+        self.notes_button.setText("Return notes")
+        self.notes_button.setToolTip("Show coverage and calculation notes")
+        self.notes_button.setCheckable(True)
+        self.notes_button.setArrowType(Qt.RightArrow)
+        self.notes_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        toolbar.addWidget(self.notes_button)
         layout.addLayout(toolbar)
 
         summary = QHBoxLayout()
@@ -64,6 +73,8 @@ class ReturnPanel(QWidget):
         self.note = QLabel()
         self.note.setObjectName("hint")
         self.note.setWordWrap(True)
+        self.note.hide()
+        self.notes_button.toggled.connect(self._toggle_notes)
         layout.addWidget(self.note)
 
         self.splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
@@ -134,6 +145,10 @@ class ReturnPanel(QWidget):
             self.db, self.portfolio_id, portfolio_rows, lots)
         self._filter()
 
+    def _toggle_notes(self, expanded):
+        self.notes_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.note.setVisible(expanded)
+
     def _filter(self, *_):
         query = self.search.text().strip().casefold()
         mode = self.show.currentText()
@@ -157,12 +172,16 @@ class ReturnPanel(QWidget):
             for column, key in ((2, "realized"), (3, "unrealized"), (4, "income"),
                                 (5, "total"), (6, "percent")):
                 item = self.table.numeric_item(column, row[key])
+                if column in (5, 6) and row["partial"] and row[key] is not None:
+                    item.setText("≈ " + item.text())
+                    item.setToolTip(row["return_note"])
                 self._color_item(item, row[key])
                 self.table.setItem(index, column, item)
             valuation_note = (row["price_source"] if row["status"] != "Closed" else "")
             baseline_status = (f"Estimated since {row['estimated_baseline']}"
                                if row.get("estimated_baseline") else "")
-            status = ("; ".join(filter(None, (baseline_status, *row["issues"])))
+            status = ("; ".join(filter(None, ("Partial return" if row["partial"] else "",
+                                                 baseline_status, *row["issues"])))
                       if row["issues"] else
                       (baseline_status or "Complete") +
                       (f" · {valuation_note}" if valuation_note else ""))
@@ -185,23 +204,41 @@ class ReturnPanel(QWidget):
             self._fill_details(None)
         for label, key in (("Realized P&L", "realized"), ("Unrealized P&L", "unrealized"),
                            ("Income and accruals", "income"), ("Total return", "total")):
-            self.stats[label].setText(money(sum(row[key] for row in visible))
-                                      if all(row[key] is not None for row in visible) and visible else "—")
+            values = [row[key] for row in visible if row[key] is not None]
+            complete = len(values) == len(visible)
+            value = money(sum(values)) if values and (key == "total" or complete) else "—"
+            if key == "total" and value != "—" and (
+                    not complete or any(row["partial"] for row in visible)):
+                value = "≈ " + value
+            self.stats[label].setText(value)
+            self.stats[label].setToolTip(
+                "Sum of available position totals. Some positions are partial or unavailable; "
+                "hover over each row for its limitations."
+                if key == "total" and value.startswith("≈") else "")
         incomplete = sum(bool(row["issues"]) for row in visible)
         missing_income_fx = sum("Income FX missing" in row["issues"] for row in visible)
-        income_warning = (f"{missing_income_fx} instrument(s) have income with missing FX; "
-                          "their total return is unavailable. " if missing_income_fx else "")
-        estimate_note = ("* CSV closing prices are estimated opening values, not purchase cost or tax basis. "
-                         "Earlier gains and losses on the estimated shares are excluded. "
-                         if any(row.get("estimated_baseline") for row in visible) else "")
-        self.note.setText(
-            income_warning + f"Since first recorded trade or estimated opening · USD · {incomplete} incomplete instrument(s) · "
-            f"{len(self.unattributed)} unattributed income/tax row(s). "
-            + estimate_note +
-            "Totals require matched trades, complete Cash history, income FX, and valuation. "
-            "Open bonds also require current accrued interest; "
-            "— means unavailable."
-            if visible else "No instruments match this filter.")
+        if visible:
+            notes = [
+                "Scope · Since first recorded trade or estimated opening, in USD.",
+                f"Coverage · {incomplete} incomplete instrument(s); "
+                f"{len(self.unattributed)} unattributed income/tax row(s).",
+            ]
+            if missing_income_fx:
+                notes.append(f"Income FX · {missing_income_fx} instrument(s) have income "
+                             "with missing FX; their full return is incomplete.")
+            if any(row.get("estimated_baseline") for row in visible):
+                notes.append("Estimated opening · CSV closing prices are opening values, "
+                             "not purchase cost or tax basis. Earlier gains and losses "
+                             "on those shares are excluded.")
+            if any(row["partial"] for row in visible):
+                notes.append("Partial returns · ≈ sums the available components. Hover "
+                             "over a figure for its missing-data limits.")
+            notes.append("Full totals · Require matched trades, complete Cash history, "
+                         "income FX, and valuation. Open bonds also require current "
+                         "accrued interest. — means unavailable.")
+            self.note.setText("\n".join(notes))
+        else:
+            self.note.setText("No instruments match this filter.")
 
     def _selected_id(self):
         selected = self.table.selectedItems()

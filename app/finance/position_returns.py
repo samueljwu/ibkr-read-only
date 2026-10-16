@@ -151,7 +151,9 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                         max((day for day in (last_trade, last_income) if day), default=None))
         cash_from = ((date.fromisoformat(estimated_baseline) + timedelta(days=1)).isoformat()
                      if estimated_baseline else first_trade)
-        if not cash_from or not cash_through or not _cash_covered(cash_windows, cash_from, cash_through):
+        cash_complete = bool(cash_from and cash_through and
+                             _cash_covered(cash_windows, cash_from, cash_through))
+        if not cash_complete:
             issues.append("Cash history incomplete")
 
         realized = (sum(float(l["realized_net"]) for l in closed)
@@ -210,9 +212,13 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
             issues.append("Income predates recorded trades")
         if unattributed:
             issues.append("Unattributed income")
-        total = (realized + unrealized + income
-                 if realized is not None and unrealized is not None and income is not None and not issues
-                 else None)
+        # Add the components that have a verified USD value. Default zeroes for
+        # absent lots or income do not, by themselves, establish a return.
+        has_component = ((bool(closed) and realized is not None) or
+                         (bool(open_lots) and unrealized is not None) or
+                         (bool(income_details) and income is not None))
+        components = (realized, unrealized, income)
+        total = sum(value for value in components if value is not None) if has_component else None
         cost = 0.0
         cost_valid = True
         for trade in position_trades:
@@ -228,15 +234,33 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
             # accrued_interest_usd is negative on a BUY (cash paid out), so subtracting
             # it increases cost, mirroring the closed_lot/open_lot proration convention.
             cost -= float(trade["accrued_interest_usd"] or 0)
-        percent = total / cost * 100 if total is not None and cost_valid and cost > 0 and not short else None
         if not cost_valid:
             issues.append("Purchase cost missing")
-            total = percent = None
+        percent = total / cost * 100 if total is not None and cost_valid and cost > 0 and not short else None
+        partial = total is not None and (bool(issues) or any(value is None for value in components))
+        return_note = ""
+        if partial:
+            missing = [label for label, value in zip(
+                ("Realized P&L", "Unrealized P&L", "Income/accrual amount"), components)
+                if value is None]
+            reasons = [("Cash history is incomplete; dividends, interest, or withholding "
+                        "may be missing" if issue == "Cash history incomplete" else
+                        "Some income or tax is unattributed and may belong to this position"
+                        if issue == "Unattributed income" else issue)
+                       for issue in issues]
+            reasons.extend(f"{label} is unavailable" for label in missing)
+            return_note = ("Partial return: sum of the available USD components. "
+                           "It may be incomplete because " + "; ".join(reasons) + ".")
+            if estimated_baseline:
+                return_note += (f" The {estimated_baseline} CSV closing price is an estimated "
+                                "opening value, not original purchase cost or tax basis; "
+                                "earlier gains and losses are excluded.")
         rows.append({"position_id": position_id, "name": position["display_ticker"],
                      "symbol": position["ib_symbol"], "con_id": position["con_id"],
                      "status": "Short" if quantity < -1e-9 else "Open" if open_position else "Closed",
                      "realized": realized, "unrealized": unrealized, "income": income,
                      "total": total, "percent": percent, "cost": cost if cost_valid else None,
+                     "partial": partial, "return_note": return_note,
                      "issues": issues, "lots": position_lots, "income_details": income_details,
                      "first_trade": first_trade, "last_trade": last_trade,
                      "estimated_baseline": estimated_baseline,

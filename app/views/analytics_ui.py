@@ -531,7 +531,7 @@ class AnalyticsTab(QWidget):
             page.setMinimumWidth(0)
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.sections.addTab(self.pnl_page, "P&L")
-        self.sections.addTab(self.return_page, "Return")
+        self.sections.addTab(self.return_page, "Returns")
         self.sections.addTab(self.capital_page, "Capital deployment")
         self.sections.addTab(self.exposure_page, "Exposure")
         self.sections.addTab(self.monthly_page, "Monthly history")

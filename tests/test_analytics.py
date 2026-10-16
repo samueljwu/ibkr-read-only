@@ -340,7 +340,7 @@ def test_analytics_tab_uses_ibkr_observations_without_csv(tmp_path, monkeypatch)
         window.analytics_tab.refresh()
         assert not hasattr(window.analytics_tab, "import_button")
         assert [window.analytics_tab.sections.tabText(i) for i in range(4)] == [
-            "P&L", "Return", "Capital deployment", "Exposure"]
+            "P&L", "Returns", "Capital deployment", "Exposure"]
         assert window.analytics_tab.pnl_table.rowCount() == 1
         assert window.analytics_tab.stats["NAV change"].text() == "$0.00"
         assert window.analytics_tab.stats["Adjusted performance"].text() == "—"

@@ -572,6 +572,40 @@ def test_rebalance_keyboard_on_cash_and_idea_price(tmp_path):
         db.conn.close()
 
 
+def test_rebalance_keyboard_reaches_and_edits_cash_target(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "cash_keyboard.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
+    try:
+        tab.show()
+        app.processEvents()
+        tab.table.select_cell(0, 4, focus=True)
+        QTest.keyClick(tab.table, Qt.Key_Up)
+        assert tab.cash_editor.hasFocus()
+        assert tab.cash_editor.lineEdit().selectedText()
+        QTest.keyClicks(tab.cash_editor.lineEdit(), "25")
+        QTest.keyClick(tab.cash_editor.lineEdit(), Qt.Key_Return)
+        assert tab.cash_target == pytest.approx(.25)
+        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 4)
+
+        tab.cash_editor.setFocus()
+        QTest.keyClick(tab.cash_editor.lineEdit(), Qt.Key_F2)
+        assert tab.cash_editor.lineEdit().selectedText()
+
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
+        tab.table.select_cell(0, 0, focus=True)
+        QTest.keyClick(tab.table, Qt.Key_Up)
+        assert tab.cash_editor.hasFocus()
+        tab.cash_editor.setFocus()
+        QTest.keyClick(tab.cash_editor.lineEdit(), Qt.Key_Down)
+        assert tab.table.currentRow() == 0
+        assert not tab.table.isColumnHidden(tab.table.currentColumn())
+    finally:
+        tab.close()
+        db.conn.close()
+
+
 def test_ctrl_minus_zeros_holdings_removes_ideas_and_is_rebalance_only(tmp_path):
     app = QApplication.instance() or QApplication([])
     db = Database(tmp_path / "remove_shortcut.sqlite3")
@@ -802,6 +836,10 @@ def test_rebalance_focus_views_reduce_visible_columns_and_persist(tmp_path):
         assert tab.table.isColumnHidden(4)
         assert not tab.table.isColumnHidden(8)
         assert not tab.table.isColumnHidden(14)
+        header = tab.table.horizontalHeader()
+        assert header.sectionPosition(7) == header.sectionPosition(0) + header.sectionSize(0)
+        tab.refresh()
+        assert header.sectionPosition(7) == header.sectionPosition(0) + header.sectionSize(0)
         assert tab.table.currentColumn() == 0
         tab.table.select_cell(0, 14, focus=True)
         QTest.keyClick(tab.table, Qt.Key_Right)
@@ -820,6 +858,37 @@ def test_rebalance_focus_views_reduce_visible_columns_and_persist(tmp_path):
         reopened.view_choice.setCurrentIndex(reopened.view_choice.findData("all"))
         assert not reopened.table.isColumnHidden(4)
         assert not reopened.table.isColumnHidden(8)
+    finally:
+        reopened.close()
+        db.conn.close()
+
+
+def test_rebalance_saved_scenario_view_clears_hidden_column_gap(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "saved_gap.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    service = Service([holding(1, 60000, 600)])
+    tab = CalcsTab(db, service, 1)
+    try:
+        tab.show()
+        app.processEvents()
+
+        def restore_hidden_width(column, _old, width):
+            if column == 4 and width == 0:
+                tab.table.setColumnWidth(column, 145)
+
+        tab.table.horizontalHeader().sectionResized.connect(restore_hidden_width)
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
+        header = tab.table.horizontalHeader()
+        assert header.sectionPosition(7) > header.sectionSize(0)
+        tab.save_view()
+    finally:
+        tab.close()
+    reopened = CalcsTab(db, service, 1)
+    try:
+        header = reopened.table.horizontalHeader()
+        assert reopened.view_mode == "cases"
+        assert header.sectionPosition(7) == header.sectionSize(0)
     finally:
         reopened.close()
         db.conn.close()

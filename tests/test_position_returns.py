@@ -67,7 +67,7 @@ def test_closed_position_includes_income_tax_and_purchase_cost(tmp_path):
         db.conn.close()
 
 
-def test_open_and_unattributed_income_leave_total_unavailable(tmp_path):
+def test_open_and_unattributed_income_show_partial_total(tmp_path):
     db = Database(tmp_path / "open-returns.sqlite3")
     try:
         pid = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ"})
@@ -88,13 +88,15 @@ def test_open_and_unattributed_income_leave_total_unavailable(tmp_path):
         rows, unattributed = position_return_rows(db, 1, valuations, lots)
         assert len(unattributed) == 1
         assert rows[0]["unrealized"] == pytest.approx(20)
-        assert rows[0]["total"] is None
+        assert rows[0]["total"] == pytest.approx(20)
+        assert rows[0]["partial"]
+        assert "unattributed" in rows[0]["return_note"]
         assert "Unattributed income" in rows[0]["issues"]
     finally:
         db.conn.close()
 
 
-def test_return_total_requires_contiguous_cash_window_coverage(tmp_path):
+def test_cash_gaps_show_partial_total_until_coverage_is_complete(tmp_path):
     db = Database(tmp_path / "cash-gap-returns.sqlite3")
     try:
         pid = db.add_position({"display_ticker": "GAP", "ib_symbol": "GAP"})
@@ -107,7 +109,9 @@ def test_return_total_requires_contiguous_cash_window_coverage(tmp_path):
         valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
         rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
         assert rows[0]["realized"] == pytest.approx(2)
-        assert rows[0]["total"] is None
+        assert rows[0]["total"] == pytest.approx(2)
+        assert rows[0]["partial"]
+        assert "dividends, interest, or withholding" in rows[0]["return_note"]
         assert "Cash history incomplete" in rows[0]["issues"]
         _cover_cash(db, "2026-01-02", "2026-01-03")
         with db.conn:
@@ -115,15 +119,73 @@ def test_return_total_requires_contiguous_cash_window_coverage(tmp_path):
                 (account_id,source,from_day,to_day,status) VALUES
                 ('SYNTHETIC','flex_cash','2026-01-05','2026-01-05','complete')""")
         rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        assert rows[0]["total"] is None
+        assert rows[0]["total"] == pytest.approx(2)
+        assert rows[0]["partial"]
         with db.conn:
             db.conn.execute("""INSERT INTO broker_sync_windows
                 (account_id,source,from_day,to_day,status) VALUES
                 ('SYNTHETIC','flex_cash','2026-01-04','2026-01-04','complete')""")
         rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
         assert rows[0]["total"] == pytest.approx(2)
+        assert not rows[0]["partial"]
         assert not rows[0]["issues"]
     finally:
+        db.conn.close()
+
+
+def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from app.views.returns_ui import ReturnPanel
+
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "pre-flex-returns.sqlite3")
+    panel = None
+    try:
+        pid = db.add_position({"display_ticker": "OLD", "ib_symbol": "OLD"})
+        db.add_trade({"position_id": pid, "trade_date": "2021-05-31", "side": "BUY",
+                      "quantity": 1, "price": 12, "source": "CSV market baseline"})
+        market = MockMarketDataProvider()
+        market.quotes[pid] = {"ticks": {"last": 15}, "mode": "Live"}
+        service = PortfolioService(db, market)
+        _cover_cash(db, "2022-01-01", (date.today() - timedelta(days=1)).isoformat())
+        _income(db, "known-dividend", "2022-01-05", "Dividend", 2, symbol="OLD")
+        valuations = service.portfolio_rows()
+        assert valuations[0]["unrealized_pnl"] == pytest.approx(3)
+        lots = service.lots_rows(valuations)
+        row = position_return_rows(db, 1, valuations, lots)[0][0]
+        assert row["unrealized"] == pytest.approx(3)
+        assert row["income"] == pytest.approx(2)
+        assert row["total"] == pytest.approx(5)
+        assert row["percent"] == pytest.approx(5 / 12 * 100)
+        assert row["partial"]
+        assert row["issues"] == ["Cash history incomplete"]
+
+        panel = ReturnPanel(db, service, 1)
+        panel.refresh(valuations, lots)
+        assert panel.note.isHidden()
+        panel.notes_button.click()
+        assert not panel.note.isHidden()
+        assert "Estimated opening" in panel.note.text()
+        panel.notes_button.click()
+        assert panel.note.isHidden()
+        assert panel.table.item(0, 5).text() == "≈ $5.00"
+        assert "Cash history is incomplete" in panel.table.item(0, 5).toolTip()
+        assert "estimated opening value" in panel.table.item(0, 6).toolTip()
+        assert panel.stats["Total return"].text() == "≈ $5.00"
+
+        with db.conn:
+            db.conn.execute("""DELETE FROM broker_sync_windows
+                WHERE account_id='SYNTHETIC' AND source='flex_cash'""")
+        _cover_cash(db, "2022-01-01", "2022-01-02")
+        _cover_cash(db, "2022-01-04", (date.today() - timedelta(days=1)).isoformat())
+        row = position_return_rows(db, 1, valuations, lots)[0][0]
+        assert row["total"] == pytest.approx(5)
+        assert row["partial"]
+        panel.refresh(valuations, lots)
+        assert panel.table.item(0, 5).text() == "≈ $5.00"
+    finally:
+        if panel is not None:
+            panel.close()
         db.conn.close()
 
 
@@ -206,7 +268,8 @@ def test_open_bond_requires_current_accrued_receivable_for_full_return(tmp_path)
         row = position_return_rows(db, 1, valuations, lots)[0][0]
         assert row["unrealized"] == 0
         assert row["income"] == -30
-        assert row["total"] is None
+        assert row["total"] == -30
+        assert row["partial"]
         assert "Bond accrued interest unavailable" in row["issues"]
         valuations[0]["bond_accrued_interest_usd"] = 35
         row = position_return_rows(db, 1, valuations, lots)[0][0]
@@ -217,7 +280,7 @@ def test_open_bond_requires_current_accrued_receivable_for_full_return(tmp_path)
         db.conn.close()
 
 
-def test_missing_withholding_fx_blocks_total(tmp_path):
+def test_missing_withholding_fx_shows_partial_total(tmp_path):
     db = Database(tmp_path / "missing-tax-fx.sqlite3")
     try:
         pid = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
@@ -235,7 +298,9 @@ def test_missing_withholding_fx_blocks_total(tmp_path):
         row = position_return_rows(db, 1, valuations, service.lots_rows(valuations))[0][0]
         assert row["realized"] == 2
         assert row["income"] is None
-        assert row["total"] is None
+        assert row["total"] == 2
+        assert row["partial"]
+        assert "Income/accrual amount is unavailable" in row["return_note"]
         assert "Income FX missing" in row["issues"]
     finally:
         db.conn.close()
@@ -355,9 +420,10 @@ def test_return_panel_lists_closed_instrument_and_income_detail(tmp_path):
         _income(db, "income-missing-fx", "2026-01-05", "Dividend", 3,
                 con_id=101, fx="", currency="EUR")
         panel.refresh(valuations, service.lots_rows(valuations))
-        assert panel.table.item(0, 5).text() == "—"
+        assert panel.table.item(0, 5).text() == "≈ $2.00"
+        assert "Income FX missing" in panel.table.item(0, 5).toolTip()
         assert "Income FX missing" in panel.table.item(0, 7).text()
-        assert "total return is unavailable" in panel.note.text()
+        assert "full return is incomplete" in panel.note.text()
     finally:
         if panel is not None:
             panel.close()

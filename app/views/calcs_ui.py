@@ -26,7 +26,20 @@ def _text(value, places=2):
 
 
 class CalcsTable(InputReportTable):
-    pass
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cash_editor = None
+
+    def keyPressEvent(self, event):
+        if (event.key() == Qt.Key_Up and event.modifiers() == Qt.NoModifier and
+                self.currentRow() == 0 and
+                (self.currentColumn() == 4 or self.isColumnHidden(4)) and
+                self.cash_editor is not None):
+            self.cash_editor.setFocus()
+            self.cash_editor.selectAll()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class CalcsTab(QWidget):
@@ -159,6 +172,7 @@ class CalcsTab(QWidget):
         layout.addWidget(cash_panel)
 
         self.table = CalcsTable(0, len(self.HEADERS))
+        self.table.cash_editor = self.cash_editor
         self.table.setToolTip("Tinted cells are editable. Drag column headers to reorder them. Arrows move between cells; Enter saves and moves down; Esc cancels an edit. Select a full row with Shift+Space, then Ctrl+- to remove an idea or set a holding's target to 0%.")
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -210,7 +224,11 @@ class CalcsTab(QWidget):
                    {0, 7, 8, 9, 10, 11, 12, 13, 14, 15} if self.view_mode == "cases" else
                    set(range(self.table.columnCount())))
         for column in range(self.table.columnCount()):
-            self.table.setColumnHidden(column, column not in visible or column == 15 and not self.ideas)
+            hide = column not in visible or column == 15 and not self.ideas
+            if hide and self.table.isColumnHidden(column):
+                # Rehide saved sections to clear stale width left by older layouts.
+                self.table.setColumnHidden(column, False)
+            self.table.setColumnHidden(column, hide)
         if self.table.currentRow() >= 0 and self.table.isColumnHidden(self.table.currentColumn()):
             first_visible = next(column for column in range(self.table.columnCount())
                                  if not self.table.isColumnHidden(column))
@@ -756,7 +774,7 @@ class CalcsTab(QWidget):
 
     def _keep_editor_column_wide(self, column, _old, width):
         minimum = {4: 145, 8: 100, 9: 180, 11: 110, 12: 180}.get(column)
-        if minimum and width < minimum:
+        if minimum and 0 < width < minimum:
             self.table.setColumnWidth(column, minimum)
 
     def _keep_idea_visible_after_sort(self, *_):
@@ -786,6 +804,12 @@ class CalcsTab(QWidget):
         if event.type() != QEvent.KeyPress or watched not in self._keyboard_controls:
             return super().eventFilter(watched, event)
         key = event.key()
+        if key == Qt.Key_F2 and event.modifiers() == Qt.NoModifier:
+            editor = self._keyboard_controls[watched][0]
+            editor.setFocus()
+            editor.selectAll()
+            event.accept()
+            return True
         is_enter = key in (Qt.Key_Return, Qt.Key_Enter)
         if (key not in (*CalcsTable.DIRECTIONS, Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter) or
             event.modifiers() not in ((Qt.NoModifier, Qt.KeypadModifier) if is_enter else (Qt.NoModifier,))):
@@ -813,7 +837,12 @@ class CalcsTab(QWidget):
         self.table.setFocus()
         if position_id is None:
             if (key == Qt.Key_Down or is_enter) and self.table.rowCount():
-                self.table.select_cell(0, 4, focus=True)
+                column = 4
+                if self.table.isColumnHidden(column):
+                    header = self.table.horizontalHeader()
+                    column = next(header.logicalIndex(visual) for visual in range(header.count())
+                                  if not self.table.isColumnHidden(header.logicalIndex(visual)))
+                self.table.select_cell(0, column, focus=True)
         event.accept()
         return True
 

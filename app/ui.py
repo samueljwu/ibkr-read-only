@@ -1604,12 +1604,13 @@ class MainWindow(QMainWindow):
                  "or cash as a share of NAV. S&P 500 adds an index comparison; in P&L, "
                  "both lines start at 0% at their first available points in the range.")
         add_visual(analytics_content, "analytics")
-        add_text(analytics_content, "Return",
+        add_text(analytics_content, "Returns",
                  "Review cumulative USD results for every recorded instrument, including closed positions. "
                  "Select a row to inspect matched lots, dividends, bond interest and attributable withholding tax. "
                  "Return on cash cost divides the cumulative result by all purchase cash outflows, "
                  "including commissions and bond accrued interest paid. "
-                 "Missing Cash windows, unmatched trades, unattributed income, or income FX leave totals unavailable. "
+                 "Missing Cash windows, unmatched trades, unattributed income, or income FX "
+                 "make displayed totals partial; hover over a total for its limitations. "
                  "Open bonds also need current accrued interest for a full total. "
                  "Add Conid, Symbol and FX Rate to Base to the Cash Flex query, then reimport Cash history "
                  "to link older income rows.")
