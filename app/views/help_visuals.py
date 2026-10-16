@@ -92,8 +92,7 @@ class HelpVisual(QWidget):
                                    ("Top and bottom", "Control", 1)))
             caption = "Analytics controls and illustrative chart"
         elif kind == "rebalance":
-            content.addLayout(_row(("Show", "Status", 0), ("All", "Control", 1),
-                                   ("Pause updates", "Button", 0)))
+            content.addLayout(_row(("Show", "Status", 0), ("All", "Control", 1)))
             content.addLayout(_row(("Add idea", "Status", 0),
                                    ("Ticker, e.g. NVDA", "Control", 1), ("Add", "Button", 0)))
             content.addLayout(_row(("Position", "Header", 2), ("Target weight", "Header", 1),

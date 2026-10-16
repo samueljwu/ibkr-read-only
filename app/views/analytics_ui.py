@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLay
 
 from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
                                    performance_window_rows)
+from app.views import widgets
 from app.views.exposure_ui import ExposurePanel
 from app.views.returns_ui import ReturnPanel
 from app.views.table_ui import ReportTable, SortItem
@@ -144,6 +145,7 @@ class RangeChartView(QChartView):
         self._hover_benchmark_stamps = []
         self._hover_primary_mode = "nearest"
         self._hover_line = QWidget(self.viewport())
+        self._hover_line.setObjectName("chartHoverLine")
         self._hover_line.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._hover_line.hide()
         self._hover_label = QLabel(self.viewport())
@@ -158,12 +160,6 @@ class RangeChartView(QChartView):
         self._hover_primary_stamps = [stamp for stamp, _ in self._hover_primary]
         self._hover_benchmark_stamps = [stamp for stamp, _ in self._hover_benchmark]
         self._hover_primary_mode = primary_mode
-        colors = COLORS[theme]
-        self._hover_label.setStyleSheet(
-            f"QLabel#chartHoverCard {{ background: {colors['surface']}; "
-            f"color: {colors['text']}; border: 1px solid {colors['accent']}; "
-            "border-radius: 6px; padding: 8px 10px; font-size: 13px; }")
-        self._hover_line.setStyleSheet(f"background: {colors['accent']};")
         self._hide_hover()
 
     def _hide_hover(self):
@@ -420,6 +416,7 @@ class TimeRangeNavigator(QWidget):
 
 
 class AnalyticsTab(QWidget):
+    SECTION_IDS = ("pnl", "return", "capital", "exposure", "monthly")
     METRICS = (
         ("NAV", "nav", "USD"),
         ("NAV change", "nav_change", "USD"),
@@ -538,6 +535,8 @@ class AnalyticsTab(QWidget):
         self.sections.addTab(self.capital_page, "Capital deployment")
         self.sections.addTab(self.exposure_page, "Exposure")
         self.sections.addTab(self.monthly_page, "Monthly history")
+        widgets.persist_tab_order(self.sections, db, f"analytics_section_layout_{portfolio_id}",
+                                  ids=list(self.SECTION_IDS))
         scroller = QScrollArea()
         scroller.setObjectName("analyticsScroller")
         scroller.setFrameShape(QScrollArea.NoFrame)

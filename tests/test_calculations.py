@@ -46,6 +46,44 @@ def test_closed_and_open_lot_commission_allocation():
     assert closed_lot(buy, sell, 40)["buy_commission"] == 2
 
 
+def test_closed_lot_bond_accrued_interest_hand_verified_example():
+    """Buy 10 bonds at clean 95 paying $30 accrued interest; sell at clean 97
+    receiving $5 accrued interest. Clean-price gain is $20, interest transfer is
+    -$25, and the combined cash result is -$5."""
+    buy = {"quantity": 10, "price": 95, "fx_to_usd": 1, "multiplier": 1,
+           "commission_usd": 0, "accrued_interest_usd": -30}
+    sell = {"quantity": 10, "price": 97, "fx_to_usd": 1, "multiplier": 1,
+            "commission_usd": 0, "accrued_interest_usd": 5}
+    closed = closed_lot(buy, sell, 10)
+    assert closed["realized_gross"] == pytest.approx(20)
+    assert closed["realized_net"] == pytest.approx(20)
+    assert closed["buy_accrued_interest"] + closed["sell_accrued_interest"] == pytest.approx(-25)
+    assert closed["realized_net"] + closed["buy_accrued_interest"] + closed["sell_accrued_interest"] == pytest.approx(-5)
+    assert closed["realized_pct"] == pytest.approx(20 / 950)
+
+
+def test_open_lot_bond_accrued_interest_hand_verified_example():
+    """Buy 10 bonds at clean 95 with a $2 commission and $30 accrued interest paid;
+    mark at clean 97. Clean-price P&L is $18; the full return also needs the
+    current accrued receivable, which is not part of a clean quote."""
+    buy = {"quantity": 10, "price": 95, "fx_to_usd": 1, "multiplier": 1,
+           "commission_usd": 2, "accrued_interest_usd": -30}
+    opened = open_lot(buy, 10, 97, 1)
+    assert opened["current_value"] == pytest.approx(970)
+    assert opened["net_unrealized"] == pytest.approx(18)
+    assert opened["buy_accrued_interest"] == pytest.approx(-30)
+    assert opened["unrealized_pct"] == pytest.approx(18 / 952)
+
+
+def test_closed_and_open_lot_default_zero_accrued_interest_when_absent():
+    """Non-bond trades (and pre-migration rows) omit accrued_interest_usd entirely;
+    results must be identical to the commission-only calculation."""
+    buy = {"quantity": 100, "price": 10, "fx_to_usd": 1, "commission_usd": 5}
+    sell = {"quantity": 100, "price": 12, "fx_to_usd": 1, "commission_usd": 5}
+    assert closed_lot(buy, sell, 100)["realized_net"] == 190
+    assert open_lot(buy, 100, 11, 1)["net_unrealized"] == 95
+
+
 def test_history_uses_previous_sessions_for_month_and_year():
     history = [
         {"day": "2025-12-31", "close": 100, "volume": 1000},

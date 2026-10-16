@@ -68,9 +68,14 @@ def _spans(status, key, source):
     return status.get(key, {}).get(source) or []
 
 
-def format_imported_periods(periods_by_source):
-    """Summarize saved complete Flex windows, preserving gaps between periods."""
-    lines = []
+def merge_periods(periods_by_source):
+    """Merge adjacent/overlapping date windows per source into sorted (first, last) spans.
+
+    Returns {source: [(date, date), ...]} for the fixed source order trades/analytics/cash,
+    keeping the exact merge rule (periods touching or overlapping by a day join together)
+    that format_imported_periods previously implemented inline.
+    """
+    merged_by_source = {}
     for source in ("trades", "analytics", "cash"):
         spans = sorted((date.fromisoformat(first), date.fromisoformat(last))
                        for first, last in periods_by_source.get(source, ()))
@@ -80,6 +85,16 @@ def format_imported_periods(periods_by_source):
                 merged[-1] = (merged[-1][0], max(last, merged[-1][1]))
             else:
                 merged.append((first, last))
+        merged_by_source[source] = merged
+    return merged_by_source
+
+
+def format_imported_periods(periods_by_source):
+    """Summarize saved complete Flex windows, preserving gaps between periods."""
+    lines = []
+    merged_by_source = merge_periods(periods_by_source)
+    for source in ("trades", "analytics", "cash"):
+        merged = merged_by_source[source]
         periods = ", ".join(f"{first.isoformat()} to {last.isoformat()}"
                             for first, last in merged)
         lines.append(f"{source.capitalize()}: {periods or 'none'}")

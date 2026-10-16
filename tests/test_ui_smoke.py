@@ -19,11 +19,11 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "header_icons.sqlite3"))
     window = ui.MainWindow()
     try:
-        buttons = (window.sync_button, window.theme_button,
+        buttons = (window.sync_button, window.pause_sync_button, window.theme_button,
                    window.help_button, window.settings_button)
         assert all(button.text() == "" and not button.icon().isNull() for button in buttons)
         assert [button.accessibleName() for button in buttons] == [
-            "Sync IBKR", "Switch to dark mode", "Help", "Settings"]
+            "Sync IBKR", "Pause sync", "Switch to dark mode", "Help", "Settings"]
         assert all(button.toolTip() for button in buttons)
         window.theme_button.click()
         assert window.theme_button.accessibleName() == "Switch to light mode"
@@ -35,6 +35,75 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
         assert not window.sync_button.isEnabled()
         window._history_process = None
     finally:
+        window.close()
+
+
+def test_pause_button_pauses_active_job_and_resumes_pending_queue(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "pause_sync.sqlite3"))
+    window = ui.MainWindow()
+    class Process:
+        code = None
+
+        def poll(self):
+            return self.code
+
+    process = Process()
+    launched = []
+    try:
+        window._sync_process = process
+        window._sync_all_queue = [lambda **kwargs: launched.append("next")]
+        window._sync_all_active = True
+        pause_icon = window.pause_sync_button.icon().cacheKey()
+        assert window.pause_sync_button.menu() is None
+        window.pause_sync_button.click()
+        assert window._sync_paused
+        assert window.pause_sync_button.accessibleName() == "Resume sync"
+        assert window.pause_sync_button.icon().cacheKey() != pause_icon
+        assert window.pause_sync_button.isEnabled()
+        assert not window.sync_button.isEnabled()
+        assert window.sync_progress_label.text() == "Pausing sync…"
+        window._poll()
+        window._periodic_refresh()
+        window.sync_all()
+        assert launched == []
+        process.code = 0
+        window._poll()
+        assert window.sync_progress_label.text() == "Sync paused"
+        assert launched == []
+        window.pause_sync_button.click()
+        assert not window._sync_paused
+        assert window.pause_sync_button.accessibleName() == "Pause sync"
+        assert launched == ["next"]
+        assert window.sync_button.isEnabled()
+    finally:
+        window.close()
+
+
+def test_sync_pause_stops_live_provider_and_blocks_reconnect(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "pause_live.sqlite3"))
+    window = ui.MainWindow()
+    provider = ui.IBKRMarketDataProvider("127.0.0.1", 4001, 27)
+    stopped = []
+    restarted = []
+    try:
+        window.db.set_setting("provider", "IBKR")
+        window.market = provider
+        window.service.market = provider
+        provider.connected = True
+        monkeypatch.setattr(provider, "stop", lambda: stopped.append(True))
+        monkeypatch.setattr(window, "_start_provider", lambda **kwargs: restarted.append(True))
+        window.pause_sync_button.click()
+        assert stopped == [True]
+        assert not provider.connected
+        window._periodic_refresh()
+        window.refresh_market(force=True)
+        assert restarted == []
+        window.pause_sync_button.click()
+        assert restarted == [True]
+    finally:
+        window.market = ui.MarketDataProvider()
         window.close()
 
 
@@ -142,15 +211,21 @@ def test_tab_order_can_be_saved_restored_and_keeps_view_actions_on_right_tab(tmp
         assert window._current_table_name() == "Trades"
         window.save_view_action.trigger()
         assert window.db.setting("default_view_Trades")
-        window.save_tab_layout()
+        # Dragging a tab (tabMoved) and changing the active tab both persist
+        # automatically via widgets.persist_tab_order; no manual save step.
         assert json.loads(window.db.setting(window.TAB_LAYOUT_KEY)) == {
             "version": 1, "order": ["Rebalance", "Portfolio", "Trades", "Lots", "Cash", "Analytics"],
             "active": "Trades"}
         bar.moveTab(0, window.tabs.count() - 1)
         window.tabs.setCurrentIndex(window._tab_index("Portfolio"))
-        assert window.restore_tab_layout()
-        assert [bar.tabData(i) for i in range(bar.count())] == [
-            "Rebalance", "Portfolio", "Trades", "Lots", "Cash", "Analytics"]
+        assert json.loads(window.db.setting(window.TAB_LAYOUT_KEY)) == {
+            "version": 1, "order": ["Portfolio", "Trades", "Lots", "Cash", "Analytics", "Rebalance"],
+            "active": "Portfolio"}
+        window.reset_tab_order()
+        assert [bar.tabData(i) for i in range(bar.count())] == list(window.DEFAULT_TAB_ORDER)
+        assert json.loads(window.db.setting(window.TAB_LAYOUT_KEY))["order"] == list(window.DEFAULT_TAB_ORDER)
+        bar.moveTab(window._tab_index("Rebalance"), 0)
+        window.tabs.setCurrentIndex(window._tab_index("Trades"))
         assert window._current_table_name() == "Trades"
     finally:
         window.close()
@@ -458,7 +533,7 @@ def test_overview_bars_and_lots_open_pnl_values(tmp_path, monkeypatch):
         assert model.bar_scales == {"unrealized_pnl": 23456.78,
                                     "one_day": 0.04, "mtd": 0.10, "ytd": 0.50}
         view = window.views["Portfolio"]
-        for column in (6, 8, 9, 10):
+        for column in (6, 9, 10, 11):
             assert not view.isColumnHidden(column)
             assert isinstance(view.itemDelegateForColumn(column), ui.SignedBarDelegate)
             index = model.index(0, column)
@@ -471,11 +546,11 @@ def test_overview_bars_and_lots_open_pnl_values(tmp_path, monkeypatch):
         option.palette = view.palette()
         option.font = view.font()
         option.widget = view
-        for theme, gain, loss in (("light", "#318a64", "#c55d61"),
-                                  ("dark", "#55c995", "#f18383")):
+        for theme, gain, loss in (("light", ui.COLORS["light"]["bar_positive"], ui.COLORS["light"]["bar_negative"]),
+                                  ("dark", ui.COLORS["dark"]["bar_positive"], ui.COLORS["dark"]["bar_negative"])):
             window._apply_theme(theme)
             option.palette = view.palette()
-            for column in (6, 8):
+            for column in (6, 9):
                 for row, expected_color, side in ((0, gain, "right"), (1, loss, "left")):
                     image = QImage(140, 25, QImage.Format_ARGB32)
                     image.fill(QColor("#ffffff"))
@@ -519,7 +594,7 @@ def test_saved_default_views_restore_layout_filters_and_sort(tmp_path, monkeypat
         header = overview.horizontalHeader()
         header.moveSection(header.visualIndex(4), 0)
         overview.setColumnWidth(4, 175)
-        overview.hideColumn(7)
+        overview.hideColumn(8)
         window.search_fields["Portfolio"].setText("AAPL")
         window.hide_closed_checkbox.setChecked(True)
         window._sort_table("Portfolio", 1, Qt.DescendingOrder)
@@ -536,7 +611,7 @@ def test_saved_default_views_restore_layout_filters_and_sort(tmp_path, monkeypat
 
         window.search_fields["Portfolio"].clear()
         window.hide_closed_checkbox.setChecked(False)
-        overview.showColumn(7)
+        overview.showColumn(8)
         header.moveSection(header.visualIndex(4), 4)
         window._sort_table("Portfolio", 0, Qt.AscendingOrder)
         window.models["Portfolio"].set_column_decimals(1, 2)
@@ -553,7 +628,7 @@ def test_saved_default_views_restore_layout_filters_and_sort(tmp_path, monkeypat
         overview = reopened.views["Portfolio"]
         assert overview.horizontalHeader().visualIndex(4) == 0
         assert overview.columnWidth(4) == 175
-        assert overview.isColumnHidden(7)
+        assert overview.isColumnHidden(8)
         assert reopened.search_fields["Portfolio"].text() == "AAPL"
         assert reopened.hide_closed_checkbox.isChecked()
         assert reopened.models["Portfolio"].sort_column == 1
@@ -799,11 +874,11 @@ def test_column_decimal_menu_and_toolbar_default_view_menu(tmp_path, monkeypatch
             QContextMenuEvent.Mouse, header_point, header.viewport().mapToGlobal(header_point)))
         assert len(header_calls) == 1 and header_calls[0][0] == "Trades"
         assert header.logicalIndexAt(header_calls[0][1]) == 3
-        window.models["Portfolio"].set_column_decimals(8, 4)
+        window.models["Portfolio"].set_column_decimals(9, 4)
         window.models["Portfolio"].rows[0]["one_day"] = 0.123456
-        assert window.models["Portfolio"].data(window.models["Portfolio"].index(0, 8), Qt.DisplayRole) == "12.3456%"
-        assert window.models["Portfolio"].decimals_for(8) == 4
-        assert window.models["Portfolio"].decimals_for(9) == 2
+        assert window.models["Portfolio"].data(window.models["Portfolio"].index(0, 9), Qt.DisplayRole) == "12.3456%"
+        assert window.models["Portfolio"].decimals_for(9) == 4
+        assert window.models["Portfolio"].decimals_for(10) == 2
 
         toolbar = window.tabs.widget(1).findChild(QWidget, "TradesToolbar")
         assert toolbar.contextMenuPolicy() == Qt.CustomContextMenu
@@ -833,7 +908,8 @@ def test_displayed_financial_numbers_use_commas_and_two_decimals(tmp_path, monke
         samples = {
             "Portfolio": {"id": 1, "display_ticker": "AAPL", "position_qty": 12345.6789,
                           "last_px": 1234.5678, "value": 9876543.219,
-                          "portfolio_pct": 12.345, "one_day": -0.012345},
+                          "unrealized_pct": 0.1234, "portfolio_pct": 12.345,
+                          "one_day": -0.012345},
             "Trades": {"id": 1, "display_ticker": "AAPL", "quantity": 12345.6789,
                        "price": 1234.5678, "commission_usd": -12.3456,
                        "realized_net": 123.456, "realized_pct": 0.1234,
@@ -850,8 +926,10 @@ def test_displayed_financial_numbers_use_commas_and_two_decimals(tmp_path, monke
         assert portfolio.data(portfolio.index(0, 1), Qt.DisplayRole) == "12,345.68"
         assert portfolio.data(portfolio.index(0, 3), Qt.DisplayRole) == "1,234.57"
         assert portfolio.data(portfolio.index(0, 4), Qt.DisplayRole) == "9,876,543.22"
-        assert portfolio.data(portfolio.index(0, 7), Qt.DisplayRole) == "1,234.50%"
-        assert portfolio.data(portfolio.index(0, 8), Qt.DisplayRole) == "-1.23%"
+        assert portfolio.headerData(7, Qt.Horizontal, Qt.DisplayRole) == "Open P&L %"
+        assert portfolio.data(portfolio.index(0, 7), Qt.DisplayRole) == "12.34%"
+        assert portfolio.data(portfolio.index(0, 8), Qt.DisplayRole) == "1,234.50%"
+        assert portfolio.data(portfolio.index(0, 9), Qt.DisplayRole) == "-1.23%"
         assert portfolio.headerData(999, Qt.Vertical, Qt.DisplayRole) == "1,000"
         assert portfolio.data(portfolio.index(0, 1), Qt.EditRole) == "12345.6789"
         trades, lots = window.models["Trades"], window.models["Lots"]
@@ -1165,7 +1243,7 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             assert term in guide
         assert "Ctrl+-" in guide
         for visual, label in zip(window.help_visuals, (
-                "Sync IBKR", "Hide closed", "Adjusted NAV change", "Pause updates")):
+                "Sync IBKR", "Hide closed", "Adjusted NAV change", "Show")):
             assert label in " ".join(child.text() for child in visual.findChildren(QLabel))
         for title, phrase in (("Start", "Start and refresh"),
                               ("Portfolio", "Trades and Lots"),
@@ -1450,16 +1528,16 @@ def test_overview_removes_quantity_diagnostics_without_losing_reconciliation(tmp
         model = window.models["Portfolio"]
         assert {"broker_qty", "qty_difference"}.isdisjoint(
             key for key, _, _ in model.columns)
-        assert model.columnCount() == 15
-        assert model.columns[11][0] == "reconciliation"
-        assert not window.views["Portfolio"].isColumnHidden(11)
+        assert model.columnCount() == 16
+        assert model.columns[12][0] == "reconciliation"
+        assert not window.views["Portfolio"].isColumnHidden(12)
         assert model.sort_column == 1
         assert window.db.setting("sort_Portfolio") == "1:desc"
         assert window._saved_default_view("Portfolio")["header"] is None
         assert model.rows[0]["broker_qty"] == 95
         assert model.rows[0]["qty_difference"] == 5
         assert model.rows[0]["reconciliation"] == "DIFFERENCE"
-        assert window.db.setting("portfolio_columns_version") == "3"
+        assert window.db.setting("portfolio_columns_version") == "4"
     finally:
         window.close()
 
@@ -1532,21 +1610,21 @@ def test_overview_migrates_saved_difference_column_sort(tmp_path, monkeypatch):
     window = ui.MainWindow()
     try:
         model = window.models["Portfolio"]
-        assert model.columnCount() == 15
-        assert model.columns[11][0] == "reconciliation"
-        assert not window.views["Portfolio"].isColumnHidden(11)
-        assert model.sort_column == 11
-        assert window.db.setting("sort_Portfolio") == "11:desc"
+        assert model.columnCount() == 16
+        assert model.columns[12][0] == "reconciliation"
+        assert not window.views["Portfolio"].isColumnHidden(12)
+        assert model.sort_column == 12
+        assert window.db.setting("sort_Portfolio") == "12:desc"
         window.db.set_setting("default_view_Portfolio", json.dumps({
             "version": 1, "header": "old-sixteen-column-state",
-            "columns": [key for key, _, _ in ui.PORTFOLIO[:11]] +
+            "columns": [key for key, _, _ in ui.PORTFOLIO if key != "unrealized_pct"][:11] +
                        ["qty_difference", "reconciliation", "data_status", "price_source", "last_updated"],
             "sort_key": "qty_difference", "sort_order": "desc", "search": "",
             "hide_closed": False}))
         state = window._saved_default_view("Portfolio")
         assert state["header"] is None
         assert state["sort_key"] == "reconciliation"
-        assert window.db.setting("portfolio_columns_version") == "3"
+        assert window.db.setting("portfolio_columns_version") == "4"
     finally:
         window.close()
 
@@ -1566,7 +1644,7 @@ def test_matches_menu_runs_manual_matching(tmp_path, monkeypatch):
                               if action.text() == "Matches")
         menu = matches_action.menu()
         assert [action.text() for action in menu.actions() if action.text()] == [
-            "Rebuild automatic matches", "Auto-match remaining", "Clear match for selected lot"]
+            "Match lots…", "Rebuild automatic matches", "Auto-match remaining", "Clear match for selected lot"]
         auto_menu = next(a for a in menu.actions() if a.text() == "Auto-match remaining").menu()
         assert [action.text() for action in auto_menu.actions()] == [
             "FIFO", "LIFO", "Max realized gain", "Max unrealized gain"]

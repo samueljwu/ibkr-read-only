@@ -3,7 +3,11 @@
 import argparse
 from contextlib import closing
 from pathlib import Path
-import sqlite3
+from secrets import token_hex
+from sqlcipher3 import dbapi2 as sqlite3
+
+from app.platform import secret_store
+from app.storage.encryption import encrypted_copy, open_database
 
 
 def copy_database(source, destination):
@@ -12,20 +16,19 @@ def copy_database(source, destination):
     if not source.is_file():
         raise FileNotFoundError("The source database does not exist")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # Reserve the path exclusively; never overwrite a previous copy or source.
-    with destination.open("xb"):
-        pass
+    if destination.exists():
+        raise FileExistsError(destination)
+    key = secret_store.load_database_key(source) or token_hex(32)
     try:
-        with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
-            with closing(sqlite3.connect(destination)) as copied:
-                original.backup(copied)
-                if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise ValueError("Copied database failed its integrity check")
-                # A debug copy must not move itself or write backups to the
-                # original database's configured folders.
-                with copied:
-                    copied.execute("UPDATE settings SET value='' WHERE key IN "
-                                   "('data_directory', 'backup_directory')")
+        encrypted_copy(source, destination, key)
+        with closing(open_database(destination, key=key)) as copied:
+            # A debug copy must not move itself or write backups to the
+            # original database's configured folders.
+            with copied:
+                copied.execute("UPDATE settings SET value='' WHERE key IN "
+                               "('data_directory', 'backup_directory')")
+        secret_store.save_database_key(destination, key)
+        secret_store.save_database_key(source, key)
     except Exception:
         destination.unlink(missing_ok=True)
         raise

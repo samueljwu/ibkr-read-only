@@ -38,6 +38,14 @@ def window(tmp_path, monkeypatch):
     result.close()
 
 
+def periods_table_text(dialog):
+    """Flatten the Imported periods table into one string for substring checks."""
+    table = dialog.periods_table
+    return "\n".join(
+        f"{table.item(row, 0).text()}: {table.item(row, 1).text()}"
+        for row in range(table.rowCount()))
+
+
 def configure(window):
     window.db.set_setting("ib_account_id", "SYNTHETIC")
     window.settings_fields["ib_account_id"].setText("SYNTHETIC")
@@ -131,24 +139,21 @@ def test_import_dialog_keeps_explanation_and_results_compact(window):
     dialog = window.history_import_dialog
     QApplication.instance().processEvents()
     assert not dialog.help_text.isVisible()
+    assert not dialog.progress_card.isVisible()
     assert not dialog.details.isVisible()
     assert not dialog.pause_button.isVisible()
     assert not dialog.progress_label.isVisible()
-    assert not dialog.imported_periods_label.isVisible()
-    assert f"{date.today().year - HISTORY_YEARS}-01-01" in dialog.older_import_button.text()
-    assert "Import older CSV history" in dialog.older_import_button.text()
+    assert dialog.periods_table.isVisible()
+    assert f"{date.today().year - HISTORY_YEARS}-01-01" in dialog.older_card_title.text()
     assert dialog.import_button.width() < dialog.width() // 2
     dialog.help_button.click()
     assert dialog.help_text.isVisible()
     assert "saved Flex token in Settings" in dialog.help_text.text()
     assert "Cash combines adjacent saved periods" in dialog.help_text.text()
     assert "backups" in dialog.help_text.text()
-    dialog.coverage_button.click()
-    assert dialog.imported_periods_label.isVisible()
-    dialog.coverage_button.click()
-    assert not dialog.imported_periods_label.isVisible()
     dialog.show_status({"state": "needs_review", "started_sources": [],
                         "message": "Synthetic correction requires review."})
+    assert dialog.progress_card.isVisible()
     assert dialog.progress_label.isVisible()
     assert dialog.details.isVisible()
     assert "Synthetic correction requires review." in dialog.details.toPlainText()
@@ -266,7 +271,7 @@ def test_launch_progress_result_and_sync_guards(window, monkeypatch):
             (account_id,source,from_day,to_day,status)
             VALUES ('SYNTHETIC','flex','2025-11-01','2025-11-30','complete')""")
     window.open_history_import()
-    assert "Trades: 2025-11-01 to 2025-11-30" in dialog.imported_periods_label.text()
+    assert "Trades: 2025-11-01 to 2025-11-30" in periods_table_text(dialog)
     launches = []
     process = SimpleNamespace(code=None)
     process.poll = lambda: process.code
@@ -298,7 +303,7 @@ def test_launch_progress_result_and_sync_guards(window, monkeypatch):
     window._poll_history_import()
     assert "Trades" in dialog.progress_label.text()
     assert "2026-01-14" in dialog.progress_label.text()
-    assert "Trades: 2025-11-01 to 2025-11-30" in dialog.imported_periods_label.text()
+    assert "Trades: 2025-11-01 to 2025-11-30" in periods_table_text(dialog)
     status.update(state="completed_with_gaps", active_source=None, current_window=None,
                   completed_windows={"trades": [["2026-01-01", "2026-01-14"]]},
                   unavailable_windows={"trades": [["2025-12-18", "2025-12-31"]]})
@@ -318,7 +323,7 @@ def test_launch_progress_result_and_sync_guards(window, monkeypatch):
     assert window.sync_button.isEnabled() and dialog.import_button.isEnabled()
     assert "Not available: 2025-12-18 to 2025-12-31" in dialog.details.toPlainText()
     assert ("Trades: 2025-11-01 to 2025-11-30, 2026-01-01 to 2026-01-14"
-            in dialog.imported_periods_label.text())
+            in periods_table_text(dialog))
     assert "completed with gaps" in dialog.progress_label.text()
     assert TOKEN not in window._history_status_path.read_text()
 
@@ -398,6 +403,62 @@ def test_pause_and_resume_reuse_the_import_status(window, monkeypatch):
     assert len(launches) == 2
     assert not pause_request_path(status_path).exists()
     assert window._history_process is processes[1]
+
+
+def test_global_pause_resumes_only_the_import_it_paused(window, monkeypatch):
+    configure(window)
+    processes = [SimpleNamespace(code=None), SimpleNamespace(code=None)]
+    for process in processes:
+        process.poll = lambda process=process: process.code
+    launches = []
+    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs:
+                        launches.append(command) or processes[len(launches) - 1])
+
+    window.start_history_import()
+    status_path = window._history_status_path
+    assert window._history_process is processes[0]
+    window.pause_sync_button.click()
+    assert pause_request_path(status_path).exists()
+    assert window._global_paused_history_path == status_path
+    assert not window.sync_button.isEnabled()
+    window.start_history_import()
+    assert len(launches) == 1
+
+    status = read_status(status_path)
+    status.update(state="paused")
+    write_status(status_path, status)
+    processes[0].code = 0
+    window._poll()
+    assert window._history_process is None
+    assert len(launches) == 1
+    window.pause_sync_button.click()
+    assert len(launches) == 2
+    assert window._history_process is processes[1]
+    assert window._history_status_path == status_path
+
+
+def test_global_resume_leaves_a_manually_paused_import_paused(window, monkeypatch):
+    configure(window)
+    process = SimpleNamespace(code=None)
+    process.poll = lambda: process.code
+    launches = []
+    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs:
+                        launches.append(command) or process)
+
+    window.start_history_import()
+    status_path = window._history_status_path
+    window.pause_history_import()
+    window.pause_sync_button.click()
+    assert window._global_paused_history_path is None
+    status = read_status(status_path)
+    status.update(state="paused")
+    write_status(status_path, status)
+    process.code = 0
+    window._poll()
+    window.pause_sync_button.click()
+    assert len(launches) == 1
+    assert window._history_process is None
+    assert window.history_import_dialog.import_button.text() == "Resume import"
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
@@ -528,10 +589,9 @@ def test_older_csv_picker_requires_both_reports(window, monkeypatch):
     assert "Select both CSV reports" in window.test_warnings[-1]
 
 
-def test_older_csv_removal_action_is_collapsed_and_confirmed(window, monkeypatch):
+def test_older_csv_removal_action_is_confirmed(window, monkeypatch):
     configure(window)
     dialog = window.history_import_dialog
-    dialog.coverage_button.setChecked(True)
     assert dialog.remove_older_button.isHidden()
     with window.db.conn:
         window.db.conn.execute(
@@ -540,9 +600,6 @@ def test_older_csv_removal_action_is_collapsed_and_confirmed(window, monkeypatch
                VALUES (1,'SYNTHETIC','2021-04','2021-04-13','2021-04-30','100','1.5','synthetic')""")
     window._refresh_history_import_coverage()
     assert dialog.remove_older_button.isVisible()
-    dialog.coverage_button.setChecked(False)
-    assert dialog.remove_older_button.isHidden()
-    dialog.coverage_button.setChecked(True)
     launches = []
     monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs:
                         launches.append(command) or SimpleNamespace(poll=lambda: None))

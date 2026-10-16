@@ -28,7 +28,7 @@ def test_mac_token_uses_explicit_keychain_backend(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Credential Manager")
-def test_windows_token_round_trips_through_credential_manager(monkeypatch):
+def test_windows_token_round_trips_through_credential_manager(monkeypatch, tmp_path):
     store = {}
     live = []
     credential_pointer = ctypes.POINTER(secret_store._CREDENTIAL)
@@ -64,3 +64,9 @@ def test_windows_token_round_trips_through_credential_manager(monkeypatch):
     secret_store.save_flex_token("TEST", "1234567890123456")
     assert secret_store.load_flex_token("TEST") == "1234567890123456"
     assert store == {"custom-ib-monitor:ibkr-flex:TEST": "1234567890123456"}
+    path = tmp_path / "portfolio.sqlite3"
+    target = secret_store._database_target(path)
+    secret_store._save(target, "a" * 64, target)
+    assert secret_store._load(target, target) == "a" * 64
+    assert len(store) == 2
+    assert str(path) not in next(key for key in store if key.startswith("custom-ib-monitor:database:"))

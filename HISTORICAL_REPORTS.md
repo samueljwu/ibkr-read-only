@@ -4,13 +4,13 @@ Create **three separate Activity Flex Queries** in IBKR Client Portal under **Pe
 
 | Query / Settings field | Required sections and fields | Used for |
 | --- | --- | --- |
-| **Trades** / Trades Flex query ID | **Trades** at **Executions** detail: Account ID, Trade ID or IB Execution ID, Trade Date/Time, Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Category, Currency, Multiplier, FX Rate to Base, IB Commission and Commission Currency. For options, also Local Symbol, Expiry, Put/Call, and Strike. Include **Corporate Actions**, **Option Exercises/Assignments/Expirations**, and **Transfers** with account, transaction ID, date, action/direction, asset class, contract ID, symbol, quantity, currency, cost or proceeds, multiplier and FX Rate to Base where offered. Include **Account Information → Currency** (the account base currency), or a USD base declaration or USD conversion evidence. | Completed executions, transferred opening lots, supported security events, and reconciliation review. Unsupported events stay flagged for review. |
+| **Trades** / Trades Flex query ID | **Trades** at **Executions** detail: Account ID, Trade ID or IB Execution ID, Trade Date/Time, Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Category, Currency, Multiplier, FX Rate to Base, IB Commission and Commission Currency, and Accrued Interest (`accruedInt`, bonds only). For options, also Local Symbol, Expiry, Put/Call, and Strike. Include **Corporate Actions**, **Option Exercises/Assignments/Expirations**, and **Transfers** with account, transaction ID, date, action/direction, asset class, contract ID, symbol, quantity, currency, cost or proceeds, multiplier and FX Rate to Base where offered. Include **Account Information → Currency** (the account base currency), or a USD base declaration or USD conversion evidence. | Completed executions, transferred opening lots, supported security events, and reconciliation review. Unsupported events stay flagged for review. A bond trade's `accruedInt` is the one-time interest settled with that trade (cash paid on a buy, cash received on a sell); it is distinct from the Flex **Interest Accruals** section, which reports running daily accrual balances and is not read by this app. |
 | **Analytics** / Analytics Flex query ID | **NAV Summary in Base** with daily Report Date, Total NAV, Currency, and Cash; **Cash Transactions** with Report Date or Date/Time, Type, Amount, Currency, FX Rate to Base and Transaction ID; **Transfers** with date, direction, asset class, Position Amount in Base or cash amount, Currency, FX Rate to Base, and Transaction ID. Include **Account Information → Currency** (the account base currency), or a USD base declaration in each statement. | Completed daily NAV, cash balance, deposits/withdrawals, security transfers and flow-adjusted returns. Daily NAV rows and complete requested date coverage are needed. |
 | **Cash** / Cash Flex query ID | **Cash Transactions**: Account ID, Currency, Report Date or Date/Time, Type, Amount, Description, Transaction ID, Conid, Symbol, and FX Rate to Base. Include every currency and instrument. | Dated nontrade cash activity. Conid or a unique Symbol links income and tax to a Return instrument; missing links remain unattributed. Unsupported transaction types stop that period's import. |
 
 IBKR's field labels can vary by portal version. The importer validates report identity, dates, and financial fields before marking a period complete. Conid, Symbol, and transaction FX are optional in individual cash rows; absent identity leaves income unattributed, and absent FX can leave its USD return unavailable. The app currently expects a **USD base account** and one account per database. The Flex query must allow custom date requests and return the requested account and full date interval. Check the in-app sync status if IBKR cannot provide a section or older period. [IBKR Activity Flex reference](https://www.ibkrguides.com/reportingreference/reportguide/activity%20flex%20query%20reference.htm)
 
-The Return subtab uses all recorded trades and their matched lots. Its total adds attributable dividends, payments in lieu, and bond interest, then subtracts attributable withholding tax. It requires complete imported Cash windows from the first recorded trade through the last recorded trade or income posting for a closed position, or through yesterday for an open position. Missing Cash windows, unlinked income, unmatched sales, and missing valuation or FX make affected totals unavailable. Reimport older Cash periods after adding Conid, Symbol, and FX Rate to Base to the Cash query; unchanged financial amounts may still gain instrument attribution. The percentage is cumulative total return divided by all purchase costs and purchase commissions, not an annualized or time-weighted return. It is unavailable for short positions.
+The Return subtab uses all recorded trades and their matched lots. Realized and unrealized bond P&L use clean prices and commissions. Net income includes attributable dividends, payments in lieu, bond coupons, bond accrued interest paid on purchases and received on sales, and withholding tax. Cash entries labeled "Accrued Interest Paid" or "Accrued Interest Received" are excluded because trade `accruedInt` already supplies those transfers. For an open bond, total return also needs a current, instrument-level accrued-interest receivable. The app does not currently import that value, so it shows clean-price P&L but leaves the open bond's full total unavailable. Complete imported Cash windows are required from the first recorded trade through the last recorded trade or income posting for a closed position, or through yesterday for an open position. Missing Cash windows, unlinked income or tax, unmatched sales, and missing valuation or FX make affected totals unavailable. Reimport older Cash periods after adding Conid, Symbol, and FX Rate to Base to the Cash query; unchanged financial amounts may still gain instrument attribution. The percentage is cumulative total return divided by all purchase cash outflows, including commissions and bond accrued interest paid; it is neither annualized nor time-weighted and is unavailable for short positions. These return components are performance measures, not tax classifications.
 
 NAV Summary in Base is represented by `EquitySummaryInBase` / `EquitySummaryByReportDateInBase` in XML. Analytics accepts daily reports that skip Saturday and Sunday only when NAV context establishes the adjacent Friday-to-Monday chain; omitted weekdays and unverified date edges stop validation. A multi-day statement must contain every weekday NAV date within its bounds. Wholly empty early windows are accepted only when no NAV is already stored for that window. It imports reported NAV dates only. Cash imports dated Cash Transactions and tracks complete requested windows without checking statement balances. Commission Adjustments are separate cash transactions, so Return uses the trade fee adjustment ledger to avoid counting them twice.
 
@@ -34,7 +34,8 @@ in **Import Data** and choose **Remove older CSV history…**. After confirmatio
 the app backs up the database and removes the saved older CSV monthly history,
 statement evidence, closing stock quantity anchors, and reported since-inception
 return for the current account. This clears all older CSV imports for that
-account; it leaves Flex history, later trades, and the original CSV files in
+account; it also removes estimated CSV opening lots, while leaving Flex history,
+later trades, and the original CSV files in
 place. Import the intended pair again afterward.
 
 The **Analytics → Monthly history** tab shows monthly NAV and the monthly return
@@ -42,11 +43,20 @@ reported by PortfolioAnalyst. An inception month is a partial month. The
 Activity Statement's dated trades, transfers, cash events, and closing positions
 are retained as local source evidence. The statement's reconciled closing stock
 quantities anchor the position ledger; later trades change those quantities.
+When the statement includes a contract ID in Financial Instrument Information,
+the importer uses it to link a closing position across ticker changes.
 PortfolioAnalyst's reported since-inception return is shown separately from the
 daily Flex return, with its report end date. The statement rows are not treated
 as execution-level Flex trades or as complete daily NAV, cash, or flow coverage.
-Position-specific cost and return can remain unavailable when the opening lots
-cannot be matched to executions. **Daily analysis is
+For a stock holding without an earlier priced lot, a positive reported CSV
+**Close Price** at the statement end can create an estimated opening lot for the
+uncovered quantity. This is a performance baseline on the statement date, not
+the original purchase cost or tax basis; gains and losses before that date on
+the estimated shares are excluded. Existing priced lots take precedence.
+Missing or ambiguous identity, an earlier recorded sale, or missing FX can
+leave the estimate unavailable.
+Position-specific return can still be unavailable when later sales cannot be
+matched or Cash history is incomplete. **Daily analysis is
 unavailable for the imported 2021 period**, including daily P&L, daily extremes,
 Sharpe ratio, and capital deployment across that period. The import does not
 fill missing daily observations by interpolation. Protect the source CSVs,

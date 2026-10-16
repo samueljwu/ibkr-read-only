@@ -11,9 +11,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
-import sqlite3
+from sqlcipher3 import dbapi2 as sqlite3
 
 from app.platform.paths import local_config_path
+from app.storage.encryption import open_database
 
 CENT = Decimal("0.01")
 
@@ -108,8 +109,7 @@ def audit(report, database=None):
     if first > last:
         raise ValueError("Report period is reversed")
 
-    uri = f"file:{database.resolve().as_posix()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    connection = open_database(database, readonly=True)
     connection.row_factory = sqlite3.Row
     try:
         saved_account = connection.execute(

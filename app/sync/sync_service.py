@@ -10,7 +10,7 @@ import time
 
 from app.broker.broker_sync import BrokerIngestor, parse_flex_root, parse_flex_xml
 from app.platform.diagnostics import configure_diagnostics
-from app.flex.flex_import import FlexServiceError, FlexValidationError, flex_day, safe_flex_error, fetch_flex
+from app.flex.flex_import import FlexServiceError, FlexValidationError, flex_day, flex_today, safe_flex_error, fetch_flex
 from app.platform.secret_store import load_flex_token
 from app.finance.services import MatchingService
 
@@ -104,7 +104,7 @@ def run_flex_sync(db, account_id: str, query_id: str, *, today: date | None = No
     if not account_id or not query_id:
         raise ValueError("IBKR account and Flex query ID are required")
     db.validate_account_ownership(account_id)
-    today = today or date.today()
+    today = today or flex_today()
     with single_writer_lock(db.path):
         log = configure_diagnostics(db.path, "sync-trades")
         run_id = None

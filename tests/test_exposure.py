@@ -248,11 +248,15 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     selected_category = market_slices[0].label()
     market_slices[0].clicked.emit()
     assert panel.exposure_page.positions.rowCount() == 1
+    panel.exposure_page.groups.sortItems(0, Qt.AscendingOrder)
+    panel.exposure_page.render()
+    selected_row = panel.exposure_page.groups.selectedItems()[0].row()
+    assert panel.exposure_page.groups.item(selected_row, 0).data(Qt.UserRole) == selected_category
     panel.exposure_page._select_category(selected_category)
     assert panel.exposure_page.groups.rowCount() == 2
     assert panel.exposure_page.groups.horizontalHeaderItem(2).text() == "Mix %"
     assert {panel.exposure_page.groups.item(index, 2).text()
-            for index in range(2)} == {"60.0%", "40.0%"}
+            for index in range(2)} == {"+60.0%", "+40.0%"}
     panel.exposure_page.groups.selectRow(0)
     assert panel.exposure_page.positions.rowCount() == 1
     add_custom_set(db, 1, "Theme")

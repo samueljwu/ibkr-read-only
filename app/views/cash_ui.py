@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (QComboBox, QDateEdit, QFrame, QGridLayout,
                                QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
                                QWidget)
 
-from app.views.table_ui import ReportTable, SortItem
+from app.views import widgets
+from app.views.table_ui import ReportTable, SortItem, money
 from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
 
@@ -26,7 +27,7 @@ SUMMARY_LINES = (
 
 
 def _money(value):
-    return f"{Decimal(str(value)):,.2f}"
+    return money(value, symbol=False)
 
 
 class CashMovementsTab(QWidget):
@@ -93,8 +94,7 @@ class CashMovementsTab(QWidget):
         summary_layout.setContentsMargins(0, 0, 0, 0)
         summary_layout.setSpacing(6)
 
-        self.summary_heading = QLabel("Cash activity")
-        self.summary_heading.setObjectName("helpSection")
+        self.summary_heading = widgets.section_title("Cash activity")
         summary_layout.addWidget(self.summary_heading)
         self.summary_scroll = QScrollArea()
         self.summary_scroll.setObjectName("cashBreakdownScroll")
@@ -118,8 +118,7 @@ class CashMovementsTab(QWidget):
         self.transactions_pane.setMinimumHeight(135)
         self.transactions_pane.setMinimumWidth(360)
 
-        self.transactions_heading = QLabel("Transactions · USD")
-        self.transactions_heading.setObjectName("helpSection")
+        self.transactions_heading = widgets.section_title("Transactions · USD")
         transactions_layout.addWidget(self.transactions_heading)
         self.empty_status = QLabel()
         self.empty_status.setObjectName("hint")
@@ -130,7 +129,7 @@ class CashMovementsTab(QWidget):
                                      {4: (2, "plain")})
         header = self.table.horizontalHeader()
         for column in (0, 1, 3, 4):
-            header.setSectionResizeMode(column, QHeaderView.Fixed)
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         for column, width in ((0, 112), (1, 170), (3, 82), (4, 130)):
             self.table.setColumnWidth(column, width)

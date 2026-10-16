@@ -46,8 +46,10 @@ class MarketDataProvider:
                 for position_id in ids:
                     record = self.quotes.setdefault(position_id, {"ticks": {}})
                     if tick and valid_price(value) is not None:
+                        stamp = datetime.now().astimezone()
                         record["ticks"][tick] = float(value)
-                        record["updated"] = datetime.now().isoformat(timespec="seconds")
+                        record["updated"] = stamp.replace(tzinfo=None).isoformat(timespec="seconds")
+                        record.setdefault("tick_updated", {})[tick] = stamp.isoformat(timespec="seconds")
                         record["status"] = "DELAYED" if mode == "Delayed" else "OK"
                     elif not record.get("status"):
                         record["status"] = "WAITING FOR PRICE"
@@ -68,6 +70,7 @@ class MarketDataProvider:
                             record["cached_price"] = price
                             record["cached_as_of"] = record.get("updated", "")
                         record["ticks"] = {}
+                        record["tick_updated"] = {}
                         record["mode"] = "Cached"
                         changes.add(position_id)
             elif kind == "search_results":

@@ -1,7 +1,6 @@
 """Offline quotes stay identifiable and never turn into current-session returns."""
 
 import os
-import sqlite3
 from datetime import date, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 import app.ui as ui
 import app.market.market_data as market_data
 from app.storage.database import Database
+from app.storage.encryption import open_database
 from app.market.market_data import MarketDataProvider
 from app.finance.services import PortfolioService
 
@@ -37,7 +37,7 @@ def test_quote_cache_does_not_wait_for_another_writer(tmp_path):
     path = tmp_path / "locked.sqlite3"
     db = Database(path)
     position_id = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-    other = sqlite3.connect(path)
+    other = open_database(path)
     try:
         other.execute("BEGIN IMMEDIATE")
         db.save_quotes(1, "ACCOUNT-A", [(position_id, None, 12, "LIVE LAST", "2026-10-06T15:00:00")])

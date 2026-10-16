@@ -1,15 +1,21 @@
 """Retrieve IBKR Activity Flex reports for automatic trade sync."""
 
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 import time
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 
 MAX_FLEX_WINDOW_DAYS = 365
 HISTORY_YEARS = 4  # Current year plus four previous calendar years.
+
+
+def flex_today():
+    """IBKR reports a trading day complete only once it ends in US Eastern time."""
+    return datetime.now(ZoneInfo("America/New_York")).date()
 
 
 class _RejectRedirects(HTTPRedirectHandler):

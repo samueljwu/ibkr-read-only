@@ -203,15 +203,37 @@ class BrokerIngestor:
                 else self.db.fx_rate(currency, record["trade_date"]))
             if rate is not None and rate > 0:
                 commission_usd = (-commission if source == "flex" else commission) * rate
-        return fx, commission_usd
+        accrued_interest_usd = self._accrued_interest_usd(record, fx)
+        return fx, commission_usd, accrued_interest_usd
 
     @staticmethod
-    def _same_economics(old, record, fx, commission_usd):
+    def _accrued_interest_usd(record, fx):
+        """Signed USD accrued interest transferred at trade settlement, bonds only.
+
+        IBKR reports accruedInt as a positive magnitude on Trade records regardless
+        of side; mirror the commission_usd convention (negative on BUY -- cash paid
+        out -- positive on SELL -- cash received). This is a one-time settlement
+        transfer, distinct from the periodic "Bond interest" coupon income captured
+        separately in app/finance/position_returns.py.
+        """
+        if (record.get("security_type") or "").upper() != "BOND":
+            return 0.0
+        value = _number((record.get("raw") or {}).get("accruedInt"))
+        if value is None:
+            return 0.0
+        if fx is None or fx <= 0:
+            return None
+        sign = -1.0 if record.get("side") == "BUY" else 1.0
+        return sign * abs(value) * fx
+
+    @staticmethod
+    def _same_economics(old, record, fx, commission_usd, accrued_interest_usd):
         expected = {name: record.get(name) for name in (
             "trade_date", "side", "price", "currency", "security_type", "multiplier")}
         expected.update(executed_at=record.get("executed_at") or "",
                         quantity=abs(record.get("quantity") or 0), fx_to_usd=fx,
-                        commission_usd=commission_usd)
+                        commission_usd=commission_usd,
+                        accrued_interest_usd=accrued_interest_usd)
         return all(old[name] == value for name, value in expected.items())
 
     def flex_report_matches(self, records, events, window):
@@ -247,7 +269,7 @@ class BrokerIngestor:
         def reviewed_contents(raw):
             numeric = {"quantity", "tradePrice", "price", "conid", "conId", "con_id",
                        "multiplier", "fxRateToBase", "fx_to_usd", "ibCommission", "commission",
-                       "commission_usd", "strike"}
+                       "commission_usd", "strike", "accruedInt"}
             def normalized(name, value):
                 if name in numeric:
                     return _number(value)
@@ -278,16 +300,18 @@ class BrokerIngestor:
                 continue
             if revision < old["revision"]:
                 continue
-            fx, commission_usd = self._economics(record, "flex")
-            if fx is None or fx <= 0 or commission_usd is None:
+            fx, commission_usd, accrued_interest_usd = self._economics(record, "flex")
+            if fx is None or fx <= 0 or commission_usd is None or accrued_interest_usd is None:
                 if self._same_economics(old, record,
                         fx if fx is not None and fx > 0 else old["fx_to_usd"],
-                        commission_usd if commission_usd is not None else old["commission_usd"]):
+                        commission_usd if commission_usd is not None else old["commission_usd"],
+                        accrued_interest_usd if accrued_interest_usd is not None
+                        else old["accrued_interest_usd"]):
                     review += 1
                     continue
                 raise FlexValidationError("Needs review: incomplete execution correction; include commission and FX fields")
             if (str(old["con_id"]) != str(record.get("con_id")) or
-                    not self._same_economics(old, record, fx, commission_usd) or
+                    not self._same_economics(old, record, fx, commission_usd, accrued_interest_usd) or
                     revision > old["revision"] or old["execution_status"] != "complete"):
                 same = False
 
@@ -342,6 +366,7 @@ class BrokerIngestor:
                     self._ingest_event(event, result)
             for group in split_groups.values():
                 self._ingest_forward_split(group, result)
+            self._reconcile_csv_baselines(result.changed_position_ids)
             if window is not None:
                 from_day, to_day = window
                 conn.execute("""INSERT INTO broker_sync_windows
@@ -354,6 +379,42 @@ class BrokerIngestor:
                      "review" if result.execution_review else "complete", len(records), accepted_count,
                      result.review))
         return result
+
+    def _reconcile_csv_baselines(self, position_ids):
+        """Prefer a subsequently imported priced broker lot to a CSV market estimate."""
+        conn = self.db.conn
+        for position_id in position_ids:
+            opening = conn.execute("""SELECT as_of,quantity FROM legacy_position_openings
+                WHERE portfolio_id=? AND account_id=? AND position_id=?
+                ORDER BY as_of DESC LIMIT 1""",
+                (self.portfolio_id, self.account_id, position_id)).fetchone()
+            if not opening:
+                continue
+            estimate = conn.execute("""SELECT id,quantity FROM trades WHERE portfolio_id=?
+                AND position_id=? AND source='CSV market baseline' AND trade_date=?""",
+                (self.portfolio_id, position_id, opening["as_of"])).fetchone()
+            if not estimate:
+                continue
+            actual = conn.execute("""SELECT side,quantity FROM trades WHERE portfolio_id=?
+                AND position_id=? AND source<>'CSV market baseline' AND trade_date<=?""",
+                (self.portfolio_id, position_id, opening["as_of"])).fetchall()
+            if any(row["side"] == "SELL" for row in actual):
+                continue  # Earlier sales require a lot-level review.
+            needed = float(opening["quantity"]) - sum(float(row["quantity"]) for row in actual)
+            if abs(needed - estimate["quantity"]) < 1e-9:
+                continue
+            if needed < -1e-9:
+                raise ValueError("Broker lots exceed the older CSV closing quantity")
+            if conn.execute("""SELECT 1 FROM trade_matches WHERE origin='manual'
+                AND (buy_trade_id=? OR sell_trade_id=?) LIMIT 1""",
+                (estimate["id"], estimate["id"])).fetchone():
+                raise ValueError("Manual CSV baseline matches need review before replacing the estimate")
+            conn.execute("DELETE FROM trade_matches WHERE buy_trade_id=? OR sell_trade_id=?",
+                         (estimate["id"], estimate["id"]))
+            if needed <= 1e-9:
+                conn.execute("DELETE FROM trades WHERE id=?", (estimate["id"],))
+            else:
+                conn.execute("UPDATE trades SET quantity=? WHERE id=?", (needed, estimate["id"]))
 
     def _ingest_event(self, event, result):
         raw = event.get("raw") or {}
@@ -443,6 +504,15 @@ class BrokerIngestor:
         return True
 
     def _ingest_cash_corporate_action(self, raw, source_id, result):
+        """Build the synthetic SELL for a cash merger or bond maturity/redemption.
+
+        IBKR only populates accruedInt on <Trade> (and <OpenPosition>) elements, never
+        on <CorporateAction> records, so a BM maturity/redemption event here never
+        carries accrued interest to convert; _insert_corporate_trade leaves
+        accrued_interest_usd at its 0 default, which is correct -- any final accrued
+        interest due at maturity arrives separately as "Bond interest" cash income
+        (see app/finance/position_returns.py INCOME_KINDS), not as a trade economics field.
+        """
         category, action = raw.get("assetCategory"), raw.get("type")
         description = (raw.get("actionDescription") or "").upper()
         if not ((action == "TC" and category == "STK" and "MERGED(CASH)" in description) or
@@ -658,7 +728,9 @@ class BrokerIngestor:
                 result.execution_review += 1
                 result.issues.append(f"{source_id}: {issue}")
                 return False
-        fx, commission_usd = self._economics(record, source)
+        fx, commission_usd, accrued_interest_usd = self._economics(record, source)
+        # accrued_interest_usd can only be None when fx is already missing/invalid
+        # (see _accrued_interest_usd), so it never contributes an independent pending reason.
         pending = []
         if fx is None or fx <= 0:
             pending.append("FX")
@@ -680,7 +752,7 @@ class BrokerIngestor:
             corrected = (self.allow_flex_corrections and source == "flex" and
                          revision == existing["revision"] and quality >= existing["quality"] and
                          (old_con_id != con_id or
-                          not self._same_economics(old, record, fx, commission_usd)))
+                          not self._same_economics(old, record, fx, commission_usd, accrued_interest_usd)))
             if newer or richer or corrected:
                 if old["source"] != "IBKR sync":
                     issue = "correction conflicts with a manually edited trade"
@@ -709,12 +781,15 @@ class BrokerIngestor:
                 conn.execute("""DELETE FROM trade_matches WHERE origin='auto'
                     AND (buy_trade_id=? OR sell_trade_id=?)""", (row_id, row_id))
                 conn.execute("""UPDATE trades SET trade_date=?,executed_at=?,side=?,quantity=?,price=?,
-                    currency=?,security_type=?,multiplier=?,fx_to_usd=?,commission_usd=?,source='IBKR sync',
+                    currency=?,security_type=?,multiplier=?,fx_to_usd=?,commission_usd=?,
+                    accrued_interest_usd=?,source='IBKR sync',
                     updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                     (record["trade_date"], record.get("executed_at") or "", record["side"], qty,
                      price, record["currency"], record["security_type"], multiplier,
                      fx if fx is not None else old["fx_to_usd"],
-                     commission_usd if commission_usd is not None else old["commission_usd"], row_id))
+                     commission_usd if commission_usd is not None else old["commission_usd"],
+                     accrued_interest_usd if accrued_interest_usd is not None else old["accrued_interest_usd"],
+                     row_id))
                 conn.execute("""UPDATE broker_executions SET latest_exec_id=?,revision=?,quality=?,
                     status=?,updated_at=CURRENT_TIMESTAMP WHERE account_id=? AND execution_key=?""",
                     (record.get("ib_exec_id") or existing["latest_exec_id"], max(revision, existing["revision"]),
@@ -724,11 +799,13 @@ class BrokerIngestor:
             elif quality >= existing["quality"] and revision >= existing["revision"] and (
                 (commission_usd is not None and abs(old["commission_usd"] - commission_usd) > 1e-9) or
                 (commission_usd is not None and "commission" in existing["status"] and status != existing["status"]) or
+                (accrued_interest_usd is not None and abs(old["accrued_interest_usd"] - accrued_interest_usd) > 1e-9) or
                 (record["security_type"] == "BOND" and abs(old["multiplier"] - multiplier) > 1e-9) or
                 (fx is not None and fx > 0 and (old["fx_to_usd"] or 0) <= 0)):
-                conn.execute("""UPDATE trades SET commission_usd=?,fx_to_usd=?,multiplier=?,
+                conn.execute("""UPDATE trades SET commission_usd=?,accrued_interest_usd=?,fx_to_usd=?,multiplier=?,
                     updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                     (commission_usd if commission_usd is not None else old["commission_usd"],
+                     accrued_interest_usd if accrued_interest_usd is not None else old["accrued_interest_usd"],
                      fx if fx is not None and fx > 0 else old["fx_to_usd"], multiplier, row_id))
                 if record["security_type"] == "BOND":
                     conn.execute("UPDATE positions SET multiplier=? WHERE id=?", (multiplier, old["position_id"]))
@@ -744,13 +821,15 @@ class BrokerIngestor:
             position_id = self._position(record)
             cur = conn.execute("""INSERT INTO trades
                 (portfolio_id,position_id,trade_id,trade_date,executed_at,display_ticker,ib_symbol,
-                 side,quantity,price,security_type,multiplier,currency,fx_to_usd,commission_usd,source)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 side,quantity,price,security_type,multiplier,currency,fx_to_usd,commission_usd,
+                 accrued_interest_usd,source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (self.portfolio_id, position_id, f"IBKR:{self.account_id}:{key}",
                  record["trade_date"], record.get("executed_at") or "",
                  conn.execute("SELECT display_ticker FROM positions WHERE id=?", (position_id,)).fetchone()[0],
                  record["symbol"], record["side"], qty, price, record["security_type"], multiplier,
-                 record["currency"], fx or 0.0, commission_usd or 0.0, "IBKR sync"))
+                 record["currency"], fx or 0.0, commission_usd or 0.0, accrued_interest_usd or 0.0,
+                 "IBKR sync"))
             row_id = cur.lastrowid
             conn.execute("""INSERT INTO broker_executions
                 (account_id,execution_key,trade_row_id,latest_exec_id,revision,quality,status)

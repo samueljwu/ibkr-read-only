@@ -226,20 +226,20 @@ class MatchingService:
             if allocations:
                 self.match(sell["id"], allocations, snapshot=(trades, remaining))
 
-    def rebuild_auto(self, position_ids=None):
-        """Recalculate automatic matches; keep manually adjusted allocations fixed."""
-        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
-        selected = set(position_ids) if position_ids is not None else {t["position_id"] for t in trades.values()}
-        matches = self.db.rows("trade_matches", self.portfolio_id)
-        auto_ids = [m["match_id"] for m in matches if m["origin"] in {"auto", "auto_short"}
-                    and trades[m["sell_trade_id"]]["position_id"] in selected]
-        removed = set(auto_ids)
+    def _auto_allocations(self, trades, fixed_matches, selected_positions):
+        """Pure planner: compute automatic allocations for the selected instruments.
+
+        `trades` is {id: trade row} for (at least) every trade `fixed_matches` or the
+        selected positions reference. `fixed_matches` are matches to treat as already
+        consuming quantity (manual allocations, or auto matches outside the selection)
+        and are not re-emitted here. Returns [(buy_id, sell_id, qty, origin)] without
+        touching the database.
+        """
         remaining = {key: float(trade["quantity"]) for key, trade in trades.items()}
-        for match in matches:
-            if match["match_id"] not in removed:
-                remaining[match["buy_trade_id"]] -= match["matched_qty"]
-                remaining[match["sell_trade_id"]] -= match["matched_qty"]
-        ordered = sorted((t for t in trades.values() if t["position_id"] in selected and
+        for match in fixed_matches:
+            remaining[match["buy_trade_id"]] -= match["matched_qty"]
+            remaining[match["sell_trade_id"]] -= match["matched_qty"]
+        ordered = sorted((t for t in trades.values() if t["position_id"] in selected_positions and
                           t["security_type"] != "CASH"),
                          key=lambda t: (t["trade_date"], t.get("executed_at") or "", t["id"]))
         # Index by instrument so each sale only considers its own instrument's
@@ -277,10 +277,82 @@ class MatchingService:
                     remaining[sell["id"]] -= qty
                 if remaining[buy["id"]] <= 1e-9:
                     break
+        return allocations
+
+    def rebuild_auto(self, position_ids=None):
+        """Recalculate automatic matches; keep manually adjusted allocations fixed."""
+        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
+        selected = set(position_ids) if position_ids is not None else {t["position_id"] for t in trades.values()}
+        matches = self.db.rows("trade_matches", self.portfolio_id)
+        auto_ids = [m["match_id"] for m in matches if m["origin"] in {"auto", "auto_short"}
+                    and trades[m["sell_trade_id"]]["position_id"] in selected]
+        removed = set(auto_ids)
+        fixed_matches = [m for m in matches if m["match_id"] not in removed]
+        allocations = self._auto_allocations(trades, fixed_matches, selected)
         with self.db.conn:
             self.db.conn.executemany("DELETE FROM trade_matches WHERE match_id=?", [(key,) for key in auto_ids])
             self.db.conn.executemany("""INSERT INTO trade_matches
                 (buy_trade_id,sell_trade_id,matched_qty,origin) VALUES (?,?,?,?)""", allocations)
+
+    def validate_manual(self, position_id, manual_matches):
+        """Validate proposed manual (buy_id, sell_id, qty) allocations for one instrument.
+
+        Raises ValueError describing the first violation found; does not write to the DB.
+        Returns the normalized [(buy_id, sell_id, qty)] list (positive quantities only).
+        """
+        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
+        normalized = [(int(buy_id), int(sell_id), float(qty))
+                      for buy_id, sell_id, qty in manual_matches if float(qty) > 0]
+        buy_used, sell_used = defaultdict(float), defaultdict(float)
+        for buy_id, sell_id, qty in normalized:
+            buy, sell = trades.get(buy_id), trades.get(sell_id)
+            if not buy or not sell or buy["side"] != "BUY" or sell["side"] != "SELL":
+                raise ValueError("Matches must pair a BUY with a SELL")
+            if buy["position_id"] != position_id or sell["position_id"] != position_id:
+                raise ValueError("BUY and SELL must belong to the selected instrument")
+            if not self._precedes(buy, sell):
+                raise ValueError("BUY must be dated before the SELL")
+            if (buy["security_type"] != sell["security_type"] or
+                self._gain_per_unit(buy, sell) is None):
+                raise ValueError("Matching requires valid instrument, multiplier and FX")
+            buy_used[buy_id] += qty
+            sell_used[sell_id] += qty
+            if buy_used[buy_id] > float(buy["quantity"]) + 1e-9:
+                raise ValueError("Matched quantity exceeds BUY quantity")
+            if sell_used[sell_id] > float(sell["quantity"]) + 1e-9:
+                raise ValueError("Matched quantity exceeds SELL quantity")
+        return normalized
+
+    def position_state(self, position_id):
+        """Trades and current matches for one instrument, for the manual-matching UI."""
+        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)
+                  if t["position_id"] == position_id and t["security_type"] != "CASH"}
+        matches = [m for m in self.db.rows("trade_matches", self.portfolio_id)
+                   if m["buy_trade_id"] in trades or m["sell_trade_id"] in trades]
+        return trades, matches
+
+    def plan_position(self, position_id, manual_matches):
+        """Preview the full match set for one instrument: validated manual allocations
+        plus the automatic match of whatever remains. Does not write to the DB.
+        """
+        normalized = self.validate_manual(position_id, manual_matches)
+        trades, _ = self.position_state(position_id)
+        fixed = [{"buy_trade_id": b, "sell_trade_id": s, "matched_qty": q} for b, s, q in normalized]
+        auto = self._auto_allocations(trades, fixed, {position_id})
+        manual_rows = [(b, s, q, "manual") for b, s, q in normalized]
+        return manual_rows + auto
+
+    def apply_position_matches(self, position_id, manual_matches):
+        """Replace one instrument's matches with manual allocations plus a recalculated
+        automatic remainder. Validates first; on failure, no rows change (atomic).
+        """
+        planned = self.plan_position(position_id, manual_matches)
+        _, matches = self.position_state(position_id)
+        old_ids = [m["match_id"] for m in matches]
+        with self.db.conn:
+            self.db.conn.executemany("DELETE FROM trade_matches WHERE match_id=?", [(i,) for i in old_ids])
+            self.db.conn.executemany("""INSERT INTO trade_matches
+                (buy_trade_id,sell_trade_id,matched_qty,origin) VALUES (?,?,?,?)""", planned)
 
     def replace_sell_matches(self, sell_id, allocations):
         """Replace one sale's allocations while preserving its raw trade."""
@@ -432,7 +504,10 @@ class PortfolioService:
         for trade in trades:
             position_id = trade["position_id"]
             opening = openings.get(position_id)
-            if not opening or trade["trade_date"] > opening["as_of"]:
+            if trade["source"] == "CSV market baseline" and opening:
+                # The CSV quantity anchor already includes this estimated lot.
+                pass
+            elif not opening or trade["trade_date"] > opening["as_of"]:
                 ledger[position_id] += trade["quantity"] * (1 if trade["side"] == "BUY" else -1)
             by_position[position_id].append(trade)
         broker = {p["con_id"]: p for p in self.db.broker_positions(self.portfolio_id)}
@@ -450,11 +525,14 @@ class PortfolioService:
             open_buys = [(t, remaining[t["id"]]) for t in position_trades
                          if t["side"] == "BUY" and remaining[t["id"]] > 1e-9]
             open_qty = sum(qty for _, qty in open_buys)
+            estimated_openings = [t["trade_date"] for t, _ in open_buys
+                                  if t["source"] == "CSV market baseline"]
+            row["estimated_baseline"] = min(estimated_openings) if estimated_openings else None
             row["recorded_qty"] = position["position_qty"]
             raw_qty = opening_qty + ledger[position["id"]]
             row["position_qty"] = 0.0 if abs(raw_qty) < 1e-9 else raw_qty
             multiplier = valid_multiplier(position["multiplier"])
-            complete_open_lots = (not opening and open_qty > 1e-9 and row["position_qty"] > 0 and
+            complete_open_lots = (open_qty > 1e-9 and row["position_qty"] > 0 and
                                   abs(open_qty - row["position_qty"]) < 1e-9 and
                                   multiplier is not None and all(
                                       valid_price(t["fx_to_usd"]) is not None and
@@ -480,8 +558,16 @@ class PortfolioService:
                        self.db.history(position["con_id"]) if position["con_id"] else [])
             as_of = self._as_of(position)
             prior_bar = next((bar for bar in reversed(history)
-                              if bar["day"] < as_of.isoformat()), None)
-            prior_close = prior_bar["close"] if prior_bar else quote.get("prior_close")
+                              if bar["day"] < as_of.isoformat() and
+                              valid_price(bar["close"]) is not None and
+                              (as_of - date.fromisoformat(bar["day"])).days <= 7), None)
+            ticks = quote.get("ticks", {})
+            tick_close = (ticks.get("delayed_close")
+                          if quote.get("mode") == "Delayed" and
+                          valid_price(ticks.get("delayed_close")) is not None
+                          else ticks.get("close"))
+            prior_close = (tick_close if valid_price(tick_close) is not None else
+                           prior_bar["close"] if prior_bar else quote.get("prior_close"))
             cached_close = False
             if (price is None or source == "CLOSE") and not suspect_option and history:
                 latest = next((bar for bar in reversed(history)
@@ -497,11 +583,19 @@ class PortfolioService:
                                         position["multiplier"]))
             if source == "CLOSE" or source.startswith("CACHED QUOTE"):
                 row["daily_move"] = row["one_day"] = None
+            tick_key = ("delayed_last" if source == "DELAYED LAST" else
+                        "last" if source in ("LIVE LAST", "FROZEN LAST") else None)
+            tick_time = (quote.get("tick_updated") or {}).get(tick_key) if tick_key else None
+            stale_tick = bool(tick_time and self._quote_day(position, tick_time) != as_of)
+            if stale_tick:
+                row["daily_move"] = row["one_day"] = None
             # A price-only shortcut cannot value partial, missing, or short lots.
             # The broker-compatible open P&L below uses each surviving purchase's
             # acquisition FX and allocated fee.
             row["unrealized_pnl"] = row["unrealized_pct"] = None
-            prior_day = prior_bar["day"] if prior_bar else (as_of - timedelta(days=1)).isoformat()
+            prior_day = (prior_bar["day"] if prior_bar and
+                         valid_price(tick_close) is None else
+                         (as_of - timedelta(days=1)).isoformat())
             today_trades = [t for t in position_trades if t["trade_date"] == as_of.isoformat()]
             row["traded_today"] = bool(today_trades)
             row["daily_pnl"] = flow_adjusted_daily_pnl(
@@ -510,7 +604,7 @@ class PortfolioService:
                 today_trades)
             if abs(row["position_qty"]) > 1e-9 and (
                 (cached_close and source != f"SAVED SESSION BAR {as_of.isoformat()}") or
-                source == "CLOSE" or source.startswith("CACHED QUOTE")):
+                source == "CLOSE" or source.startswith("CACHED QUOTE") or stale_tick):
                 row["daily_pnl"] = None
             if complete_open_lots:
                 lots = [open_lot(buy, qty, price, current_fx) for buy, qty in open_buys]
@@ -527,7 +621,7 @@ class PortfolioService:
                 prepared = prepare_history(history, as_of)
                 if position["con_id"]:
                     prepared_history[bar_key] = prepared
-            row.update(window_returns(None if source.startswith("CACHED QUOTE") else price,
+            row.update(window_returns(None if stale_tick or source.startswith("CACHED QUOTE") else price,
                                       prepared[0], prepared[1]))
             row["last_px"] = price
             row["price_source"] = "MOCK" if quote.get("mode") == "Mock" and price else source
@@ -540,6 +634,8 @@ class PortfolioService:
                                   "CACHED CLOSE" if cached_close else
                                   cached_status if source.startswith("CACHED QUOTE") else
                                   quote.get("status", "DISCONNECTED"))
+            if stale_tick:
+                row["data_status"] = "STALE QUOTE"
             if valid_multiplier(position["multiplier"]) is None:
                 row["data_status"] = "MULTIPLIER REQUIRED"
             elif valid_price(current_fx) is None:
@@ -574,6 +670,8 @@ class PortfolioService:
                     row[key] = None
                 if row["reconciliation"] != "DIFFERENCE":
                     row["data_status"] = "FUTURES VALUATION UNAVAILABLE"
+            if row["estimated_baseline"]:
+                row["data_status"] += " · ESTIMATED CSV COST"
             rows.append(row)
         return rows
 
@@ -591,13 +689,16 @@ class PortfolioService:
             row = self._base_lot(buy, qty)
             short = match["origin"] == "auto_short"
             row["lot_state"] = "Closed short" if short else "Closed"
+            row["match_origin"] = ("Manual" if match["origin"] == "manual" else
+                                   "Auto (short)" if short else "Auto")
             row.update({"match_id": match["match_id"], "sell_date": sell["trade_date"],
                         "sell_trade_id": sell["id"],
                         "sell_qty": qty, "sell_price": sell["price"], "sell_currency": sell["currency"],
                         "sell_fx": sell["fx_to_usd"], "sell_notes": sell["notes"],
                         "sell_value_lc": qty * sell["price"] * sell["multiplier"] if valid_multiplier(sell["multiplier"]) else None,
                         "duration": abs((date.fromisoformat(sell["trade_date"]) - date.fromisoformat(buy["trade_date"])).days)
-                        if buy["trade_date"] and sell["trade_date"] else None})
+                        if buy["source"] != "CSV market baseline" and buy["trade_date"] and sell["trade_date"]
+                        else None})
             row.update(closed_lot(buy, sell, qty))
             if not buy["commission_complete"] or not sell["commission_complete"]:
                 row["realized_net"] = row["realized_pct"] = None
@@ -608,6 +709,9 @@ class PortfolioService:
                 row["lot_note"] = "Fee pending"
             else:
                 row["lot_note"] = ("Short sale covered by later buy" if short else "") if row.get("realized_net") is not None else "FX or multiplier required"
+            if buy["source"] == "CSV market baseline":
+                row["lot_note"] = "; ".join(filter(None, (row["lot_note"],
+                    "Estimated CSV closing value; acquisition date unknown")))
             rows.append(row)
         remaining = self.matching.remaining()
         position_as_of = {}
@@ -663,6 +767,9 @@ class PortfolioService:
                         prepared_history[bar_key] = prepared
                 returns = window_returns(price, prepared[0], prepared[1])
                 row["mtd"], row["ytd"] = returns["mtd"], returns["ytd"]
+            if buy["source"] == "CSV market baseline":
+                row["lot_note"] = "; ".join(filter(None, (row.get("lot_note"),
+                    "Estimated CSV closing value; acquisition date unknown")))
             rows.append(row)
         return rows
 
@@ -693,3 +800,24 @@ class PortfolioService:
         }:
             return datetime.now(ZoneInfo("America/New_York")).date()
         return date.today()
+
+    def _quote_day(self, position, timestamp):
+        """Date a received tick in its instrument's trading timezone."""
+        try:
+            stamp = datetime.fromisoformat(timestamp)
+            if stamp.tzinfo is None:
+                stamp = stamp.astimezone()
+            if position.get("con_id"):
+                row = self.db.conn.execute(
+                    "SELECT time_zone FROM contracts WHERE position_id=?", (position["id"],)
+                ).fetchone()
+                if row and row[0]:
+                    return stamp.astimezone(ZoneInfo(row[0])).date()
+            exchange = str(position.get("primary_exchange") or position.get("exchange") or "").upper()
+            if position.get("currency") == "USD" and exchange in {
+                "NYSE", "NASDAQ", "ARCA", "AMEX", "BATS", "CBOE", "SMART"
+            }:
+                return stamp.astimezone(ZoneInfo("America/New_York")).date()
+            return stamp.astimezone().date()
+        except (TypeError, ValueError, OverflowError, KeyError):
+            return None

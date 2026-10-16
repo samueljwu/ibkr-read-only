@@ -3,10 +3,89 @@
 import json
 from decimal import Decimal
 
-from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, Qt
+from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QTimer, Qt
 from PySide6.QtGui import QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox,
                                QInputDialog, QLineEdit, QMenu, QTableWidget, QTableWidgetItem)
+
+
+def display_number(value):
+    return f"{float(value):,.2f}"
+
+
+def money(value, symbol=True):
+    """Format a dollar amount: "$1,234.56", or "—" for None. symbol=False omits "$"."""
+    if value is None:
+        return "—"
+    prefix = "$" if symbol else ""
+    return f"{prefix}{Decimal(str(value)):,.2f}"
+
+
+def percent(value):
+    """Format a signed percent: "+1.23%", or "—" for None."""
+    if value is None:
+        return "—"
+    return f"{Decimal(str(value)):+,.2f}%"
+
+
+def build_header_menu(parent, header, column, *, sort, decimals, labels):
+    """Build the shared column-header context menu for a QHeaderView.
+
+    parent: QWidget parent for the returned QMenu.
+    header: the QHeaderView the menu was invoked on (used for hide/show and
+        header.count()).
+    column: the logical column index the menu was invoked on.
+    sort: optional callable sort(column, ascending: bool), or None to omit the
+        sort actions (e.g. tables that don't support interactive sorting).
+    decimals: optional (get_fn, set_fn) tuple for decimal-place support on
+        this column, or None if the column isn't numeric. get_fn(column) ->
+        current decimal count; set_fn(column, places) applies a new count.
+        Custom… prompts via QInputDialog using parent as the dialog parent.
+    labels: list of all column header labels, used for the Columns submenu.
+
+    Returns the built QMenu; the caller is responsible for calling .exec(...).
+    """
+    menu = QMenu(parent)
+    if sort is not None:
+        menu.addAction("Sort ascending", lambda: sort(column, True))
+        menu.addAction("Sort descending", lambda: sort(column, False))
+    if decimals is not None:
+        get_fn, set_fn = decimals
+        decimals_menu = QMenu("Decimal places", menu)
+        menu.addMenu(decimals_menu)
+        group = QActionGroup(decimals_menu)
+        group.setExclusive(True)
+        current = get_fn(column)
+        for places in range(4):
+            action = decimals_menu.addAction(f"{places} decimal place{'s' if places != 1 else ''}")
+            action.setCheckable(True)
+            action.setChecked(current == places)
+            group.addAction(action)
+            action.triggered.connect(lambda checked=False, count=places: set_fn(column, count))
+        custom = decimals_menu.addAction("Custom…")
+        custom.setCheckable(True)
+        custom.setChecked(current > 3)
+        group.addAction(custom)
+
+        def _choose_custom():
+            places, accepted = QInputDialog.getInt(
+                parent, "Custom decimal places", "Decimal places (0–30):", current, 0, 30)
+            if accepted:
+                set_fn(column, places)
+
+        custom.triggered.connect(_choose_custom)
+    menu.addSeparator()
+    menu.addAction("Hide column", lambda: header.hideSection(column))
+    columns_menu = QMenu("Columns", menu)
+    menu.addMenu(columns_menu)
+    for index, label in enumerate(labels):
+        action = columns_menu.addAction(label)
+        action.setCheckable(True)
+        action.setChecked(not header.isSectionHidden(index))
+        action.toggled.connect(lambda checked, number=index: header.setSectionHidden(number, not checked))
+    menu.addAction("Show all columns",
+                   lambda: [header.setSectionHidden(index, False) for index in range(header.count())])
+    return menu
 
 
 def handle_table_shortcut(view, event):
@@ -79,6 +158,13 @@ class SortItem(QTableWidgetItem):
 class ReportTable(QTableWidget):
     """Consistent read-only table behavior; embedded editors still keep focus."""
 
+    def row_for_key(self, row_key):
+        for row in range(self.rowCount()):
+            item = self.item(row, 0)
+            if item is not None and item.data(Qt.UserRole) == row_key:
+                return row
+        return -1
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -88,6 +174,7 @@ class ReportTable(QTableWidget):
         self.setShowGrid(False)
         self.setWordWrap(False)
         self.verticalHeader().setDefaultSectionSize(25)
+        self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionsMovable(True)
         self.selection_axis = "cell"
         self._number_formats = {}
@@ -95,6 +182,9 @@ class ReportTable(QTableWidget):
         self._settings_db = None
         self._settings_key = None
         self._allow_header_sort = True
+        self._layout_db = None
+        self._layout_key = None
+        self._layout_timer = None
         self.horizontalHeader().viewport().installEventFilter(self)
 
     def eventFilter(self, watched, event):
@@ -177,32 +267,124 @@ class ReportTable(QTableWidget):
         if sorting:
             self.setSortingEnabled(True)
 
+    def view_state(self):
+        """Return this table's header geometry, sort, and decimal places as JSON-safe data.
+
+        Keys match the saved-view JSON shape already used by analytics/exposure/
+        cash tabs: header (base64 str), sort_column (int), sort_order ("asc"/
+        "desc"), decimals (dict of str(column) -> int).
+        """
+        header = self.horizontalHeader()
+        return {
+            "header": bytes(header.saveState().toBase64()).decode("ascii"),
+            "sort_column": header.sortIndicatorSection(),
+            "sort_order": "desc" if header.sortIndicatorOrder() == Qt.DescendingOrder else "asc",
+            "decimals": {str(column): self.decimals_for(column) for column in self._number_formats},
+        }
+
+    def apply_view_state(self, state):
+        """Restore header geometry, sort, and decimal places saved by view_state()."""
+        if not isinstance(state, dict):
+            return
+        header_state = state.get("header")
+        if isinstance(header_state, str):
+            self.horizontalHeader().restoreState(
+                QByteArray.fromBase64(header_state.encode("ascii", "ignore")))
+        decimals = state.get("decimals")
+        if isinstance(decimals, dict):
+            for column in self._number_formats:
+                places = decimals.get(str(column))
+                if isinstance(places, int) and not isinstance(places, bool) and 0 <= places <= 30:
+                    self.set_column_decimals(column, places)
+        column = state.get("sort_column")
+        if isinstance(column, int) and not isinstance(column, bool) and 0 <= column < self.columnCount():
+            self.sortItems(column, Qt.DescendingOrder if state.get("sort_order") == "desc"
+                           else Qt.AscendingOrder)
+
+    def remember_layout(self, db, key):
+        """Load a saved view_state() immediately, then persist future header/sort changes.
+
+        Changes are debounced through a single timer so a burst of column
+        resizes/moves/sorts writes only once, ~400ms after the last change.
+        """
+        try:
+            saved = json.loads(db.setting(key) or "null")
+        except (TypeError, ValueError):
+            saved = None
+        if isinstance(saved, dict):
+            self.apply_view_state(saved)
+        self._layout_db, self._layout_key = db, key
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(400)
+        timer.timeout.connect(self._save_layout)
+        self._layout_timer = timer
+        header = self.horizontalHeader()
+        header.sectionMoved.connect(self._schedule_layout)
+        header.sectionResized.connect(self._schedule_layout)
+        header.sortIndicatorChanged.connect(self._schedule_layout)
+
+    def _schedule_layout(self, *_):
+        if self._layout_db is not None:
+            self._layout_timer.start()
+
+    def _save_layout(self):
+        if self._layout_db is not None:
+            self._layout_db.set_setting(self._layout_key, json.dumps(self.view_state()))
+
+    def finish_layout_persistence(self):
+        """Save a pending layout and release the database before it closes."""
+        if self._layout_timer is not None:
+            pending = self._layout_timer.isActive()
+            self._layout_timer.stop()
+            if pending:
+                self._save_layout()
+        self._layout_db = self._layout_key = None
+
+    def closeEvent(self, event):
+        self.finish_layout_persistence()
+        super().closeEvent(event)
+
+    def refill(self, rows, build):
+        """Rebuild all rows while preserving sort order and (best-effort) selection.
+
+        build(row_data) -> list[QTableWidgetItem] populates one row; rows are
+        the new data in order. Sorting is disabled during the rebuild and
+        restored afterward; selection is restored by matching the previously
+        selected items' text.
+        """
+        header = self.horizontalHeader()
+        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
+        selected_text = {item.text() for item in self.selectedItems()}
+        sorting = self.isSortingEnabled()
+        if sorting:
+            self.setSortingEnabled(False)
+        self.clearContents()
+        self.setRowCount(len(rows))
+        for row_index, row_data in enumerate(rows):
+            for column_index, item in enumerate(build(row_data)):
+                self.setItem(row_index, column_index, item)
+        if sorting:
+            self.setSortingEnabled(True)
+        if 0 <= sort_column < self.columnCount():
+            self.sortItems(sort_column, sort_order)
+        if selected_text:
+            self.clearSelection()
+            for row_index in range(self.rowCount()):
+                item = self.item(row_index, 0)
+                if item is not None and item.text() in selected_text:
+                    self.selectRow(row_index)
+
     def _build_header_menu(self, column):
-        menu = QMenu(self)
-        if self._allow_header_sort:
-            menu.addAction("Sort ascending", lambda: self.sortItems(column, Qt.AscendingOrder))
-            menu.addAction("Sort descending", lambda: self.sortItems(column, Qt.DescendingOrder))
-        if column in self._number_formats:
-            decimals_menu = QMenu("Decimal places", menu)
-            menu.addMenu(decimals_menu)
-            group = QActionGroup(decimals_menu)
-            group.setExclusive(True)
-            for places in range(4):
-                action = decimals_menu.addAction(f"{places} decimal place{'s' if places != 1 else ''}")
-                action.setCheckable(True)
-                action.setChecked(self.decimals_for(column) == places)
-                group.addAction(action)
-                action.triggered.connect(lambda checked=False, count=places:
-                                         self.set_column_decimals(column, count))
-            custom = decimals_menu.addAction("Custom…")
-            custom.setCheckable(True)
-            custom.setChecked(self.decimals_for(column) > 3)
-            group.addAction(custom)
-            custom.triggered.connect(lambda: self._choose_column_decimals(column))
-        menu.addSeparator()
-        menu.addAction("Hide column", lambda: self.hideColumn(column))
-        menu.addAction("Show all columns", self._show_all_columns)
-        return menu
+        header = self.horizontalHeader()
+        sort = ((lambda col, ascending:
+                 self.sortItems(col, Qt.AscendingOrder if ascending else Qt.DescendingOrder))
+                if self._allow_header_sort else None)
+        decimals = ((self.decimals_for, self.set_column_decimals)
+                    if column in self._number_formats else None)
+        labels = [self.horizontalHeaderItem(index).text() if self.horizontalHeaderItem(index) else ""
+                  for index in range(self.columnCount())]
+        return build_header_menu(self, header, column, sort=sort, decimals=decimals, labels=labels)
 
     def _show_all_columns(self):
         for column in range(self.columnCount()):
@@ -270,13 +452,6 @@ class InputReportTable(ReportTable):
             line_edit = editor.lineEdit()
             self._input_bindings[line_edit] = binding
             line_edit.installEventFilter(self)
-
-    def row_for_key(self, row_key):
-        for row in range(self.rowCount()):
-            item = self.item(row, 0)
-            if item is not None and item.data(Qt.UserRole) == row_key:
-                return row
-        return -1
 
     def select_cell(self, row, column, *, focus=False):
         if focus:

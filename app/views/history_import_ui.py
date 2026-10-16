@@ -1,4 +1,10 @@
-"""Dated Flex import controls and worker progress presentation."""
+"""Dated Flex import controls and worker progress presentation.
+
+Laid out as a short stack of cards: the Flex import form, a progress card
+that only appears once a run has produced something to show, a permanent
+"Imported periods" summary table, and an "Older CSV history" card for the
+one-time legacy import/removal path.
+"""
 
 from datetime import date, timedelta
 
@@ -8,8 +14,10 @@ from PySide6.QtWidgets import (QCalendarWidget, QComboBox, QDialog, QDialogButto
                                QPlainTextEdit, QProgressBar, QPushButton,
                                QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
-from app.platform.history_status import format_history_details, format_imported_periods
-from app.flex.flex_import import HISTORY_YEARS
+from app.platform.history_status import format_history_details, merge_periods
+from app.flex.flex_import import HISTORY_YEARS, flex_today
+from app.views import widgets
+from app.views.table_ui import ReportTable, SortItem
 
 
 class HistoryDateInput(QWidget):
@@ -75,130 +83,144 @@ class HistoryImportDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self._pause_requested = False
+        self._has_older_history = False
         self.setWindowTitle("Import Data — IBKR Flex history")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(10)
+        widgets.apply_layout(layout, "dialog")
+
         heading = QLabel("Import IBKR history")
         heading.setObjectName("heading")
         layout.addWidget(heading)
-        intro = QLabel("Choose reports and completed dates.")
-        intro.setObjectName("hint")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        form_panel = QWidget()
-        form_panel.setObjectName("historyImportForm")
-        form = QGridLayout(form_panel)
-        form.setContentsMargins(14, 12, 14, 12)
+        layout.addWidget(widgets.hint("Choose reports and completed dates."))
+
+        # -- Flex import card -----------------------------------------------
+        self.flex_card, flex_layout = widgets.card()
+        flex_card = self.flex_card
+        flex_card.setObjectName("historyImportForm")
+        form = QGridLayout()
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(5)
         self.source = QComboBox()
         for label, value in (("All reports", "all"), ("Trades", "trades"),
                              ("Analytics", "analytics"), ("Cash", "cash")):
             self.source.addItem(label, value)
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = flex_today() - timedelta(days=1)
         first_day = yesterday - timedelta(days=29)
         self.from_date = HistoryDateInput(QDate(first_day.year, first_day.month, first_day.day))
         self.to_date = HistoryDateInput(QDate(yesterday.year, yesterday.month, yesterday.day))
-        for widget in (self.from_date, self.to_date):
-            widget.setMaximumDate(QDate(yesterday.year, yesterday.month, yesterday.day))
-        for column, caption, widget in ((0, "Source", self.source),
-                                        (1, "From", self.from_date),
-                                        (2, "To", self.to_date)):
-            label = QLabel(caption)
-            label.setObjectName("historyFieldLabel")
-            label.setBuddy(widget)
-            form.addWidget(label, 0, column)
-            form.addWidget(widget, 1, column)
+        for date_field in (self.from_date, self.to_date):
+            date_field.setMaximumDate(QDate(yesterday.year, yesterday.month, yesterday.day))
+        for column, caption, field in ((0, "Source", self.source),
+                                       (1, "From", self.from_date),
+                                       (2, "To", self.to_date)):
+            form.addWidget(widgets.field_label(caption, buddy=field), 0, column)
+            form.addWidget(field, 1, column)
         form.setColumnStretch(0, 2)
         form.setColumnStretch(1, 1)
         form.setColumnStretch(2, 1)
-        layout.addWidget(form_panel)
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        self.import_button = QPushButton("Import history")
-        self.import_button.clicked.connect(parent.start_history_import)
-        actions.addWidget(self.import_button)
-        self.older_import_button = QToolButton()
-        self.older_import_button.setObjectName("historyTextAction")
-        self.older_import_button.setToolTip(
-            "Select the PortfolioAnalyst and Activity Statement CSVs together; order does not matter.")
-        self.older_import_button.clicked.connect(parent.start_legacy_history_import)
-        self.pause_button = QPushButton("Pause import")
-        self.pause_button.setObjectName("secondary")
-        self.pause_button.clicked.connect(parent.pause_history_import)
-        self.pause_button.setEnabled(False)
-        self.pause_button.hide()
-        actions.addWidget(self.pause_button)
-        actions.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.button(QDialogButtonBox.Close).setObjectName("secondary")
-        buttons.rejected.connect(self.reject)
-        actions.addWidget(buttons)
-        layout.addLayout(actions)
-        layout.addWidget(self.older_import_button, alignment=Qt.AlignLeft)
-        self.refresh_flex_limit()
+        flex_layout.addLayout(form)
+        layout.addWidget(flex_card)
+
+        # -- Progress card: hidden until a run or a result exists -----------
+        self.progress_card, progress_layout = widgets.card()
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("historyProgressLabel")
+        self.progress_label.setTextFormat(Qt.PlainText)
+        self.progress_label.setWordWrap(True)
+        progress_header = QHBoxLayout()
+        progress_header.addWidget(self.progress_label, 1)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("syncProgressBar")
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedWidth(130)
+        self.progress_bar.setFixedHeight(12)
+        progress_header.addWidget(self.progress_bar, alignment=Qt.AlignVCenter)
+        progress_layout.addLayout(progress_header)
+        self.details = QPlainTextEdit()
+        self.details.setObjectName("historyImportDetails")
+        self.details.setReadOnly(True)
+        self.details.setMinimumHeight(110)
+        progress_layout.addWidget(self.details)
+        self.progress_card.hide()
+        layout.addWidget(self.progress_card)
+
+        # -- Imported periods card: always visible ---------------------------
+        periods_card, periods_layout = widgets.card()
+        periods_layout.addWidget(widgets.section_title("Imported periods"))
+        self.periods_table = ReportTable(0, 2)
+        self.periods_table.setHorizontalHeaderLabels(("Source", "Periods"))
+        self.periods_table.horizontalHeader().setStretchLastSection(True)
+        self.periods_table.setColumnWidth(0, 110)
+        self.periods_table.setMaximumHeight(140)
+        periods_layout.addWidget(self.periods_table)
+        layout.addWidget(periods_card)
+
+        # -- Older CSV history card -------------------------------------------
+        # Always visible: it is the only entry point for starting a legacy
+        # import, so it must stay discoverable even before any older history
+        # has been imported. Only the Remove action inside is conditional.
+        self.older_card, older_layout = widgets.card()
+        self.older_card_title = widgets.section_title("Older CSV history")
+        older_layout.addWidget(self.older_card_title)
+        older_layout.addWidget(widgets.hint(
+            "Select the PortfolioAnalyst and Activity Statement CSVs together; order does not matter."))
+        older_actions = QHBoxLayout()
+        self.older_import_button = widgets.button(
+            "Import older CSV history…", parent.start_legacy_history_import)
+        older_actions.addWidget(self.older_import_button)
+        older_actions.addStretch()
+        self.remove_older_button = QPushButton("Remove older CSV history…")
+        self.remove_older_button.setObjectName("danger")
+        self.remove_older_button.clicked.connect(parent.remove_legacy_history_import)
+        self.remove_older_button.hide()
+        older_actions.addWidget(self.remove_older_button)
+        older_layout.addLayout(older_actions)
+        layout.addWidget(self.older_card)
+
+        self.source.currentIndexChanged.connect(self._selection_changed)
+        self.from_date.dateChanged.connect(self._selection_changed)
+        self.to_date.dateChanged.connect(self._selection_changed)
+
+        # -- Help toggle -------------------------------------------------------
         self.help_button = QToolButton()
         self.help_button.setObjectName("historyHelpButton")
         self.help_button.setText("How imports work")
         self.help_button.setCheckable(True)
         self.help_button.setArrowType(Qt.RightArrow)
         self.help_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.help_button.toggled.connect(self._toggle_help)
         layout.addWidget(self.help_button, alignment=Qt.AlignLeft)
-        self.help_text = QLabel(
+        self.help_text = widgets.hint(
             "Uses the account, query IDs, and saved Flex token in Settings. "
             "IBKR may have gaps within the available range; report validation determines coverage. "
             "Identical data is skipped; "
             "verified corrections update existing data. Cash combines adjacent saved periods "
             "into checks of up to 365 days; boundary periods may extend beyond these dates. "
             "Changed reports create local database backups.")
-        self.help_text.setObjectName("hint")
-        self.help_text.setWordWrap(True)
         self.help_text.hide()
         layout.addWidget(self.help_text)
-        self.help_button.toggled.connect(self._toggle_help)
-        self.coverage_button = QToolButton()
-        self.coverage_button.setObjectName("historyHelpButton")
-        self.coverage_button.setText("Imported periods (all runs)")
-        self.coverage_button.setCheckable(True)
-        self.coverage_button.setArrowType(Qt.RightArrow)
-        self.coverage_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        layout.addWidget(self.coverage_button, alignment=Qt.AlignLeft)
-        self.coverage_button.toggled.connect(self._toggle_coverage)
-        self._has_older_history = False
-        self.imported_periods_label = QLabel()
-        self.imported_periods_label.setObjectName("hint")
-        self.imported_periods_label.setTextFormat(Qt.PlainText)
-        self.imported_periods_label.setWordWrap(True)
-        self.imported_periods_label.hide()
-        layout.addWidget(self.imported_periods_label)
-        self.remove_older_button = QToolButton()
-        self.remove_older_button.setObjectName("historyTextAction")
-        self.remove_older_button.setText("Remove older CSV history…")
-        self.remove_older_button.clicked.connect(parent.remove_legacy_history_import)
-        self.remove_older_button.hide()
-        layout.addWidget(self.remove_older_button, alignment=Qt.AlignLeft)
-        self.source.currentIndexChanged.connect(self._selection_changed)
-        self.from_date.dateChanged.connect(self._selection_changed)
-        self.to_date.dateChanged.connect(self._selection_changed)
-        self.progress_label = QLabel()
-        self.progress_label.setObjectName("historyProgressLabel")
-        self.progress_label.setTextFormat(Qt.PlainText)
-        self.progress_label.setWordWrap(True)
-        self.progress_label.hide()
-        layout.addWidget(self.progress_label)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("syncProgressBar")
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.hide()
-        layout.addWidget(self.progress_bar)
-        self.details = QPlainTextEdit()
-        self.details.setObjectName("historyImportDetails")
-        self.details.setReadOnly(True)
-        self.details.setMinimumHeight(110)
-        self.details.hide()
-        layout.addWidget(self.details)
-        self.resize(640, 300)
+
+        # -- Footer: Pause / Import / Close -------------------------------------
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addStretch()
+        self.pause_button = QPushButton("Pause import")
+        self.pause_button.setObjectName("secondary")
+        self.pause_button.clicked.connect(parent.pause_history_import)
+        self.pause_button.setEnabled(False)
+        self.pause_button.hide()
+        footer.addWidget(self.pause_button)
+        self.import_button = QPushButton("Import history")
+        self.import_button.clicked.connect(parent.start_history_import)
+        footer.addWidget(self.import_button)
+        close_buttons = widgets.dialog_buttons(self, QDialogButtonBox.Close)
+        close_buttons.rejected.connect(self.reject)
+        footer.addWidget(close_buttons)
+        layout.addLayout(footer)
+
+        self.refresh_flex_limit()
+        self.resize(640, 440)
 
     def ensure_content_fits(self):
         self.layout().activate()
@@ -212,17 +234,18 @@ class HistoryImportDialog(QDialog):
         if expanded:
             self.ensure_content_fits()
 
-    def _toggle_coverage(self, expanded):
-        self.coverage_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self.imported_periods_label.setVisible(expanded)
-        self.remove_older_button.setVisible(expanded and self._has_older_history)
-        if expanded:
-            self.ensure_content_fits()
-
     def refresh_flex_limit(self):
-        oldest = date(date.today().year - HISTORY_YEARS, 1, 1)
-        self.older_import_button.setText(
-            f"Before {oldest.isoformat()}? Import older CSV history…")
+        oldest = date(flex_today().year - HISTORY_YEARS, 1, 1)
+        self.older_card_title.setText(f"Older CSV history (before {oldest.isoformat()})")
+
+    def _sync_progress_card(self):
+        # isVisible() is false for a child of a currently-hidden parent, which
+        # would make this computation self-defeating right after the card
+        # itself was last hidden; isHidden() instead reports each widget's
+        # own explicit shown/hidden state regardless of its ancestors.
+        self.progress_card.setVisible(
+            not self.progress_label.isHidden() or not self.progress_bar.isHidden()
+            or not self.details.isHidden())
 
     def set_running(self, running, *, pausable=True):
         self._pause_requested = False
@@ -233,6 +256,7 @@ class HistoryImportDialog(QDialog):
         self.pause_button.setVisible(running and pausable)
         self.pause_button.setText("Pause import")
         self.progress_bar.setVisible(running)
+        self._sync_progress_card()
 
     def set_pause_requested(self):
         self._pause_requested = True
@@ -240,16 +264,25 @@ class HistoryImportDialog(QDialog):
         self.pause_button.setText("Pausing after current report…")
         self.progress_label.setText("Pausing after the current report or Cash group…")
         self.progress_label.show()
+        self._sync_progress_card()
 
     def show_imported_periods(self, periods_by_source, monthly=(), *, has_older_history=False):
-        text = format_imported_periods(periods_by_source).partition("\n")[2]
+        merged = merge_periods(periods_by_source)
+        rows = []
+        for source in ("trades", "analytics", "cash"):
+            spans = merged[source]
+            text = ", ".join(f"{first.isoformat()} to {last.isoformat()}" for first, last in spans) or "none"
+            rows.append((source.capitalize(), text))
         if monthly:
-            text += ("\nOlder monthly history: " + monthly[0]["month"] + " to " +
-                     monthly[-1]["month"] + f" ({len(monthly)} months)")
-        self.imported_periods_label.setText(text)
-        self.imported_periods_label.setVisible(self.coverage_button.isChecked())
+            rows.append(("Older monthly history",
+                         monthly[0]["month"] + " to " + monthly[-1]["month"] + f" ({len(monthly)} months)"))
+        self.periods_table.setRowCount(len(rows))
+        for index, (label, text) in enumerate(rows):
+            self.periods_table.setItem(index, 0, SortItem(label))
+            self.periods_table.setItem(index, 1, SortItem(text))
         self._has_older_history = has_older_history
-        self.remove_older_button.setVisible(self.coverage_button.isChecked() and has_older_history)
+        self.remove_older_button.setVisible(has_older_history)
+        self.ensure_content_fits()
 
     def _selection_changed(self, *_args):
         if self.import_button.text() == "Resume import":
@@ -285,4 +318,5 @@ class HistoryImportDialog(QDialog):
         if details != self.details.toPlainText():
             self.details.setPlainText(details)
         self.details.setVisible(bool(details))
+        self._sync_progress_card()
         self.ensure_content_fits()

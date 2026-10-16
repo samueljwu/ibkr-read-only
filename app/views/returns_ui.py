@@ -1,12 +1,13 @@
 """Cumulative instrument returns with an auditable lot and income drill-down."""
 
-from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
 from app.finance.position_returns import position_return_rows
-from app.views.table_ui import ReportTable, SortItem
+from app.views import widgets
+from app.views.table_ui import ReportTable, SortItem, money
 from app.views.ui_theme import COLORS, style_toolbar_dropdown
 
 
@@ -49,7 +50,7 @@ class ReturnPanel(QWidget):
 
         summary = QHBoxLayout()
         self.stats = {}
-        for label in ("Realized P&L", "Unrealized P&L", "Net income", "Total return"):
+        for label in ("Realized P&L", "Unrealized P&L", "Income and accruals", "Total return"):
             block = QVBoxLayout()
             caption = QLabel(label)
             caption.setObjectName("metricLabel")
@@ -72,7 +73,7 @@ class ReturnPanel(QWidget):
         self.splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.table = ReportTable(0, 8)
         self.table.setHorizontalHeaderLabels(("Name", "Status", "Realized USD", "Unrealized USD",
-                                              "Net income USD", "Total return USD", "Return on cost %",
+                                              "Income and accruals USD", "Total return USD", "Return on cash cost %",
                                               "Data status"))
         self.table.configure_numbers(db, f"position_return_decimals_{portfolio_id}",
                                      {2: (2, "usd"), 3: (2, "usd"), 4: (2, "usd"),
@@ -86,19 +87,19 @@ class ReturnPanel(QWidget):
         self.table.setColumnWidth(7, 210)
         self.table.itemSelectionChanged.connect(self._selected)
         self.table.sortItems(5, Qt.DescendingOrder)
+        self.table.remember_layout(db, f"position_return_layout_{portfolio_id}")
         self.splitter.addWidget(self.table)
 
         details = QWidget()
         detail_layout = QVBoxLayout(details)
         detail_layout.setContentsMargins(0, 4, 0, 0)
         detail_layout.setSpacing(5)
-        self.detail_title = QLabel("Select an instrument to inspect its lots and income")
-        self.detail_title.setObjectName("helpSection")
+        self.detail_title = widgets.section_title("Select an instrument to inspect its lots and income")
         detail_layout.addWidget(self.detail_title)
         self.details_table = ReportTable(0, 14)
         self.details_table.setHorizontalHeaderLabels((
             "Entry", "Date", "Sell date", "Contract / description", "Detail", "Quantity",
-            "Purchase cost USD", "Realized USD", "Unrealized USD", "Income USD",
+            "Opening/purchase USD", "Realized USD", "Unrealized USD", "Income/accrual USD",
             "Original amount", "Currency", "FX to USD", "Transaction ID"))
         self.details_table.configure_numbers(db, f"position_return_detail_decimals_{portfolio_id}",
                                              {5: (2, "plain"), 6: (2, "usd"),
@@ -112,23 +113,19 @@ class ReturnPanel(QWidget):
         self.details_table.setColumnWidth(4, 135)
         self.details_table.setColumnWidth(13, 170)
         self.details_table.sortItems(1, Qt.DescendingOrder)
+        self.details_table.remember_layout(db, f"position_return_detail_layout_{portfolio_id}")
         detail_layout.addWidget(self.details_table, 1)
         self.splitter.addWidget(details)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
-        saved = db.setting(self._split_state_key(horizontal))
-        if saved:
-            self.splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii")))
-        self.splitter.splitterMoved.connect(self._save_split_state)
+        self._splitter_save = None
+        self._wire_splitter(horizontal)
         self.layout_combo.currentIndexChanged.connect(self._set_layout)
         layout.addWidget(self.splitter, 1)
         self.table.horizontalHeaderItem(6).setToolTip(
-            "Total return divided by all purchase costs, including purchase commissions; "
-            "cumulative, not annualized. Unavailable for short positions.")
-
-    @staticmethod
-    def _money(value):
-        return "—" if value is None else f"${value:,.2f}"
+            "Total return divided by all purchase cash outflows, including commissions "
+            "and bond accrued interest paid; cumulative, not annualized. "
+            "Unavailable for short positions.")
 
     def refresh(self, portfolio_rows=None, lots=None):
         portfolio_rows = portfolio_rows if portfolio_rows is not None else self.service.portfolio_rows()
@@ -163,8 +160,12 @@ class ReturnPanel(QWidget):
                 self._color_item(item, row[key])
                 self.table.setItem(index, column, item)
             valuation_note = (row["price_source"] if row["status"] != "Closed" else "")
-            status = ("Complete" + (f" · {valuation_note}" if valuation_note else "")
-                      if not row["issues"] else "; ".join(row["issues"]))
+            baseline_status = (f"Estimated since {row['estimated_baseline']}"
+                               if row.get("estimated_baseline") else "")
+            status = ("; ".join(filter(None, (baseline_status, *row["issues"])))
+                      if row["issues"] else
+                      (baseline_status or "Complete") +
+                      (f" · {valuation_note}" if valuation_note else ""))
             item = SortItem(status)
             item.setToolTip(status + (f"\nValuation: {row['price_source']} {row['last_updated']}"
                                       if row["status"] != "Closed" else ""))
@@ -183,14 +184,23 @@ class ReturnPanel(QWidget):
             self.table.clearSelection()
             self._fill_details(None)
         for label, key in (("Realized P&L", "realized"), ("Unrealized P&L", "unrealized"),
-                           ("Net income", "income"), ("Total return", "total")):
-            self.stats[label].setText(self._money(sum(row[key] for row in visible))
+                           ("Income and accruals", "income"), ("Total return", "total")):
+            self.stats[label].setText(money(sum(row[key] for row in visible))
                                       if all(row[key] is not None for row in visible) and visible else "—")
         incomplete = sum(bool(row["issues"]) for row in visible)
+        missing_income_fx = sum("Income FX missing" in row["issues"] for row in visible)
+        income_warning = (f"{missing_income_fx} instrument(s) have income with missing FX; "
+                          "their total return is unavailable. " if missing_income_fx else "")
+        estimate_note = ("* CSV closing prices are estimated opening values, not purchase cost or tax basis. "
+                         "Earlier gains and losses on the estimated shares are excluded. "
+                         if any(row.get("estimated_baseline") for row in visible) else "")
         self.note.setText(
-            f"Since first recorded trade · USD · {incomplete} incomplete instrument(s) · "
+            income_warning + f"Since first recorded trade or estimated opening · USD · {incomplete} incomplete instrument(s) · "
             f"{len(self.unattributed)} unattributed income/tax row(s). "
-            "Totals require attributed income and matched trades; — means unavailable."
+            + estimate_note +
+            "Totals require matched trades, complete Cash history, income FX, and valuation. "
+            "Open bonds also require current accrued interest; "
+            "— means unavailable."
             if visible else "No instruments match this filter.")
 
     def _selected_id(self):
@@ -224,10 +234,15 @@ class ReturnPanel(QWidget):
                                    if lot.get("buy_value_usd") is not None and
                                       lot.get("buy_commission") is not None else None),
                                   (7, lot.get("realized_net")), (8, lot.get("net_unrealized"))):
-                table.setItem(index, column, table.numeric_item(column, value))
+                item = table.numeric_item(column, value)
+                if column in (7, 8):
+                    self._color_item(item, value)
+                table.setItem(index, column, item)
         for offset, movement in enumerate(income):
             index = len(lots) + offset
-            for column, value in ((0, "Tax" if movement["kind"] == "Withholding tax" else "Income"),
+            entry = ("Tax" if movement["kind"] == "Withholding tax" else
+                     "Accrual" if movement["income_type"] == "Unpaid accrued interest" else "Income")
+            for column, value in ((0, entry),
                                   (1, movement["reported_day"]),
                                   (3, movement["description"]),
                                   (4, movement["income_type"] or movement["kind"]),
@@ -238,7 +253,9 @@ class ReturnPanel(QWidget):
             fx = movement["fx_to_usd"] or self.db.fx_rate(
                 movement["currency"], movement["reported_day"])
             table.setItem(index, 12, table.numeric_item(12, float(fx) if fx else None))
-            table.setItem(index, 9, table.numeric_item(9, movement["amount_usd"]))
+            income_item = table.numeric_item(9, movement["amount_usd"])
+            self._color_item(income_item, movement["amount_usd"])
+            table.setItem(index, 9, income_item)
         table.setSortingEnabled(True)
         table.sortItems(sort_column if 0 <= sort_column < table.columnCount() else 1,
                         sort_order)
@@ -246,25 +263,21 @@ class ReturnPanel(QWidget):
     def _split_state_key(self, horizontal):
         return f"{self._split_key}_horizontal" if horizontal else self._split_key
 
-    def _save_split_state(self, *_):
-        horizontal = self.splitter.orientation() == Qt.Horizontal
-        self.db.set_setting(self._split_state_key(horizontal),
-                            bytes(self.splitter.saveState().toBase64()).decode("ascii"))
+    def _wire_splitter(self, horizontal):
+        key = self._split_state_key(horizontal)
+        if self._splitter_save is not None:
+            self.splitter.splitterMoved.disconnect(self._splitter_save)
+        had_saved = bool(self.db.setting(key))
+        self._splitter_save = widgets.remember_splitter(self.splitter, self.db, key)
+        if not had_saved:
+            self.splitter.setSizes((3, 2))
 
     def _set_layout(self, index):
         horizontal = index == 1
         if (self.splitter.orientation() == Qt.Horizontal) == horizontal:
             return
-        self._save_split_state()
-        self.splitter.blockSignals(True)
-        try:
-            self.splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
-            saved = self.db.setting(self._split_state_key(horizontal))
-            if not saved or not self.splitter.restoreState(
-                    QByteArray.fromBase64(saved.encode("ascii"))):
-                self.splitter.setSizes((3, 2))
-        finally:
-            self.splitter.blockSignals(False)
+        self.splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
+        self._wire_splitter(horizontal)
         self.db.set_setting(f"{self._split_key}_orientation",
                             "horizontal" if horizontal else "vertical")
 

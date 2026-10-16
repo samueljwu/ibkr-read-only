@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 import json
 import math
+from secrets import token_hex
 import subprocess
 import sys
 import time
@@ -15,7 +16,7 @@ from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel,
 from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
-                               QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTabWidget,
+                               QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QTabWidget,
                                QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTableView, QVBoxLayout, QWidget)
 
@@ -33,36 +34,31 @@ from app.broker.broker_sync import BrokerIngestor
 from app.storage.excel_io import export_workbook
 from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, MockMarketDataProvider
 from app.finance.services import PortfolioService
+from app.flex.flex_import import flex_today
 from app.sync.sync_service import trade_sync_paused
-from app.views.table_ui import (InputReportTable, ReportTable, SortItem,
-                                copy_table_selection, handle_table_shortcut)
+from app.views.table_ui import (ReportTable, SortItem,
+                                copy_table_selection, display_number, handle_table_shortcut)
 from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           stylesheet, style_toolbar_dropdown)
 from app.views.themed_checkbox import ThemedCheckBox
 from app.views.help_visuals import HelpVisual
 from app.views.history_import_ui import HistoryImportDialog
 from app.views.action_icons import action_icon
+from app.views.lot_matching_ui import LotMatchDialog
+from app.views import widgets
+from app.views.widgets import enable_label_copy
 
 
 def col(key, label, kind="text"):
     return key, label, kind
 
 
-def display_number(value):
-    return f"{float(value):,.2f}"
-
-
-def enable_label_copy(root):
-    """Let users select displayed text without adding labels to tab navigation."""
-    for label in root.findChildren(QLabel):
-        label.setTextInteractionFlags(label.textInteractionFlags() | Qt.TextSelectableByMouse)
-
-
 PORTFOLIO = [
     col("display_ticker", "Instrument"), col("position_qty", "Quantity", "number"),
     col("average_cost", "Open cost", "price"), col("last_px", "Last price", "price"),
     col("value", "Value USD", "money"), col("daily_pnl", "Daily P&L", "money"),
-    col("unrealized_pnl", "Open P&L", "money"), col("portfolio_pct", "Weight", "pct"),
+    col("unrealized_pnl", "Open P&L", "money"),
+    col("unrealized_pct", "Open P&L %", "pct"), col("portfolio_pct", "Weight", "pct"),
     col("one_day", "DTD", "pct"), col("mtd", "MTD", "pct"), col("ytd", "YTD", "pct"),
     col("reconciliation", "Reconciliation"), col("data_status", "Data status"),
     col("price_source", "Price source"), col("last_updated", "Updated"),
@@ -71,6 +67,7 @@ TRADES = [
     col("trade_date", "Date", "date"), col("display_ticker", "Instrument"),
     col("side", "Side"), col("quantity", "Quantity", "number"),
     col("price", "Price", "price"), col("commission_usd", "Fee/rebate USD", "money"),
+    col("accrued_interest_usd", "Accrued interest USD", "money"),
     col("gross_usd", "Value USD", "money"), col("match_status", "Status"),
     col("matched_qty", "Matched", "number"), col("remaining_qty", "Remaining", "number"),
     col("valuation_status", "Data status"), col("trade_id", "Reference"),
@@ -88,7 +85,10 @@ LOTS = [
     col("net_unrealized", "Open P&L USD", "money"),
     col("lot_note", "Note"),
     col("buy_commission", "Buy fees", "money"), col("sell_commission", "Sell fees", "money"),
+    col("buy_accrued_interest", "Buy accrued interest", "money"),
+    col("sell_accrued_interest", "Sell accrued interest", "money"),
     col("duration", "Days held", "number"),
+    col("match_origin", "Match"),
 ]
 COLUMNS = {"Portfolio": PORTFOLIO, "Trades": TRADES, "Lots": LOTS}
 PRICE_MOVES = ("one_day", "mtd", "ytd")
@@ -130,14 +130,18 @@ class GridModel(QAbstractTableModel):
         self.sort_column = int(saved_sort.split(":")[0]) if saved_sort and saved_sort.split(":")[0].isdigit() else 0
         if name == "Portfolio":
             columns_version = self.db.setting("portfolio_columns_version")
-            if columns_version not in ("2", "3"):
+            if columns_version not in ("2", "3", "4"):
                 # The original layout had IBKR quantity at index 11.
                 self.sort_column = (1 if self.sort_column == 11 else
                                     self.sort_column - 1 if self.sort_column > 11 else self.sort_column)
-            if columns_version != "3":
+            if columns_version not in ("3", "4"):
                 # The next layout had Difference at index 11; Reconciliation takes its place.
                 if self.sort_column > 11:
                     self.sort_column -= 1
+            if columns_version != "4":
+                # Open P&L % was inserted after Open P&L at index 7.
+                if self.sort_column >= 7:
+                    self.sort_column += 1
                 if saved_sort:
                     self.db.set_setting(f"sort_{name}",
                                         f"{self.sort_column}:{saved_sort.partition(':')[2] or 'asc'}")
@@ -261,6 +265,11 @@ class GridModel(QAbstractTableModel):
         row = self.rows[index.row()]
         value = row.get(key)
         if role == Qt.ToolTipRole:
+            if self.name == "Portfolio" and row.get("estimated_baseline") and key in (
+                    "average_cost", "unrealized_pnl", "unrealized_pct", "data_status"):
+                return (f"Estimated from the Activity Statement closing market price on "
+                        f"{row['estimated_baseline']}. This is a performance starting value, "
+                        "not the original purchase cost or tax basis; earlier gains are excluded.")
             if row.get("security_type") == "CASH" and key in ("side", "quantity", "price", "gross_usd", "match_status"):
                 pair = str(row.get("display_ticker") or "").split(".")
                 if len(pair) == 2:
@@ -274,10 +283,17 @@ class GridModel(QAbstractTableModel):
                         self.rows[index.row()].get("lot_note") or
                         self.rows[index.row()].get("data_status") or "Data unavailable")
             return {"gross_usd": "Gross trade value in USD, before commission.",
-                    "realized_net": "Realized P&L on matched shares, after allocated buy and sell commissions. Shown on both trades in each match.",
-                    "realized_pct": "Realized P&L divided by matched shares' cost including allocated buy commission. Shown on both trades in each match.",
-                    "net_unrealized": "Open P&L on shares still held from this buy, after allocated buy commission.",
-                    "unrealized_pct": "Open P&L divided by the remaining shares' cost including allocated buy commission.",
+                    "one_day": "Price change from the prior session close in the instrument's currency. Excludes FX, trades, fees and position direction.",
+                    "daily_pnl": "Security-position P&L in USD since the prior session, including today's trades, their commissions and FX changes. Excludes cash income, bond accrued interest and standalone FX effects.",
+                    "accrued_interest_usd": "Bond accrued interest transferred at trade settlement; "
+                                            "negative on BUY (cash paid out), positive on SELL (cash received). "
+                                            "Distinct from periodic bond coupon income.",
+                    "realized_net": "Realized clean-price P&L on matched shares after allocated commissions. Bond accrued interest is reported separately as interest. Shown on both trades in each match.",
+                    "realized_pct": "Realized clean-price P&L divided by matched shares' clean-price cost and allocated buy commission. Shown on both trades in each match.",
+                    "net_unrealized": "Open clean-price P&L on shares still held from this buy, after allocated buy commission. Bond accrued interest is separate.",
+                    "unrealized_pct": ("Open P&L divided by the cost and allocated buy commissions of all shares still held."
+                                       if self.name == "Portfolio" else
+                                       "Open clean-price P&L divided by the remaining shares' clean-price cost and allocated buy commission."),
                     "match_status": "BUY shares stay open until matched to a sale. SELL shares need eligible buys."}.get(key)
         if role in (Qt.DisplayRole, Qt.EditRole):
             if role == Qt.EditRole:
@@ -300,19 +316,19 @@ class GridModel(QAbstractTableModel):
         if role == Qt.TextAlignmentRole:
             return Qt.AlignRight | Qt.AlignVCenter if kind in ("money", "price", "number", "ratio", "pct") else Qt.AlignLeft | Qt.AlignVCenter
         if role == Qt.ForegroundRole:
-            dark = self.theme == "dark"
+            palette = COLORS[self.theme]
             if key in ("daily_pnl", "unrealized_pnl", "realized_net", "realized_pct",
                        "net_unrealized", "unrealized_pct") and isinstance(value, (int, float)):
-                return QColor(("#52c7a6" if dark else "#137333") if value > 0 else
-                              ("#ff8b91" if dark else "#b3261e") if value < 0 else
-                              ("#f0f0f2" if dark else "#30343b"))
+                return QColor(palette["positive"] if value > 0 else
+                              palette["negative"] if value < 0 else
+                              palette["grid_neutral_text"])
             if key in ("reconciliation", "data_status", "valuation_status") and value in (
                 "DIFFERENCE", "CONTRACT ERROR", "CONTRACT DETAILS REQUIRED",
                 "MULTIPLIER REQUIRED", "FX REQUIRED", "VERIFY SECURITY TYPE",
                 "NO MARKET DATA PERMISSION", "MOCK PRICE UNAVAILABLE", "UNMATCHED SALE", "NO TRADES",
-                "POSITION DIFFERENCE", "SAVED SESSION BAR", "CACHED CLOSE"):
-                return QColor("#ffb871" if dark else "#9b4917")
-            return QColor("#f0f0f2" if dark else "#1d2b3a")
+                "POSITION DIFFERENCE", "SAVED SESSION BAR", "CACHED CLOSE", "STALE QUOTE"):
+                return QColor(palette["grid_warning_text"])
+            return QColor(palette["grid_default_text"])
         return None
 
     def flags(self, index):
@@ -370,11 +386,11 @@ class SignedBarDelegate(QStyledItemDelegate):
         axis = bar.center().x()
         scale = model.bar_scales.get(key, 0.0)
         width = max(1, round(max(0, bar.width() // 2 - 2) * abs(value) / scale)) if scale and value else 0
-        dark = model.theme == "dark"
-        painter.setPen(QColor("#77777e" if dark else "#aab6bd"))
+        palette = COLORS[model.theme]
+        painter.setPen(QColor(palette["line"]))
         painter.drawLine(axis, bar.top() - 1, axis, bar.bottom())
         if width:
-            color = QColor("#55c995" if dark else "#318a64") if value > 0 else QColor("#f18383" if dark else "#c55d61")
+            color = QColor(palette["bar_positive"] if value > 0 else palette["bar_negative"])
             painter.fillRect(axis + 1 if value > 0 else axis - width,
                              bar.top(), width, max(2, bar.height()), color)
         painter.setFont(option.font)
@@ -425,93 +441,18 @@ class DisplayAmountSpinBox(QDoubleSpinBox):
         self.lineEdit().setText(display_number(self.value()))
 
 
-class MatchDialog(QDialog):
-    def __init__(self, service, sell, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Match SELL {sell['trade_id']} — {sell['display_ticker']}")
-        self.resize(700, 350)
-        self.inputs = []
-        old_matches = {}
-        for match in service.db.rows("trade_matches", service.portfolio_id):
-            if match["sell_trade_id"] == sell["id"]:
-                old_matches[match["buy_trade_id"]] = (
-                    old_matches.get(match["buy_trade_id"], 0) + match["matched_qty"])
-        remaining = service.remaining()
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Sale quantity: {display_number(sell['quantity'])}. Allocate it across earlier buys."))
-        from PySide6.QtWidgets import QTableWidgetItem
-        table = InputReportTable()
-        self.table = table
-        table.setColumnCount(7)
-        table.setHorizontalHeaderLabels(["Buy date", "Reference", "Original qty", "Available qty", "Buy price", "Gain/unit USD", "Allocate"])
-        buys = [(buy, remaining[buy["id"]] + old_matches.get(buy["id"], 0))
-                for buy in service.db.rows("trades", service.portfolio_id)
-                if buy["side"] == "BUY" and buy["position_id"] == sell["position_id"]
-                and service._precedes(buy, sell)
-                and remaining[buy["id"]] + old_matches.get(buy["id"], 0) > 1e-9]
-        buys.sort(key=lambda item: (item[0]["trade_date"], item[0]["id"]))
-        table.setRowCount(len(buys))
-        for row_number, (buy, free) in enumerate(buys):
-            gain = service._gain_per_unit(buy, sell)
-            for col_number, value in enumerate((buy["trade_date"], buy["trade_id"], buy["quantity"], free,
-                                                buy["price"], gain if gain is not None else "FX needed")):
-                item = QTableWidgetItem(display_number(value) if col_number in (2, 3, 4, 5) and
-                                        isinstance(value, (int, float)) else str(value))
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                if col_number == 0:
-                    item.setData(Qt.UserRole, buy["id"])
-                table.setItem(row_number, col_number, item)
-            spin = DisplayAmountSpinBox()
-            spin.setMaximum(min(free, sell["quantity"]))
-            spin.setDecimals(6)
-            spin.setGroupSeparatorShown(True)
-            spin.setValue(old_matches.get(buy["id"], 0))
-            table.setCellWidget(row_number, 6, spin)
-            self.inputs.append((buy["id"], spin))
-        if not old_matches:
-            for buy_id, qty in service.suggested_max_gain(sell["id"], replace_existing=True):
-                next(spin for ident, spin in self.inputs if ident == buy_id).setValue(qty)
-        for buy_id, spin in self.inputs:
-            table.register_input(spin, buy_id, 6)
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
-        allocation_width = max((spin.sizeHint().width() for _, spin in self.inputs), default=0) + 8
-        allocation_width = max(150, allocation_width)
-        header.setSectionResizeMode(6, QHeaderView.Interactive)
-        table.setColumnWidth(6, allocation_width)
-        header.sectionResized.connect(
-            lambda column, _old, width: table.setColumnWidth(6, allocation_width)
-            if column == 6 and width < allocation_width else None)
-        layout.addWidget(table)
-        best = QPushButton("Suggest maximum gain")
-        def use_best():
-            for _, spin in self.inputs:
-                spin.setValue(0)
-            for buy_id, qty in service.suggested_max_gain(sell["id"], replace_existing=True):
-                next(spin for ident, spin in self.inputs if ident == buy_id).setValue(qty)
-        best.clicked.connect(use_best)
-        layout.addWidget(best)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        enable_label_copy(self)
-
-    def allocations(self):
-        return [(buy_id, spin.value()) for buy_id, spin in self.inputs if spin.value() > 0]
-
-
 class MainWindow(QMainWindow):
     DEFAULT_TAB_ORDER = ("Portfolio", "Trades", "Lots", "Cash", "Analytics", "Rebalance")
     TAB_LAYOUT_KEY = "tab_layout_v1"
 
-    def __init__(self, database_path=None):
+    def __init__(self, database_path=None, *, recovery_key=None):
         super().__init__()
         self.setWindowTitle("Portfolio Monitor")
         available = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1450, max(640, available.width() - 40)),
                     min(850, max(480, available.height() - 40)))
-        self.db = Database(database_path) if database_path else Database()
+        self.db = (Database(database_path, recovery_key=recovery_key) if recovery_key is not None else
+                   Database(database_path) if database_path else Database())
         self._pending_data_directory = None
         self.log = configure_diagnostics(self.db.path, "monitor")
         self.log.info("Portfolio Monitor opened; database=%s", self.db.path)
@@ -524,6 +465,9 @@ class MainWindow(QMainWindow):
         self._analytics_process = None
         self._cash_process = None
         self._history_process = None
+        self._encryption_process = None
+        self._encryption_status_path = None
+        self._encryption_progress = None
         self._history_status_path = None
         self._history_resume_configuration = None
         self.history_import_dialog = None
@@ -531,6 +475,8 @@ class MainWindow(QMainWindow):
         self._last_cash_sync_day = None
         self._sync_all_queue = []
         self._sync_all_active = False
+        self._sync_paused = False
+        self._global_paused_history_path = None
         self._sync_progress_active = False
         self._live_sync_pending = False
         self._live_sync_events = set()
@@ -561,6 +507,10 @@ class MainWindow(QMainWindow):
         self.sync_button.setObjectName("secondary")
         self.sync_button.clicked.connect(self.sync_all)
         heading_row.addWidget(self.sync_button)
+        self.pause_sync_button = QPushButton()
+        self.pause_sync_button.setObjectName("secondary")
+        self.pause_sync_button.clicked.connect(self.toggle_sync_pause)
+        heading_row.addWidget(self.pause_sync_button)
         self.theme_button = QPushButton()
         self.theme_button.setObjectName("themeToggle")
         self.theme_button.clicked.connect(self.toggle_theme)
@@ -577,7 +527,8 @@ class MainWindow(QMainWindow):
         self.settings_button.setToolTip("Settings")
         self.settings_button.clicked.connect(self.open_settings)
         heading_row.addWidget(self.settings_button)
-        for button in (self.sync_button, self.theme_button, self.help_button, self.settings_button):
+        for button in (self.sync_button, self.pause_sync_button, self.theme_button,
+                       self.help_button, self.settings_button):
             button.setFixedSize(34, 34)
             button.setIconSize(QSize(20, 20))
         root_layout.addLayout(heading_row)
@@ -616,8 +567,6 @@ class MainWindow(QMainWindow):
         summary_layout.addWidget(self.data_notice)
         root_layout.addWidget(summary)
         self.tabs = QTabWidget()
-        self.tabs.setMovable(True)
-        self.tabs.tabBar().setToolTip("Drag tabs to reorder; use View to save the tab layout")
         root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
         self.sync_progress_label = QLabel("Syncing IBKR…")
@@ -642,13 +591,12 @@ class MainWindow(QMainWindow):
             self._make_grid_tab(name)
         self.cash_tab = CashMovementsTab(self.db, self.portfolio_id)
         self.tabs.addTab(self.cash_tab, "Cash")
-        self.tabs.tabBar().setTabData(self.tabs.count() - 1, "Cash")
         self.analytics_tab = AnalyticsTab(self.db, self.service, self.portfolio_id)
         self.tabs.addTab(self.analytics_tab, "Analytics")
-        self.tabs.tabBar().setTabData(self.tabs.count() - 1, "Analytics")
         self.calcs_tab = CalcsTab(self.db, self.service, self.portfolio_id)
         self.tabs.addTab(self.calcs_tab, "Rebalance")
-        self.tabs.tabBar().setTabData(self.tabs.count() - 1, "Rebalance")
+        widgets.persist_tab_order(self.tabs, self.db, self.TAB_LAYOUT_KEY,
+                                  ids=list(self.DEFAULT_TAB_ORDER), remember_active=True)
         self.tabs.currentChanged.connect(self._refresh_special_tab)
         self._make_settings_tab()
         self._make_help_dialog()
@@ -665,7 +613,6 @@ class MainWindow(QMainWindow):
         self.help_shortcut.activated.connect(self.open_help)
         self._restore_columns()
         self._restore_default_views()
-        self.restore_tab_layout()
         self._update_summary_visibility()
         self._apply_theme(self.db.setting("ui_theme") or "light")
         self._sync_progress_active = True
@@ -685,6 +632,8 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         self.timer.start(250)
+        self._encryption_poll_timer = QTimer(self)
+        self._encryption_poll_timer.timeout.connect(self._poll_encryption)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._periodic_refresh)
         self._set_refresh_interval()
@@ -713,7 +662,7 @@ class MainWindow(QMainWindow):
         self._update_summary_visibility()
 
     def _refresh_calcs_live(self):
-        if self.tabs.currentWidget() is self.calcs_tab and not self.calcs_tab.updates_paused:
+        if self.tabs.currentWidget() is self.calcs_tab and not self._sync_paused:
             focus = QApplication.focusWidget()
             editors = (self.calcs_tab.findChildren(QDoubleSpinBox) +
                        self.calcs_tab.findChildren(QComboBox))
@@ -732,9 +681,9 @@ class MainWindow(QMainWindow):
         for visual in self.help_visuals:
             visual.set_theme(self.theme)
         self.analytics_tab.set_theme(self.theme)
-        self.calcs_tab.set_theme(self.theme)
         color = COLORS[self.theme]["text"]
         self.sync_button.setIcon(action_icon("sync", color))
+        self._update_pause_sync_button()
         self.theme_button.setIcon(action_icon("sun" if self.theme == "dark" else "moon", color))
         self.help_button.setIcon(action_icon("help", color))
         self.settings_button.setIcon(action_icon("settings", color))
@@ -752,9 +701,57 @@ class MainWindow(QMainWindow):
         self.db.set_setting("ui_theme", theme)
         self._apply_theme(theme)
 
+    def _update_pause_sync_button(self):
+        action = "Resume sync" if self._sync_paused else "Pause sync"
+        self.pause_sync_button.setIcon(action_icon(
+            "play" if self._sync_paused else "pause", COLORS[self.theme]["text"]))
+        self.pause_sync_button.setAccessibleName(action)
+        self.pause_sync_button.setToolTip(action + " across the app")
+
+    def toggle_sync_pause(self):
+        self._sync_paused = not self._sync_paused
+        if self._sync_paused:
+            self._live_sync_pending = False
+            self._live_sync_events.clear()
+            if isinstance(self.market, IBKRMarketDataProvider):
+                self.market.stop()
+                self.market.connected = False
+            if (self._history_process is not None and self._history_status_path is not None
+                    and read_status(self._history_status_path).get("source") != "legacy"):
+                request = pause_request_path(self._history_status_path)
+                if not request.exists():
+                    self.pause_history_import()
+                    if request.exists():
+                        self._global_paused_history_path = self._history_status_path
+        else:
+            path = self._global_paused_history_path
+            if path is not None and pause_request_path(path).exists():
+                try:
+                    pause_request_path(path).unlink(missing_ok=True)
+                except OSError:
+                    self._sync_paused = True
+                    QMessageBox.warning(self, "Sync", "Could not resume the history import in the data folder.")
+                    return
+                if self._history_process is not None and self._history_process.poll() is None:
+                    self.history_import_dialog.set_running(True)
+                    self.history_import_dialog.show_status(read_status(path))
+            if self._history_process is not None and self._history_process.poll() is not None:
+                self._poll_history_import()
+            if (path is not None and self._history_process is None
+                    and read_status(path)["state"] == "paused"):
+                self._global_paused_history_path = None
+                self.start_history_import()
+            if self._history_process is None:
+                self._global_paused_history_path = None
+            self._start_provider()
+            self._advance_sync_queue()
+        self._update_pause_sync_button()
+        self._update_sync_button()
+        self._update_status()
+
     def sync_all(self):
         """Refresh live IBKR state and start every configured Flex catch-up."""
-        if self._history_process is not None:
+        if self._sync_paused or self._history_process is not None:
             return
         self._sync_progress_active = True
         self._live_sync_pending = False
@@ -791,7 +788,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Sync: configure " + ", ".join(missing) + " in Settings", 10000)
 
     def _queue_configured_syncs(self):
-        if self._history_process is not None:
+        if self._sync_paused or self._history_process is not None:
             return
         if not self.db.setting("ib_account_id"):
             return
@@ -806,6 +803,8 @@ class MainWindow(QMainWindow):
         if self._history_process is not None:
             return
         self._record_trade_sync_exit()
+        if self._sync_paused:
+            return
         if any(process is not None and process.poll() is None for process in
                (self._sync_process, self._analytics_process, self._cash_process)):
             return
@@ -826,10 +825,11 @@ class MainWindow(QMainWindow):
     def _update_sync_button(self):
         running = self._live_sync_pending or self._sync_all_active or any(process is not None and process.poll() is None for process in
                       (self._sync_process, self._analytics_process, self._cash_process))
-        sync_action = ("Importing Flex history…" if self._history_process is not None else
+        sync_action = ("Sync paused" if self._sync_paused else
+                       "Importing Flex history…" if self._history_process is not None else
                        "Syncing IBKR…" if running else "Sync IBKR")
         self.sync_button.setAccessibleName(sync_action)
-        self.sync_button.setEnabled(not running and self._history_process is None)
+        self.sync_button.setEnabled(not self._sync_paused and not running and self._history_process is None)
         statuses = []
         for label, setting, prefix in (
                 ("Trades", "flex_query_id", "ibkr_flex"),
@@ -844,11 +844,21 @@ class MainWindow(QMainWindow):
                 error = self.db.metadata(prefix + "_sync_error")
                 statuses.append(f"{label}: {status}" + (f" · {completed}" if completed else "") +
                                 (f" · {error[:120]}" if error else ""))
-        self.sync_button.setToolTip(sync_action + " — refresh live IBKR data and fetch completed Flex history.\n" +
-                                    "\n".join(statuses))
+        self.sync_button.setToolTip(
+            ("Sync is paused. Use Resume sync to continue.\n" if self._sync_paused else
+             sync_action + " — refresh live IBKR data and fetch completed Flex history.\n") +
+            "\n".join(statuses))
         self._update_sync_progress()
 
     def _update_sync_progress(self):
+        if self._sync_paused:
+            running = (self._history_process is not None or any(
+                process is not None and process.poll() is None for process in
+                (self._sync_process, self._analytics_process, self._cash_process)))
+            self.sync_progress_label.setText("Pausing sync…" if running else "Sync paused")
+            self.sync_progress_label.show()
+            self.sync_progress_bar.setVisible(running)
+            return
         if self._history_process is not None:
             self.sync_progress_label.setText("Importing Flex history…")
             self.sync_progress_label.show()
@@ -906,6 +916,9 @@ class MainWindow(QMainWindow):
         dialog = self.history_import_dialog
         if dialog is None or self._history_process is not None:
             return
+        if self._sync_paused:
+            QMessageBox.warning(self, "Import Data", "Resume sync before importing history.")
+            return
         if (self._live_sync_pending or self._sync_all_active or self._sync_all_queue or any(
                 process is not None and process.poll() is None for process in
                 (self._sync_process, self._analytics_process, self._cash_process))):
@@ -926,6 +939,9 @@ class MainWindow(QMainWindow):
     def remove_legacy_history_import(self):
         dialog = self.history_import_dialog
         if dialog is None or self._history_process is not None:
+            return
+        if self._sync_paused:
+            QMessageBox.warning(self, "Import Data", "Resume sync before removing history.")
             return
         if (self._live_sync_pending or self._sync_all_active or self._sync_all_queue or any(
                 process is not None and process.poll() is None for process in
@@ -984,6 +1000,8 @@ class MainWindow(QMainWindow):
         if dialog is None or self._history_process is not None:
             return
         try:
+            if self._sync_paused:
+                raise ValueError("Resume sync before importing history.")
             if self._live_sync_pending or self._sync_all_active or self._sync_all_queue or any(
                     process is not None and process.poll() is None for process in
                     (self._sync_process, self._analytics_process, self._cash_process)):
@@ -994,7 +1012,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("Enter valid dates as YYYY-MM-DD.")
             first = first_date.toPython()
             last = last_date.toPython()
-            if first > last or last >= date.today():
+            if first > last or last >= flex_today():
                 raise ValueError("Choose an ordered date range ending before today.")
             account = self.db.setting("ib_account_id")
             if not account:
@@ -1096,6 +1114,11 @@ class MainWindow(QMainWindow):
             self.cash_tab.refresh()
             self.analytics_tab.refresh()
             self._update_sync_button()
+            if self._global_paused_history_path == self._history_status_path and not self._sync_paused:
+                self._global_paused_history_path = None
+                if status["state"] == "paused":
+                    self.start_history_import()
+                    return
             notice = ("Older CSV history removal finished; open File → Import Data to review results."
                       if status.get("action") == "remove" else
                       "History import finished; open File → Import Data to review results.")
@@ -1104,7 +1127,7 @@ class MainWindow(QMainWindow):
         self.history_import_dialog.show_status(status)
 
     def _launch_flex_sync(self, *, manual=False, retry=False):
-        if self._history_process is not None:
+        if self._sync_paused or self._history_process is not None:
             return
         if not self.db.setting("ib_account_id") or not self.db.setting("flex_query_id"):
             if manual:
@@ -1200,7 +1223,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "IBKR trade sync failed", details)
 
     def _launch_analytics_sync(self, *, manual=False, retry=False):
-        if self._history_process is not None:
+        if self._sync_paused or self._history_process is not None:
             return
         if not self.db.setting("ib_account_id") or not self.db.setting("analytics_flex_query_id"):
             if manual:
@@ -1228,7 +1251,7 @@ class MainWindow(QMainWindow):
             self.log.error("Analytics history sync launch failed: %s: %s", type(exc).__name__, exc)
 
     def _launch_cash_sync(self, *, manual=False, retry=False):
-        if self._history_process is not None:
+        if self._sync_paused or self._history_process is not None:
             return
         if not self.db.setting("ib_account_id") or not self.db.setting("cash_flex_query_id"):
             if manual:
@@ -1236,10 +1259,10 @@ class MainWindow(QMainWindow):
             return
         if self._cash_process is not None and self._cash_process.poll() is None:
             return
-        if not manual and self._last_cash_sync_day == date.today():
+        if not manual and self._last_cash_sync_day == flex_today():
             return
         if not manual:
-            self._last_cash_sync_day = date.today()
+            self._last_cash_sync_day = flex_today()
         try:
             self.db.set_metadata("ibkr_cash_sync_status", "starting")
             self.db.set_metadata("ibkr_cash_sync_error", "")
@@ -1258,6 +1281,7 @@ class MainWindow(QMainWindow):
     def _make_grid_tab(self, name):
         page = QWidget()
         layout = QVBoxLayout(page)
+        widgets.apply_layout(layout, "page")
         toolbar_widget = QWidget()
         toolbar_widget.setObjectName(f"{name}Toolbar")
         toolbar = QHBoxLayout(toolbar_widget)
@@ -1294,6 +1318,8 @@ class MainWindow(QMainWindow):
         column_menu.aboutToShow.connect(lambda table=name, menu=column_menu: self._populate_columns_menu(table, menu))
         columns_button.setMenu(column_menu)
         toolbar.addLayout(column_controls)
+        if name == "Lots":
+            toolbar.addWidget(widgets.button("Match lots…", self.match_lots, variant="secondary"))
         if name == "Portfolio":
             self.hide_closed_checkbox = ThemedCheckBox("Hide closed")
             self.hide_closed_checkbox.setToolTip("Hide positions with zero trade-derived quantity")
@@ -1341,8 +1367,9 @@ class MainWindow(QMainWindow):
         view.selectionModel().selectionChanged.connect(lambda *_args, table=name: self._update_selection_info(table))
         if name == "Portfolio":
             view.doubleClicked.connect(lambda _: self.show_position_details())
+        elif name == "Lots":
+            view.doubleClicked.connect(lambda _: self.match_lots())
         self.tabs.addTab(page, "Overview" if name == "Portfolio" else name)
-        self.tabs.tabBar().setTabData(self.tabs.count() - 1, name)
 
     @staticmethod
     def _button(layout, title, callback):
@@ -1355,6 +1382,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
+        widgets.apply_layout(layout, "page")
         form = QFormLayout()
         advanced_form = QFormLayout()
         self.settings_fields = {}
@@ -1392,7 +1420,7 @@ class MainWindow(QMainWindow):
         self.flex_token_input.setEchoMode(QLineEdit.Password)
         self.flex_token_input.setPlaceholderText("Paste a new Flex token to save or replace it")
         token_row.addWidget(self.flex_token_input)
-        self._button(token_row, "Save Flex token", self.save_flex_token)
+        token_row.addWidget(widgets.button("Save Flex token", self.save_flex_token, variant="secondary"))
         layout.addLayout(token_row)
         self.flex_token_status = QLabel()
         self.flex_token_status.setTextFormat(Qt.PlainText)
@@ -1434,7 +1462,7 @@ class MainWindow(QMainWindow):
         self.settings_dialog.finished.connect(lambda _result: self.flex_token_input.clear())
         dialog_layout = QVBoxLayout(self.settings_dialog)
         dialog_layout.addWidget(scroller)
-        close_button = QDialogButtonBox(QDialogButtonBox.Close)
+        close_button = widgets.dialog_buttons(self.settings_dialog, QDialogButtonBox.Close)
         close_button.rejected.connect(self.settings_dialog.reject)
         dialog_layout.addWidget(close_button)
 
@@ -1561,7 +1589,9 @@ class MainWindow(QMainWindow):
                  "Trades rows double counts matched lots. Open P&L appears on buys with shares still held, "
                  "so a partially sold buy can show both. "
                  "Lots shows shares still held and matched sales; filter by instrument or Open/Closed. "
-                 "These records are read-only here.")
+                 "Use Match lots from the Lots tab (toolbar button, double-click, right-click, or the "
+                 "Matches menu) to drag a sale onto a buy and pin a manual match for that instrument; "
+                 "automatic matching recalculates around your manual choices.")
         add_text(portfolio_content, "Cash",
                  "Choose a range to review deposits, dividends, interest, tax, fees and transactions. "
                   "Cash activity is imported from the configured Cash Flex query.")
@@ -1577,28 +1607,34 @@ class MainWindow(QMainWindow):
         add_text(analytics_content, "Return",
                  "Review cumulative USD results for every recorded instrument, including closed positions. "
                  "Select a row to inspect matched lots, dividends, bond interest and attributable withholding tax. "
-                 "Return on cost divides the cumulative result by all purchase costs and purchase commissions. "
-                 "Missing Cash windows, unmatched trades or unattributed income leave totals unavailable. "
+                 "Return on cash cost divides the cumulative result by all purchase cash outflows, "
+                 "including commissions and bond accrued interest paid. "
+                 "Missing Cash windows, unmatched trades, unattributed income, or income FX leave totals unavailable. "
+                 "Open bonds also need current accrued interest for a full total. "
                  "Add Conid, Symbol and FX Rate to Base to the Cash Flex query, then reimport Cash history "
                  "to link older income rows.")
         add_text(analytics_content, "Exposure",
                  "See the latest portfolio mix by sector or a custom group. Choose Market value or "
                  "Adjusted for the pie, category list and position percentages. Click a pie slice "
                  "to filter positions; use Manage categories to edit custom groups.")
+        add_text(analytics_content, "Monthly history",
+                 "Reported monthly NAV and returns from older PortfolioAnalyst reports, for periods "
+                 "with no daily data. Use File → Import Data → Import older CSV history to add these.")
 
         rebalance_content = add_section("Rebalance")
         add_text(rebalance_content, "Plan targets and scenarios",
                  "Enter target weights or a Cash target to see estimated buys and sells. "
                  "Use Add idea for a stock you do not hold, and enter upside/downside cases to compare outcomes. "
-                 "Show changes the visible columns. Pause updates freezes this tab's prices and weights "
-                 "until you select Resume updates.")
+                 "Show changes the visible columns. Use the pause button in the top toolbar to pause "
+                 "or resume syncing across the app.")
         add_visual(rebalance_content, "rebalance")
 
         views_content = add_section("Views & data")
         add_text(views_content, "Tables and saved views",
                  "Click a column heading to sort; right-click it for column and decimal options. "
                  "Use View → Save current tab view to remember that tab's filters and layout. "
-                 "Drag tabs to reorder them, then use View → Save tab layout to remember their order. "
+                 "Drag tabs to reorder them; the new order is remembered automatically, and "
+                 "View → Reset tab order restores the default order. "
                  "Use File → Export Workbook or Create SQLite Backup to keep a copy of your data.")
         add_text(views_content, "Data status",
                  "Live account values can be provisional, and saved data can be older while offline. "
@@ -1632,7 +1668,7 @@ class MainWindow(QMainWindow):
                         rebalance_content, views_content, shortcuts_content):
             content.addStretch()
         self.help_navigation.setCurrentRow(0)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = widgets.dialog_buttons(self.help_dialog, QDialogButtonBox.Close)
         buttons.rejected.connect(self.help_dialog.reject)
         dialog_layout.addWidget(buttons)
 
@@ -1652,6 +1688,9 @@ class MainWindow(QMainWindow):
             action = QAction(title, self)
             action.triggered.connect(handler)
             file_menu.addAction(action)
+        file_menu.addSeparator()
+        file_menu.addAction("Encrypt Database…", self.encrypt_database)
+        file_menu.addAction("Show Database Recovery Code…", self.show_database_recovery_code)
         view_menu = self.menuBar().addMenu("View")
         self.show_summary_action = view_menu.addAction("Show account summary")
         self.show_summary_action.setCheckable(True)
@@ -1666,13 +1705,12 @@ class MainWindow(QMainWindow):
             "Restore saved tab view",
             lambda: self.restore_default_view(self._current_table_name()) if self._current_table_name() else None)
         view_menu.addSeparator()
-        self.save_tabs_action = view_menu.addAction("Save tab layout", self.save_tab_layout)
-        self.restore_tabs_action = view_menu.addAction("Restore saved tab layout", self.restore_tab_layout)
+        self.reset_tabs_action = view_menu.addAction("Reset tab order", self.reset_tab_order)
         view_menu.aboutToShow.connect(lambda: (self.save_view_action.setEnabled(self._current_table_name() is not None),
             self.restore_view_action.setEnabled(self._current_table_name() is not None and
-                self._saved_default_view(self._current_table_name()) is not None),
-            self.restore_tabs_action.setEnabled(self._saved_tab_layout() is not None)))
+                self._saved_default_view(self._current_table_name()) is not None)))
         self.matches_menu = self.menuBar().addMenu("Matches")
+        self.matches_menu.addAction("Match lots…", self.match_lots)
         self.matches_menu.addAction("Rebuild automatic matches", self.auto_match)
         self.auto_match_menu = QMenu("Auto-match remaining", self.matches_menu)
         self.auto_match_menu.setToolTipsVisible(True)
@@ -1691,7 +1729,7 @@ class MainWindow(QMainWindow):
 
     def _restore_columns(self):
         use_saved = self.db.setting("header_layout_version") == "3"
-        portfolio_saved = self.db.setting("portfolio_columns_version") == "3"
+        portfolio_saved = self.db.setting("portfolio_columns_version") == "4"
         for name, view in self.views.items():
             state = self.db.setting(f"header_{name}")
             if use_saved and state and (name != "Portfolio" or portfolio_saved):
@@ -1704,7 +1742,7 @@ class MainWindow(QMainWindow):
                     for column in (8, 9, 10, 11):
                         view.hideColumn(column)
                 elif name == "Portfolio":
-                    for column in (12, 13, 14):
+                    for column in (13, 14, 15):
                         view.hideColumn(column)
                 else:
                     view.horizontalHeader().setDefaultSectionSize(105)
@@ -1714,13 +1752,13 @@ class MainWindow(QMainWindow):
                     for column in (10, 11, 12):
                         view.hideColumn(column)
             if name == "Portfolio" and self.db.setting("price_move_bars_intro_applied") != "1":
-                for column in (8, 9, 10):
+                for column in (9, 10, 11):
                     view.showColumn(column)
                 self.db.set_setting("price_move_bars_intro_applied", "1")
         if not use_saved:
             self.db.set_setting("header_layout_version", "3")
         if not portfolio_saved:
-            self.db.set_setting("portfolio_columns_version", "3")
+            self.db.set_setting("portfolio_columns_version", "4")
 
     def _current_table_name(self):
         name = self.tabs.tabBar().tabData(self.tabs.currentIndex())
@@ -1730,43 +1768,12 @@ class MainWindow(QMainWindow):
         return next((index for index in range(self.tabs.count())
                      if self.tabs.tabBar().tabData(index) == name), -1)
 
-    def _saved_tab_layout(self):
-        try:
-            state = json.loads(self.db.setting(self.TAB_LAYOUT_KEY))
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(state, dict) or state.get("version") != 1 or not isinstance(state.get("order"), list):
-            return None
-        order = state["order"]
-        if (not all(isinstance(name, str) and name in self.DEFAULT_TAB_ORDER for name in order) or
-            len(set(order)) != len(order)):
-            return None
-        active = state.get("active")
-        if active is not None and active not in self.DEFAULT_TAB_ORDER:
-            return None
-        return {"order": order + [name for name in self.DEFAULT_TAB_ORDER if name not in order],
-                "active": active}
-
-    def save_tab_layout(self):
-        order = [self.tabs.tabBar().tabData(index) for index in range(self.tabs.count())]
-        state = {"version": 1, "order": order,
-                 "active": self.tabs.tabBar().tabData(self.tabs.currentIndex())}
-        self.db.set_setting(self.TAB_LAYOUT_KEY, json.dumps(state))
-        self.statusBar().showMessage("Tab layout saved", 5000)
-
-    def restore_tab_layout(self):
-        state = self._saved_tab_layout()
-        if state is None:
-            return False
-        for destination, name in enumerate(state["order"]):
+    def reset_tab_order(self):
+        for destination, name in enumerate(self.DEFAULT_TAB_ORDER):
             source = self._tab_index(name)
             if source >= 0 and source != destination:
                 self.tabs.tabBar().moveTab(source, destination)
-        active = self._tab_index(state["active"])
-        if active >= 0:
-            self.tabs.setCurrentIndex(active)
-        self.statusBar().showMessage("Saved tab layout restored", 5000)
-        return True
+        self.statusBar().showMessage("Tab order reset", 5000)
 
     def _saved_default_view(self, name):
         try:
@@ -1915,11 +1922,15 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event):
+        if self._encryption_process is not None:
+            event.ignore()
+            return
         if not self._stop_history_import_on_close():
             event.ignore()
             QMessageBox.warning(self, "Import Data", "Could not stop the history worker. Try closing the app again.")
             return
-        if self._pending_data_directory is not None and (self._sync_all_active or self._sync_all_queue or any(
+        if self._pending_data_directory is not None and ((not self._sync_paused and
+                (self._sync_all_active or self._sync_all_queue)) or any(
                 process is not None and process.poll() is None for process in
                 (self._sync_process, self._analytics_process, self._cash_process))):
             event.ignore()
@@ -1947,6 +1958,8 @@ class MainWindow(QMainWindow):
                 self._start_provider()
                 QMessageBox.warning(self, "Database move failed", str(exc))
                 return
+        for table in self.findChildren(ReportTable):
+            table.finish_layout_persistence()
         self.db.conn.close()
         super().closeEvent(event)
 
@@ -2065,6 +2078,11 @@ class MainWindow(QMainWindow):
             if row:
                 menu.addSeparator()
                 menu.addAction("Position details", lambda checked=False: self.show_position_details())
+        elif name == "Lots":
+            row = self.selected_row("Lots")
+            if row:
+                menu.addSeparator()
+                menu.addAction("Match lots…", lambda checked=False: self.match_lots())
         return menu
 
     def _table_context_menu(self, name, point):
@@ -2137,19 +2155,21 @@ class MainWindow(QMainWindow):
         lots = [lot for lot in self.service.lots_rows() if lot.get("position_id") == position["id"]]
         for title, records, specs in (
             ("Trades", trades, [("trade_date", "Date"), ("side", "Side"), ("quantity", "Qty"),
-                                ("price", "Price"), ("commission_usd", "Fee USD"), ("match_status", "Match")]),
+                                ("price", "Price"), ("commission_usd", "Fee USD"),
+                                ("accrued_interest_usd", "Accrued interest USD"), ("match_status", "Match")]),
             ("Lots", lots, [("buy_date", "Buy"), ("buy_qty", "Qty"), ("buy_price", "Cost"),
                              ("sell_date", "Sale"), ("realized_net", "Realized USD"),
                              ("net_unrealized", "Open P&L USD")])):
             layout.addWidget(QLabel(title))
             table = ReportTable(len(records), len(specs))
             table.setHorizontalHeaderLabels([label for _, label in specs])
-            numeric_keys = {"quantity", "price", "commission_usd", "buy_qty", "buy_price",
+            numeric_keys = {"quantity", "price", "commission_usd", "accrued_interest_usd", "buy_qty", "buy_price",
                             "sell_price", "realized_net", "net_unrealized"}
             numeric_formats = {column: (2, "plain") for column, (key, _) in enumerate(specs)
                                if key in numeric_keys}
             table.configure_numbers(self.db, f"position_details_{title.lower()}_decimals_{self.portfolio_id}",
                                     numeric_formats)
+            table.remember_layout(self.db, f"position_details_{title.lower()}_layout_{self.portfolio_id}")
             for row_num, record in enumerate(records):
                 for col_num, (key, _) in enumerate(specs):
                     value = record.get(key)
@@ -2158,7 +2178,7 @@ class MainWindow(QMainWindow):
             table.setSortingEnabled(True)
             table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             layout.addWidget(table)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = widgets.dialog_buttons(dialog, QDialogButtonBox.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         enable_label_copy(dialog)
@@ -2272,18 +2292,14 @@ class MainWindow(QMainWindow):
         self.data_notice.setVisible(bool(issues))
         self._update_status()
 
-    def match_selected(self):
-        sell = self.selected_row("Trades")
-        if not sell or sell["side"] != "SELL":
-            QMessageBox.information(self, "Select a SELL", "Select a SELL row in Trades first.")
+    def match_lots(self):
+        lot = self.selected_row("Lots")
+        if not lot or lot.get("position_id") is None:
+            self.statusBar().showMessage("Select a lot in the Lots tab to match it", 8000)
             return
-        dialog = MatchDialog(self.service.matching, sell, self)
+        dialog = LotMatchDialog(self.service, lot["position_id"], lot["ticker"], self, theme=self.theme)
         if dialog.exec() == QDialog.Accepted:
-            try:
-                self.service.matching.replace_sell_matches(sell["id"], dialog.allocations())
-                self._refresh_models()
-            except Exception as exc:
-                QMessageBox.warning(self, "Match rejected", str(exc))
+            self._refresh_models()
 
     def auto_match(self):
         self._run_matching(self.service.matching.rebuild_auto)
@@ -2322,8 +2338,107 @@ class MainWindow(QMainWindow):
         try:
             path = self.db.backup()
             QMessageBox.information(self, "Backup created", str(path))
+            if self.db.recovery_code:
+                self.show_database_recovery_code()
+                self.db.recovery_code = None
         except Exception as exc:
             QMessageBox.warning(self, "Backup failed", str(exc))
+
+    def show_database_recovery_code(self):
+        code = secret_store.load_database_key(self.db.path)
+        if code is None:
+            QMessageBox.information(self, "Database recovery code",
+                                    "A recovery code will be created when the database is encrypted or backed up.")
+            return
+        message = QMessageBox(self)
+        message.setWindowTitle("Save database recovery code")
+        message.setIcon(QMessageBox.Warning)
+        message.setText("Save this recovery code outside the data and backup folders. "
+                        "You need it to restore an encrypted database on another Windows profile.\n\n" + code)
+        message.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        message.exec()
+
+    def encrypt_database(self):
+        if self.db.encrypted:
+            QMessageBox.information(self, "Encrypt Database", "This database is already encrypted.")
+            return
+        if (self._history_process is not None or self._sync_all_active or self._sync_all_queue or
+                any(process is not None and process.poll() is None for process in
+                    (self._sync_process, self._analytics_process, self._cash_process))):
+            QMessageBox.warning(self, "Encrypt Database", "Wait for imports and synchronization to finish.")
+            return
+        try:
+            code = secret_store.load_database_key(self.db.path) or token_hex(32)
+            secret_store.save_database_key(self.db.path, code)
+            self.show_database_recovery_code()
+            self._encryption_status_path = self.db.path.parent / f"database-encryption-{uuid4().hex}.json"
+            if isinstance(self.market, IBKRMarketDataProvider):
+                self.market.stop()
+            for timer in (self.timer, self.refresh_timer, self.lots_refresh_timer,
+                          self.calcs_refresh_timer, self.summary_refresh_timer):
+                timer.stop()
+            self.db.conn.close()
+            args = ["--database", str(self.db.path), "--status-file", str(self._encryption_status_path)]
+            if getattr(sys, "frozen", False):
+                command = [sys.executable, "--encrypt-database", *args]
+                workdir = self.db.path.parent
+            else:
+                command = [sys.executable, "-m", "scripts.encrypt_database", *args]
+                workdir = Path(__file__).resolve().parent.parent
+            self._encryption_process = subprocess.Popen(
+                command, cwd=workdir, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.setEnabled(False)
+            self._encryption_progress = QProgressDialog("Encrypting database…", None, 0, 0)
+            self._encryption_progress.setWindowTitle("Encrypt Database")
+            self._encryption_progress.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+            self._encryption_progress.setWindowModality(Qt.ApplicationModal)
+            self._encryption_progress.show()
+            self._encryption_poll_timer.start(250)
+        except Exception as exc:
+            self._encryption_process = None
+            self._resume_after_encryption()
+            QMessageBox.warning(self, "Encrypt Database", str(exc))
+
+    def _resume_after_encryption(self):
+        reopened = Database(self.db.path)
+        self.db.__dict__.update(reopened.__dict__)
+        self.setEnabled(True)
+        self.timer.start(250)
+        self._set_refresh_interval()
+        self._start_provider()
+
+    def _poll_encryption(self):
+        if self._encryption_process is None or self._encryption_process.poll() is None:
+            return
+        code = self._encryption_process.returncode
+        self._encryption_poll_timer.stop()
+        self._encryption_process = None
+        if self._encryption_progress is not None:
+            self._encryption_progress.close()
+            self._encryption_progress = None
+        try:
+            result = json.loads(self._encryption_status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = {"state": "failed"}
+        try:
+            self._encryption_status_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            self._resume_after_encryption()
+        except Exception:
+            QMessageBox.critical(self, "Encrypt Database", "The portfolio could not be reopened. "
+                                 "The database files were preserved; close the app and restore using the recovery code.")
+            QApplication.quit()
+            return
+        if code == 0 and result.get("state") == "completed" and self.db.encrypted:
+            QMessageBox.information(self, "Database encrypted",
+                                    "The database and new backups are encrypted. The previous plaintext copy remains at:\n" +
+                                    result["plaintext_copy"] + "\nRemove it after checking an encrypted backup restore.")
+        else:
+            QMessageBox.warning(self, "Encrypt Database",
+                                "Encryption did not complete. The original database remains available.")
 
     def export(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export workbook", "portfolio.xlsx", "Excel workbook (*.xlsx)")
@@ -2377,6 +2492,8 @@ class MainWindow(QMainWindow):
                 (force or self.db.metadata(f"history_refresh_{p['con_id']}") != today)}
 
     def _start_provider(self, force_history=False):
+        if self._sync_paused:
+            return
         if isinstance(self.market, IBKRMarketDataProvider):
             self.market.stop()
         provider = self.db.setting("provider")
@@ -2426,6 +2543,8 @@ class MainWindow(QMainWindow):
                     "status": "CACHED QUOTE"}
 
     def refresh_market(self, *, force=False):
+        if self._sync_paused:
+            return
         if isinstance(self.market, MockMarketDataProvider):
             ids = self.market.refresh(self.db.rows("positions", self.portfolio_id))
             self.models["Portfolio"].update_positions(ids)
@@ -2453,6 +2572,9 @@ class MainWindow(QMainWindow):
             self.analytics_tab.refresh()
         cash_stamp = self.db.metadata("ibkr_cash_sync_completed")
         self._advance_sync_queue()
+        if self._sync_paused:
+            self._update_sync_button()
+            return
         running = any(process is not None and process.poll() is None for process in
                       (self._sync_process, self._analytics_process, self._cash_process))
         if not self._sync_all_active and not running:
@@ -2507,6 +2629,11 @@ class MainWindow(QMainWindow):
 
     def _poll(self):
         self._poll_history_import()
+        if self._sync_paused:
+            self._advance_sync_queue()
+            self._update_sync_button()
+            self._update_status()
+            return
         was_connected = self.market.connected
         ids = self.market.drain()
         if was_connected and not self.market.connected:
@@ -2537,7 +2664,7 @@ class MainWindow(QMainWindow):
                     time.monotonic() - getattr(self, "_last_exposure_refresh", 0) >= 2):
                 self.analytics_tab.refresh_exposure()
                 self._last_exposure_refresh = time.monotonic()
-            if (self.tabs.currentWidget() is self.calcs_tab and not self.calcs_tab.updates_paused and
+            if (self.tabs.currentWidget() is self.calcs_tab and
                     not self.calcs_refresh_timer.isActive()):
                 self.calcs_refresh_timer.start(1000)
             if not self.lots_refresh_timer.isActive():
@@ -2775,7 +2902,8 @@ class MainWindow(QMainWindow):
         updated = max((row.get("last_updated") or "" for row in active), default="") or "—"
         quote_issues = []
         for row in active:
-            status = str(self.market.quote(row["id"]).get("status") or "")
+            status = ("STALE QUOTE" if row.get("data_status") == "STALE QUOTE" else
+                      str(self.market.quote(row["id"]).get("status") or ""))
             if status and status not in ("OK", "DELAYED", "CACHED QUOTE", "MOCK", "WAITING FOR PRICE"):
                 quote_issues.append(f"{row['display_ticker']}: {status}")
         issues_text = "; ".join(quote_issues[:3])
@@ -2799,6 +2927,11 @@ class MainWindow(QMainWindow):
             self.trade_sync_status.unsetCursor()
         recent_check = (self.db.metadata("ibkr_last_execution_poll") or "—").replace("T", " ")
         self.statusBar().showMessage(
+            ("Pausing sync…    " if self._sync_paused and
+             (self._history_process is not None or any(
+                 process is not None and process.poll() is None for process in
+                 (self._sync_process, self._analytics_process, self._cash_process))) else
+             "Sync paused    " if self._sync_paused else "") +
             f"IBKR: {connected}    Data: {mode}    Last price: {updated}"
             f"{'    Quote issues: ' + str(len(quote_issues)) if quote_issues else ''}")
         last_history = self.db.conn.execute("SELECT MAX(value) FROM app_metadata WHERE key LIKE 'history_refresh_%'").fetchone()[0] or "—"

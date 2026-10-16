@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from hashlib import sha256
+from pathlib import Path
+import re
 import sys
 
 
 _TARGET_PREFIX = "custom-ib-monitor:ibkr-flex:"
+_DATABASE_PREFIX = "custom-ib-monitor:database:"
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
 
@@ -42,33 +46,31 @@ def _api():
     return api
 
 
-def save_flex_token(account_id: str, token: str):
-    if not account_id or not token.isdecimal() or len(token) < 16:
-        raise ValueError("Invalid account or Flex token")
+def _save(target: str, value: str, user: str):
     if sys.platform == "darwin":
         from keyring.backends.macOS import Keyring
-        Keyring().set_password(_TARGET_PREFIX + account_id, account_id, token)
+        Keyring().set_password(target, user, value)
         return
-    data = token.encode("utf-16-le")
+    data = value.encode("utf-16-le")
     blob = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
     credential = _CREDENTIAL()
     credential.Type = _CRED_TYPE_GENERIC
-    credential.TargetName = _TARGET_PREFIX + account_id
+    credential.TargetName = target
     credential.CredentialBlobSize = len(data)
     credential.CredentialBlob = ctypes.cast(blob, ctypes.POINTER(ctypes.c_ubyte))
     credential.Persist = _CRED_PERSIST_LOCAL_MACHINE
-    credential.UserName = account_id
+    credential.UserName = user
     if not _api().CredWriteW(ctypes.byref(credential), 0):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def load_flex_token(account_id: str) -> str | None:
+def _load(target: str, user: str) -> str | None:
     if sys.platform == "darwin":
         from keyring.backends.macOS import Keyring
-        return Keyring().get_password(_TARGET_PREFIX + account_id, account_id)
+        return Keyring().get_password(target, user)
     pointer = ctypes.POINTER(_CREDENTIAL)()
     api = _api()
-    if not api.CredReadW(_TARGET_PREFIX + account_id, _CRED_TYPE_GENERIC, 0,
+    if not api.CredReadW(target, _CRED_TYPE_GENERIC, 0,
                          ctypes.byref(pointer)):
         error = ctypes.get_last_error()
         if error == 1168:  # ERROR_NOT_FOUND
@@ -80,3 +82,31 @@ def load_flex_token(account_id: str) -> str | None:
         return data.decode("utf-16-le")
     finally:
         api.CredFree(pointer)
+
+
+def save_flex_token(account_id: str, token: str):
+    if not account_id or not token.isdecimal() or len(token) < 16:
+        raise ValueError("Invalid account or Flex token")
+    _save(_TARGET_PREFIX + account_id, token, account_id)
+
+
+def load_flex_token(account_id: str) -> str | None:
+    return _load(_TARGET_PREFIX + account_id, account_id)
+
+
+def _database_target(path) -> str:
+    # A path is only a local lookup name. The encryption key is never derived from it.
+    location = str(Path(path).expanduser().resolve()).casefold()
+    return _DATABASE_PREFIX + sha256(location.encode("utf-8")).hexdigest()
+
+
+def save_database_key(path, key: str):
+    if re.fullmatch(r"[0-9a-fA-F]{64}", key) is None:
+        raise ValueError("Database recovery code must be 64 hexadecimal characters")
+    target = _database_target(path)
+    _save(target, key.lower(), target)
+
+
+def load_database_key(path) -> str | None:
+    target = _database_target(path)
+    return _load(target, target)

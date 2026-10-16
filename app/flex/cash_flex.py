@@ -9,7 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from app.flex.flex_import import (MAX_FLEX_WINDOW_DAYS, FlexRequestPacer, FlexServiceError,
-                                  FlexValidationError, flex_day, fetch_flex)
+                                  FlexValidationError, flex_day, flex_today, fetch_flex)
 from app.platform.secret_store import load_flex_token
 from app.sync.sync_service import single_writer_lock
 
@@ -238,7 +238,7 @@ def run_cash_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=None,
     if not account_id or not query_id:
         raise FlexValidationError("IBKR account and Cash Flex query ID are required")
     db.validate_account_ownership(account_id)
-    today = today or date.today()
+    today = today or flex_today()
     windows = windows_override if windows_override is not None else planned_cash_windows(
         db, portfolio_id, today, account_id)
     if not windows:

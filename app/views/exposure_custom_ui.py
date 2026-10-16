@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
 from app.finance.exposure import (add_custom_set, custom_labels, custom_sets,
                           delete_custom_set, exposure_snapshot, rename_custom_set,
                           set_custom_label)
+from app.views import widgets
 from app.views.table_ui import InputReportTable
 
 
@@ -23,6 +24,7 @@ class CustomSetDialog(QDialog):
         self.setWindowTitle("Custom exposure categories")
         self.resize(670, 480)
         layout = QVBoxLayout(self)
+        widgets.apply_layout(layout, "dialog")
         header = QHBoxLayout()
         header.addWidget(QLabel("Set"))
         self.set_combo = QComboBox()
@@ -37,9 +39,8 @@ class CustomSetDialog(QDialog):
             button.clicked.connect(handler)
             header.addWidget(button)
         layout.addLayout(header)
-        help_label = QLabel("Choose or type a category beside each underlying. Its options use the same category.")
-        help_label.setObjectName("hint")
-        help_label.setWordWrap(True)
+        help_label = widgets.hint(
+            "Choose or type a category beside each underlying. Its options use the same category.")
         layout.addWidget(help_label)
         self.table = InputReportTable(0, 2)
         self.table.setHorizontalHeaderLabels(("Underlying", "Category"))
@@ -49,8 +50,8 @@ class CustomSetDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         layout.addWidget(self.table, 1)
-        self.empty_status = QLabel("No resolved underlyings yet. Sync positions with IBKR, then return here.")
-        self.empty_status.setObjectName("hint")
+        self.empty_status = widgets.hint(
+            "No resolved underlyings yet. Sync positions with IBKR, then return here.")
         layout.addWidget(self.empty_status)
         apply_row = QHBoxLayout()
         apply_row.addWidget(QLabel("For selected rows"))
@@ -62,10 +63,10 @@ class CustomSetDialog(QDialog):
         apply_button.clicked.connect(self._apply_selected)
         apply_row.addWidget(apply_button)
         layout.addLayout(apply_row)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Close)
+        buttons = widgets.dialog_buttons(
+            self, QDialogButtonBox.Save | QDialogButtonBox.Close, primary=self._save_and_close)
         self.save_button = buttons.button(QDialogButtonBox.Save)
         self.save_button.setText("Save changes")
-        self.save_button.clicked.connect(self._save_and_close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.set_combo.currentTextChanged.connect(self._set_changed)

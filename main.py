@@ -1,9 +1,21 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox
 
 from app.ui import MainWindow
+from app.storage.encryption import InvalidDatabaseKey, MissingDatabaseKey
+
+
+def _show_recovery_code(parent, code):
+    message = QMessageBox(parent)
+    message.setWindowTitle("Save database recovery code")
+    message.setIcon(QMessageBox.Warning)
+    message.setText("Save this recovery code outside the database and backup folders. "
+                    "It is required to restore your portfolio on another Windows profile.\n\n" + code)
+    message.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+    message.exec()
 
 
 def main(argv=None):
@@ -14,6 +26,9 @@ def main(argv=None):
     if args and args[0] == "--legacy-history-worker":
         from scripts.legacy_history_worker import main as legacy_history_worker
         return legacy_history_worker(args[1:])
+    if args and args[0] == "--encrypt-database":
+        from scripts.encrypt_database import main as encrypt_database
+        return encrypt_database(args[1:])
     if args and args[0] in ("--sync-trades", "--sync-analytics", "--sync-cash") and len(args) <= 2:
         from scripts.sync_trades import main as sync_trades
         from scripts.sync_analytics import main as sync_analytics
@@ -31,8 +46,25 @@ def main(argv=None):
     app = QApplication(sys.argv)
     app.setApplicationName("Portfolio Monitor")
     app.setApplicationDisplayName("Portfolio Monitor")
-    window = MainWindow(database_path=database_path)
+    try:
+        window = MainWindow(database_path=database_path)
+    except (MissingDatabaseKey, InvalidDatabaseKey):
+        while True:
+            code, accepted = QInputDialog.getText(
+                None, "Unlock portfolio", "Enter the 64-character database recovery code:",
+                QLineEdit.Password)
+            if not accepted:
+                return 1
+            try:
+                window = MainWindow(database_path=database_path, recovery_key=code.strip())
+                break
+            except (MissingDatabaseKey, InvalidDatabaseKey, ValueError):
+                QMessageBox.warning(None, "Unlock portfolio", "The recovery code could not open this database.")
     window.show()
+    recovery_code = getattr(getattr(window, "db", None), "recovery_code", None)
+    if recovery_code:
+        _show_recovery_code(window, recovery_code)
+        window.db.recovery_code = None
     return app.exec()
 
 

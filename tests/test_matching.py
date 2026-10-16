@@ -272,6 +272,203 @@ def test_previous_close_tick_does_not_imply_zero_daily_pnl(db, monkeypatch):
     assert row["one_day"] is None
 
 
+def test_close_tick_supplies_prior_close_when_saved_history_is_missing_or_stale(db, monkeypatch):
+    pid = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ",
+                           "exchange": "NYSE"})
+    db.cache_contract(pid, 12345)
+    db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                  "quantity": 10, "price": 80})
+    market = MockMarketDataProvider()
+    market.quotes[pid] = {"ticks": {"last": 102, "close": 100},
+                          "mode": "Live", "status": "OK"}
+    service = PortfolioService(db, market)
+    monkeypatch.setattr(service, "_as_of", lambda position: date(2026, 10, 6))
+    row = service.portfolio_rows()[0]
+    assert row["one_day"] == pytest.approx(0.02)
+    assert row["daily_pnl"] == 20
+    db.save_history(12345, [{"day": "2026-09-01", "close": 80, "volume": 100}])
+    row = service.portfolio_rows()[0]
+    assert row["one_day"] == pytest.approx(0.02)
+    assert row["daily_pnl"] == 20
+    db.save_history(12345, [{"day": "2026-10-05", "close": 95, "volume": 100}])
+    row = service.portfolio_rows()[0]
+    assert row["one_day"] == pytest.approx(0.02)
+    assert row["daily_pnl"] == 20
+
+
+def test_old_last_tick_cannot_report_a_new_session_move(db, monkeypatch):
+    pid = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ",
+                           "exchange": "NYSE"})
+    db.cache_contract(pid, 12345, time_zone="America/New_York")
+    db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                  "quantity": 10, "price": 80})
+    market = MockMarketDataProvider()
+    market.quotes[pid] = {"ticks": {"last": 102, "close": 100},
+                          "tick_updated": {
+                              "last": "2026-10-05T16:00:00-04:00",
+                              "close": "2026-10-06T09:30:00-04:00"},
+                          "mode": "Live", "status": "OK"}
+    service = PortfolioService(db, market)
+    monkeypatch.setattr(service, "_as_of", lambda position: date(2026, 10, 6))
+    row = service.portfolio_rows()[0]
+    assert row["one_day"] is None
+    assert row["daily_pnl"] is None
+    assert row["data_status"] == "STALE QUOTE"
+    assert row["value"] == 1020
+
+
+def test_quote_feed_keeps_each_tick_timestamp_until_disconnect():
+    market = MarketDataProvider()
+    market.events.put(("quote", [1], "last", 102, "Live"))
+    market.events.put(("quote", [1], "close", 100, "Live"))
+    market.drain()
+    assert set(market.quote(1)["tick_updated"]) == {"last", "close"}
+    assert datetime.fromisoformat(market.quote(1)["tick_updated"]["last"]).tzinfo is not None
+    market.events.put(("connected", False))
+    market.drain()
+    assert market.quote(1)["tick_updated"] == {}
+
+
+def test_manual_match_moves_conflicting_auto_allocation(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    early = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                          "quantity": 50, "price": 10, "commission_usd": 0})
+    late = db.add_trade({"position_id": pid, "trade_date": "2026-01-05", "side": "BUY",
+                         "quantity": 50, "price": 9, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 50, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.rebuild_auto([pid])
+    # Cheaper (higher-gain) buy auto-matched first.
+    assert [(m["buy_trade_id"], m["origin"]) for m in db.rows("trade_matches")] == [(late, "auto")]
+    matcher.apply_position_matches(pid, [(early, sell, 50)])
+    matches = db.rows("trade_matches")
+    assert [(m["buy_trade_id"], m["sell_trade_id"], m["matched_qty"], m["origin"]) for m in matches] == [
+        (early, sell, 50, "manual")]
+    assert matcher.remaining()[late] == 50
+
+
+def test_partial_manual_match_auto_fills_remainder(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    # buy2 has the worse price (lower gain) so the auto-fill remainder prefers
+    # buy1's leftover quantity before reaching into buy2.
+    buy1 = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                         "quantity": 30, "price": 10, "commission_usd": 0})
+    buy2 = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                        "quantity": 30, "price": 11, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 40, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.apply_position_matches(pid, [(buy1, sell, 20)])
+    matches = [m for m in db.rows("trade_matches")]
+    buy1_matches = [m for m in matches if m["buy_trade_id"] == buy1]
+    buy2_matches = [m for m in matches if m["buy_trade_id"] == buy2]
+    assert any(m["origin"] == "manual" and m["matched_qty"] == 20 for m in buy1_matches)
+    assert sum(m["matched_qty"] for m in buy1_matches) == 30  # Fully auto-filled remainder too.
+    assert sum(m["matched_qty"] for m in buy2_matches) == 10
+    assert all(m["origin"] == "auto" for m in buy2_matches)
+    assert matcher.remaining()[sell] == 0
+
+
+def test_clearing_manual_restores_auto_matching(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy1 = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                         "quantity": 50, "price": 10, "commission_usd": 0})
+    buy2 = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                        "quantity": 50, "price": 9, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 50, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.apply_position_matches(pid, [(buy1, sell, 50)])
+    assert db.rows("trade_matches")[0]["origin"] == "manual"
+    matcher.apply_position_matches(pid, [])
+    matches = db.rows("trade_matches")
+    assert len(matches) == 1
+    assert matches[0]["origin"] == "auto"
+    assert matches[0]["buy_trade_id"] == buy2  # Cheaper buy wins on gain once unlocked.
+
+
+def test_validate_manual_rejects_buy_after_sell(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "SELL",
+                        "quantity": 10, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    with pytest.raises(ValueError):
+        matcher.validate_manual(pid, [(buy, sell, 10)])
+
+
+def test_validate_manual_rejects_over_allocated_buy(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sell1 = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                         "quantity": 5, "price": 12, "commission_usd": 0})
+    sell2 = db.add_trade({"position_id": pid, "trade_date": "2026-01-11", "side": "SELL",
+                         "quantity": 6, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    with pytest.raises(ValueError):
+        matcher.validate_manual(pid, [(buy, sell1, 5), (buy, sell2, 6)])
+
+
+def test_validate_manual_rejects_over_allocated_sell(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy1 = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    buy2 = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 10, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    with pytest.raises(ValueError):
+        matcher.validate_manual(pid, [(buy1, sell, 6), (buy2, sell, 6)])
+
+
+def test_validate_manual_rejects_cross_instrument(db):
+    pid1 = db.add_position({"display_ticker": "AAA"})
+    pid2 = db.add_position({"display_ticker": "BBB"})
+    buy = db.add_trade({"position_id": pid1, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid2, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 10, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    with pytest.raises(ValueError):
+        matcher.validate_manual(pid1, [(buy, sell, 10)])
+
+
+def test_invalid_apply_leaves_trade_matches_unchanged(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 10, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.apply_position_matches(pid, [(buy, sell, 10)])
+    before = db.rows("trade_matches")
+    with pytest.raises(ValueError):
+        matcher.apply_position_matches(pid, [(buy, sell, 999)])
+    assert db.rows("trade_matches") == before
+
+
+def test_rebuild_auto_after_apply_preserves_manual_rows(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy1 = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 50, "price": 10, "commission_usd": 0})
+    buy2 = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
+                        "quantity": 50, "price": 9, "commission_usd": 0})
+    sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-10", "side": "SELL",
+                        "quantity": 50, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.apply_position_matches(pid, [(buy1, sell, 50)])
+    matcher.rebuild_auto([pid])
+    matches = db.rows("trade_matches")
+    assert len(matches) == 1
+    assert matches[0]["buy_trade_id"] == buy1
+    assert matches[0]["origin"] == "manual"
+    assert matcher.remaining()[buy2] == 50
+
+
 def test_us_listing_without_contract_timezone_uses_market_calendar(db, monkeypatch):
     pid = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ",
                            "exchange": "NYSE", "currency": "USD"})

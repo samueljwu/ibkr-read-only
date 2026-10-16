@@ -3,3 +3,4 @@ pandas>=2.1
 numpy>=1.26
 ibapi>=9.81.1
 openpyxl>=3.1
+sqlcipher3==0.6.4

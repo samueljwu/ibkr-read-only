@@ -825,7 +825,7 @@ def test_rebalance_focus_views_reduce_visible_columns_and_persist(tmp_path):
         db.conn.close()
 
 
-def test_rebalance_pause_freezes_only_its_snapshot_and_resume_uses_latest_values(tmp_path):
+def test_rebalance_refresh_uses_latest_values_without_local_pause(tmp_path):
     QApplication.instance() or QApplication([])
     db = Database(tmp_path / "paused_rebalance.sqlite3")
     db.set_portfolio_nav(1, 100000)
@@ -833,30 +833,18 @@ def test_rebalance_pause_freezes_only_its_snapshot_and_resume_uses_latest_values
     service = Service([holding(1, 60000, 600, price=100)])
     tab = CalcsTab(db, service, 1)
     try:
-        assert not tab.updates_paused
-        assert tab.pause_button.property("syncState") == "active"
+        assert not hasattr(tab, "pause_button")
         assert not tab.table.isColumnHidden(8)
         assert not tab.table.isColumnHidden(9)
-        tab.pause_button.click()
-        assert tab.updates_paused
-        assert tab.pause_button.text() == "Resume updates"
-        assert tab.pause_button.property("syncState") == "paused"
         service.rows[0]["value"] = 50000
         service.rows[0]["last_px"] = 120
         db.set_account_value(1, "TotalCashValue", 50000, "USD", "2026-10-07T12:01:00")
         tab.refresh()
-        assert tab.table.item(0, 3).text() == "60.0000 %"
-        assert tab.table.item(0, 7).text() == "100.00 USD"
-        assert "$40,000.00" in tab.cash_value.text()
-        tab.table.cellWidget(0, 4).setValue(50)
-        tab.table.cellWidget(0, 4).editingFinished.emit()
-        assert tab.table.item(0, 5).text() == "Sell $10,000.00"
-        tab.pause_button.click()
-        assert not tab.updates_paused
-        assert tab.pause_button.property("syncState") == "active"
         assert tab.table.item(0, 3).text() == "50.0000 %"
         assert tab.table.item(0, 7).text() == "120.00 USD"
         assert "$50,000.00" in tab.cash_value.text()
+        tab.table.cellWidget(0, 4).setValue(50)
+        tab.table.cellWidget(0, 4).editingFinished.emit()
         assert tab.table.item(0, 5).text() == "—"
     finally:
         tab.close()
@@ -889,7 +877,7 @@ def test_cash_target_editor_is_not_clipped_at_common_widths(tmp_path):
     tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
     try:
         tab.show()
-        panel = tab.findChild(QWidget, "calcsCashPanel")
+        panel = tab.findChild(QWidget, "card")
         for theme in ("light", "dark"):
             tab.setStyleSheet(stylesheet(theme))
             for width in (800, 1372):
@@ -901,32 +889,6 @@ def test_cash_target_editor_is_not_clipped_at_common_widths(tmp_path):
                 assert editor.height() == 25
                 assert editor.lineEdit().width() >= 120
                 assert editor.geometry().bottom() < panel.height() - 4
-    finally:
-        tab.close()
-        db.conn.close()
-
-
-def test_rebalance_pause_button_colors_follow_state_in_both_themes(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "pause_colors.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        tab.show()
-        for theme in ("light", "dark"):
-            tab.setStyleSheet(stylesheet(theme))
-            tab.set_theme(theme)
-            app.processEvents()
-            button = tab.pause_button
-            active_color = button.icon().pixmap(button.iconSize()).toImage().pixelColor(6, 6).name()
-            assert active_color == COLORS[theme]["sync_red"]
-            assert button.grab().toImage().pixelColor(button.width() - 7, button.height() // 2).name() == COLORS[theme]["surface"]
-            button.click()
-            app.processEvents()
-            paused_color = button.icon().pixmap(button.iconSize()).toImage().pixelColor(6, 6).name()
-            assert paused_color == COLORS[theme]["sync_green"]
-            assert button.grab().toImage().pixelColor(button.width() - 7, button.height() // 2).name() == COLORS[theme]["surface"]
-            button.click()
     finally:
         tab.close()
         db.conn.close()

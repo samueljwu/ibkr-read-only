@@ -2,7 +2,8 @@
 
 from decimal import Decimal
 from functools import partial
-import sqlite3
+from sqlite3.dump import _iterdump
+from sqlcipher3 import dbapi2 as sqlite3
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -87,7 +88,7 @@ def sync(runner, db, xml, **kwargs):
     (run_analytics_flex_sync, analytics_report), (run_flex_sync, trade_report)])
 def test_equivalent_reports_preserve_rows_timestamps_and_backups(db, monkeypatch, runner, report):
     sync(runner, db, report())
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     changes = db.conn.total_changes
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Unchanged report created a backup"))
     # Numeric formatting, attribute/row order, and generation metadata are irrelevant.
@@ -96,7 +97,7 @@ def test_equivalent_reports_preserve_rows_timestamps_and_backups(db, monkeypatch
     result = sync(runner, db, reordered(xml), on_window_result=lambda *args: outcomes.append(args))
     assert result["unchanged_windows"] == 1
     assert outcomes == [(DAY, DAY, "unchanged")]
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
     assert db.conn.total_changes == changes
 
 
@@ -142,7 +143,7 @@ def test_adjacent_cash_corrections_stage_and_commit_together_or_roll_back(db, fa
         with db.conn:
             db.conn.execute("""CREATE TRIGGER synthetic_failure BEFORE INSERT ON cash_movements
                 WHEN NEW.reported_day='2026-01-06' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END""")
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     calls = []
     def fetcher(*a, from_day, to_day):
         assert not db.conn.in_transaction
@@ -158,7 +159,7 @@ def test_adjacent_cash_corrections_stage_and_commit_together_or_roll_back(db, fa
     if failure:
         with pytest.raises((FlexValidationError, sqlite3.IntegrityError)):
             run()
-        assert list(db.conn.iterdump()) == before
+        assert list(_iterdump(db.conn)) == before
     else:
         assert run()["updated_windows"] == 2
         assert sorted(row[0] for row in db.conn.execute("SELECT amount FROM cash_movements")) == ["3", "4"]
@@ -167,11 +168,11 @@ def test_adjacent_cash_corrections_stage_and_commit_together_or_roll_back(db, fa
 
 def test_cash_missing_currency_requires_review_without_writes(db, monkeypatch):
     sync(run_cash_flex_sync, db, cash_report(aud=True))
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Unverified report created backup"))
     with pytest.raises(FlexValidationError, match="Needs review.*omits an existing currency"):
         sync(run_cash_flex_sync, db, cash_report())
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_cash_correction_does_not_change_analytics_nav(db):
@@ -188,10 +189,10 @@ def test_same_revision_trade_correction_updates_stable_row_and_missing_fill_requ
     assert result["updated"] == 1
     row = db.conn.execute("SELECT id,quantity,price FROM trades").fetchone()
     assert tuple(row) == (row_id, 6, 12)
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     with pytest.raises(FlexValidationError, match="Needs review.*omits a previously imported execution"):
         sync(run_flex_sync, db, trade_report(empty=True))
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_lower_revision_trade_cannot_replace_correction(db):
@@ -228,26 +229,26 @@ def test_identical_unsupported_broker_event_keeps_review_without_writes_or_backu
                   dateTime=DAY, actionDescription='Synthetic unsupported event')
     xml = ET.tostring(root)
     assert sync(run_flex_sync, db, xml)["review"] == 1
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     changes = db.conn.total_changes
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Unchanged report created backup"))
     outcomes = []
     assert sync(run_flex_sync, db, xml, on_window_result=lambda *args: outcomes.append(args))["review"] == 1
     assert outcomes == [(DAY, DAY, "needs_review")]
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
     assert db.conn.total_changes == changes
 
 
 def test_pending_execution_replay_keeps_review_without_writes_or_backup(db, monkeypatch):
     xml = trade_report().replace(b'ibCommission="-0.5"', b'')
     assert sync(run_flex_sync, db, xml)["review"] == 1
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Unchanged report created backup"))
     assert sync(run_flex_sync, db, xml)["review"] == 1
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
     with pytest.raises(FlexValidationError, match="Needs review.*incomplete execution correction"):
         sync(run_flex_sync, db, xml.replace(b'tradePrice="10"', b'tradePrice="12"'))
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_manual_trade_is_preserved_for_review(db):
@@ -266,10 +267,10 @@ def test_analytics_corrects_nav_and_flows_and_preserves_empty_correction(db):
     assert result["updated_windows"] == 1
     assert db.conn.execute("SELECT nav_usd FROM account_history").fetchone()[0] == 120
     assert db.conn.execute("SELECT COUNT(*) FROM external_flows").fetchone()[0] == 1
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     with pytest.raises(FlexValidationError, match="Needs review.*empty or incomplete"):
         sync(run_analytics_flex_sync, db, analytics_report(empty=True))
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_worker_preserves_safe_review_and_outcome_labels(db, tmp_path, monkeypatch):
@@ -332,16 +333,16 @@ def test_cash_import_consolidates_old_periods_and_preserves_movements(db, monkey
     movements = db.conn.execute("SELECT reported_day,amount FROM cash_movements "
         "ORDER BY reported_day").fetchall()
     assert [tuple(row) for row in movements] == [(first, "5"), (DAY, "7")]
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     with monkeypatch.context() as patch:
         patch.setattr(db, "backup", lambda: pytest.fail("Unchanged combined Cash report created backup"))
         assert import_history.main(args) == 0
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_cash_import_rejects_unknown_type_without_replacing_old_periods(db, tmp_path, monkeypatch):
     seed_adjacent(db)
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     invalid = cash_report("2026-01-05", DAY, "100", "120", amounts=("1",))
     invalid = invalid.replace(b'type="Deposit"', b'type="Synthetic Adjustment"')
     monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
@@ -355,7 +356,7 @@ def test_cash_import_rejects_unknown_type_without_replacing_old_periods(db, tmp_
     status = read_status(status_file)
     assert status["failed_window"] == ["2026-01-05", DAY]
     assert status["message"] == "Unsupported Cash Flex transaction type: Synthetic Adjustment"
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_cash_unknown_type_error_shows_only_safe_category():
@@ -385,7 +386,7 @@ def test_combined_cash_period_unavailable_marks_its_full_span(db, monkeypatch):
 @pytest.mark.parametrize("entry", ["runner", "worker"])
 def test_cash_group_unavailable_discards_changed_fetched_prefix(db, tmp_path, monkeypatch, entry):
     seed_adjacent(db)
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     changes = db.conn.total_changes
     calls = []
     def fetcher(*a, from_day, to_day):
@@ -419,7 +420,7 @@ def test_cash_group_unavailable_discards_changed_fetched_prefix(db, tmp_path, mo
         assert not status["unverified_windows"].get("cash")
         assert not status["updated_windows"] and not status["completed_windows"]
         assert calls == [("2026-01-05", DAY)]
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
     assert db.conn.total_changes == changes
 
 
@@ -427,17 +428,17 @@ def test_omitted_source_only_reviewed_execution_requires_review(db, monkeypatch)
     invalid = trade_report().replace(b'conid="123"', b'')
     assert sync(run_flex_sync, db, invalid)["review"] == 1
     assert db.conn.execute("SELECT COUNT(*) FROM broker_executions").fetchone()[0] == 0
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Omitted execution created backup"))
     with pytest.raises(FlexValidationError, match="Needs review.*omits a previously reviewed execution"):
         sync(run_flex_sync, db, trade_report(empty=True))
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_unchanged_source_only_review_retains_review_without_writes_and_can_be_resolved(db, monkeypatch):
     invalid = trade_report().replace(b'conid="123"', b'')
     assert sync(run_flex_sync, db, invalid)["review"] == 1
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     changes = db.conn.total_changes
     outcomes = []
     with monkeypatch.context() as patch:
@@ -448,7 +449,7 @@ def test_unchanged_source_only_review_retains_review_without_writes_and_can_be_r
                       on_window_result=lambda *args: outcomes.append(args))
     assert result["review"] == result["unchanged_windows"] == 1
     assert outcomes == [(DAY, DAY, "needs_review")]
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
     assert db.conn.total_changes == changes
     resolved = sync(run_flex_sync, db, trade_report())
     assert resolved["inserted"] == 1 and resolved["review"] == 0
@@ -457,11 +458,11 @@ def test_unchanged_source_only_review_retains_review_without_writes_and_can_be_r
 
 def test_analytics_empty_report_preserves_existing_flows_without_nav(db, monkeypatch):
     db.save_external_flow(1, "history-csv:synthetic", DAY, 10, "cash")
-    before = list(db.conn.iterdump())
+    before = list(_iterdump(db.conn))
     monkeypatch.setattr(db, "backup", lambda: pytest.fail("Unverified report created backup"))
     with pytest.raises(FlexValidationError, match="Needs review"):
         sync(run_analytics_flex_sync, db, analytics_report(empty=True))
-    assert list(db.conn.iterdump()) == before
+    assert list(_iterdump(db.conn)) == before
 
 
 def test_unchanged_trade_in_changed_report_keeps_its_timestamps(db):

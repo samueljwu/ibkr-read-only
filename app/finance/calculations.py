@@ -128,6 +128,7 @@ def historical_returns(current, history, as_of=None):
 
 
 def closed_lot(buy, sell, qty):
+    """Realized clean-price P&L; report bond interest transfers separately."""
     qty = float(qty)
     buy_multiplier = valid_multiplier(buy.get("multiplier", 1))
     sell_multiplier = valid_multiplier(sell.get("multiplier", 1))
@@ -135,35 +136,44 @@ def closed_lot(buy, sell, qty):
     if (buy_multiplier is None or sell_multiplier is None or buy_multiplier != sell_multiplier or
         buy_fx is None or sell_fx is None):
         return {key: None for key in ("buy_value_usd", "sell_value_usd", "buy_commission",
-                                      "sell_commission", "realized_gross", "realized_net", "realized_pct")}
+                                      "sell_commission", "buy_accrued_interest", "sell_accrued_interest",
+                                      "realized_gross", "realized_net", "realized_pct")}
     buy_value = qty * float(buy["price"]) * buy_multiplier * buy_fx
     sell_value = qty * float(sell["price"]) * sell_multiplier * sell_fx
     buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
     sell_comm = float(sell["commission_usd"] or 0) * qty / float(sell["quantity"])
+    buy_accrued = float(buy.get("accrued_interest_usd") or 0) * qty / float(buy["quantity"])
+    sell_accrued = float(sell.get("accrued_interest_usd") or 0) * qty / float(sell["quantity"])
     gross = sell_value - buy_value
     net = gross - buy_comm - sell_comm
     return {"buy_value_usd": buy_value, "sell_value_usd": sell_value,
             "buy_commission": buy_comm, "sell_commission": sell_comm,
+            "buy_accrued_interest": buy_accrued, "sell_accrued_interest": sell_accrued,
             "realized_gross": gross, "realized_net": net,
-            "realized_pct": net / (buy_value + buy_comm) if buy_value + buy_comm else None}
+            "realized_pct": net / (buy_value + buy_comm)
+            if buy_value + buy_comm else None}
 
 
 def open_lot(buy, qty, current, current_fx):
+    """Open clean-price P&L; a bond's accrued receivable is separate."""
     qty = float(qty)
     current = valid_price(current)
     multiplier = valid_multiplier(buy.get("multiplier", 1))
     buy_fx, current_fx = valid_price(buy.get("fx_to_usd")), valid_price(current_fx)
     if multiplier is None or buy_fx is None or current_fx is None:
-        return {key: None for key in ("buy_value_usd", "buy_commission", "current_value",
-                                      "net_unrealized", "unrealized_pct")}
+        return {key: None for key in ("buy_value_usd", "buy_commission", "buy_accrued_interest",
+                                      "current_value", "net_unrealized", "unrealized_pct")}
     buy_value = qty * float(buy["price"]) * multiplier * buy_fx
     buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
+    buy_accrued = float(buy.get("accrued_interest_usd") or 0) * qty / float(buy["quantity"])
     gross = qty * multiplier * (current * current_fx - float(buy["price"]) * buy_fx) if current else None
     net = gross - buy_comm if gross is not None else None
     return {"buy_value_usd": buy_value, "buy_commission": buy_comm,
+            "buy_accrued_interest": buy_accrued,
             "current_value": qty * multiplier * current * current_fx if current else None,
             "net_unrealized": net,
-            "unrealized_pct": net / (buy_value + buy_comm) if net is not None and buy_value + buy_comm else None}
+            "unrealized_pct": net / (buy_value + buy_comm)
+            if net is not None and buy_value + buy_comm else None}
 
 
 def flow_adjusted_daily_pnl(current_qty, current_price, current_fx, prior_price, prior_fx,

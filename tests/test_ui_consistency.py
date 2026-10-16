@@ -9,14 +9,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QFontInfo, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog, QHeaderView,
                                QDoubleSpinBox, QLabel, QLineEdit, QPushButton,
                                QTableWidgetItem, QWidget)
 
 import app.ui as ui
 from app.views.calcs_ui import CalcsTab, CalcsTable
 from app.storage.database import Database
-from app.views.table_ui import InputReportTable
+from app.views.table_ui import InputReportTable, ReportTable
 from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING,
                           TOOLBAR_ITEM_SPACING, stylesheet)
 
@@ -367,8 +367,8 @@ def test_shared_cards_and_buttons_follow_theme(window, theme):
              window.cash_tab.summary_content)
     assert all(card.palette().color(QPalette.Window).name() == COLORS[theme]["surface"]
                for card in cards)
-    cash_panel = window.calcs_tab.findChild(QWidget, "calcsCashPanel")
-    assert cash_panel.palette().color(QPalette.Window).name() == COLORS[theme]["surface_alt"]
+    cash_panel = window.calcs_tab.findChild(QWidget, "card")
+    assert cash_panel.palette().color(QPalette.Window).name() == COLORS[theme]["surface"]
     secondary = [button for button in window.findChildren(QPushButton)
                  if button.objectName() == "secondary"]
     assert secondary
@@ -550,67 +550,90 @@ def test_rebalance_registers_every_table_input_with_shared_navigation(tmp_path):
         db.conn.close()
 
 
-def test_sale_lot_allocation_uses_shared_input_navigation():
-    app = QApplication.instance() or QApplication([])
-    buy = {"id": 7, "trade_date": "2026-01-01", "trade_id": "BUY-7",
-           "side": "BUY", "position_id": 1, "quantity": 10000, "price": 100}
-    sell = {"id": 8, "trade_id": "SELL-8", "display_ticker": "ABC",
-            "position_id": 1, "quantity": 10000}
+def test_lot_match_dialog_drag_equivalents_update_tree_and_apply(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
 
-    class Service:
-        portfolio_id = 1
-
-        class DB:
-            def rows(self, name, portfolio_id):
-                return [] if name == "trade_matches" else [buy]
-
-        db = DB()
-
-        def remaining(self):
-            return {7: 10000}
-
-        def _precedes(self, buy_row, sell_row):
-            return True
-
-        def _gain_per_unit(self, buy_row, sell_row):
-            return 1
-
-        def suggested_max_gain(self, sell_id, replace_existing=False):
-            return [(7, 5)]
-
-    dialog = ui.MatchDialog(Service(), sell)
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match.sqlite3")
     try:
-        dialog.show()
-        app.processEvents()
-        assert isinstance(dialog.table, InputReportTable)
-        spin = dialog.table.cellWidget(0, 6)
-        spin.setValue(10000)
-        app.processEvents()
-        _assert_input_text_fits(dialog)
-        dialog.table.setColumnWidth(6, 60)
-        assert dialog.table.columnWidth(6) >= spin.sizeHint().width() + 8
-        spin.setValue(5)
-        header = dialog.table.horizontalHeader()
-        assert header.sectionsMovable()
-        header.moveSection(header.visualIndex(6), 1)
-        assert header.visualIndex(6) == 1
-        spin = dialog.table.cellWidget(0, 6)
-        dialog.table.select_cell(0, 6, focus=True)
-        QTest.keyClick(dialog.table, Qt.Key_F2)
-        assert spin.hasFocus()
-        spin.setValue(8)
-        QTest.keyClick(spin.lineEdit(), Qt.Key_Escape)
-        assert spin.value() == 5
-        spin.setFocus()
-        spin.setValue(7)
-        QTest.keyClick(spin.lineEdit(), Qt.Key_Return)
-        assert dialog.allocations() == [(7, 7)]
-        assert dialog.table.hasFocus()
-        dialog.table.select_cell(0, 6, focus=True)
-        QTest.keyClick(dialog.table, Qt.Key_Right)
-        assert dialog.table.currentColumn() == header.logicalIndex(2)
+        position = db.add_position({"display_ticker": "ABC US Equity", "ib_symbol": "ABC"})
+        early = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "BUY",
+                              "quantity": 50, "price": 10, "commission_usd": 0})
+        late = db.add_trade({"position_id": position, "trade_date": "2026-01-02", "side": "BUY",
+                             "quantity": 50, "price": 9, "commission_usd": 0})
+        sell = db.add_trade({"position_id": position, "trade_date": "2026-01-10", "side": "SELL",
+                            "quantity": 50, "price": 12, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+
+        dialog = LotMatchDialog(service, position, "ABC US Equity")
+        try:
+            # Cheaper buy ("late") auto-matched first; its row appears as an
+            # italic, non-draggable Auto child under that buy in the tree.
+            assert any(m[0] == late and m[3] == "auto" for m in dialog.preview)
+            assert dialog.sale_list.count() == 0
+
+            # Drag-equivalent: assign the sale onto the other buy, pinning a manual match.
+            assert dialog.assign_match(early, sell) is True
+            assert dialog.manual_matches == [[early, sell, 50]]
+            assert [m for m in dialog.preview if m[3] == "manual"] == [(early, sell, 50, "manual")]
+            assert not any(m[0] == late for m in dialog.preview)
+
+            # Tree reflects the manual match under the early buy, marked Manual.
+            top_items = [dialog.tree.topLevelItem(i) for i in range(dialog.tree.topLevelItemCount())]
+            early_item = next(item for item in top_items
+                              if item.data(0, Qt.UserRole)["buy_id"] == early)
+            assert early_item.childCount() == 1
+            child = early_item.child(0)
+            assert child.data(0, Qt.UserRole)["origin"] == "manual"
+            assert child.text(4) == "Manual"
+
+            # Drag-equivalent: move the manual match to the other buy.
+            assert dialog.move_match(sell, late, source_buy_id=early) is True
+            assert dialog.manual_matches == [[late, sell, 50]]
+
+            # Drag-equivalent: unmatch, then revert fully to automatic.
+            assert dialog.unmatch(late, sell) is True
+            assert dialog.manual_matches == []
+            assert any(m[3] == "auto" for m in dialog.preview)
+
+            assert dialog.assign_match(early, sell) is True
+            assert dialog.apply() is True
+        finally:
+            dialog.close()
+
+        matches = db.rows("trade_matches")
+        assert len(matches) == 1
+        assert matches[0]["buy_trade_id"] == early
+        assert matches[0]["origin"] == "manual"
+        assert service.matching.remaining()[late] == 50
     finally:
-        dialog.close()
+        db.conn.close()
+
+
+def test_lots_double_click_and_context_menu_reach_match_lots(window, monkeypatch):
+    position = window.db.add_position({"display_ticker": "ABC US Equity", "ib_symbol": "ABC"})
+    buy = window.db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                               "side": "BUY", "quantity": 10, "price": 10})
+    sell = window.db.add_trade({"position_id": position, "trade_date": "2026-01-03",
+                                "side": "SELL", "quantity": 4, "price": 12})
+    window.service.matching.match(sell, [(buy, 4)])
+    window._refresh_models()
+
+    calls = []
+    monkeypatch.setattr(window, "match_lots", lambda: calls.append("called"))
+
+    view = window.views["Lots"]
+    view.setCurrentIndex(view.model().index(0, 0))
+    view.doubleClicked.emit(view.currentIndex())
+    assert calls == ["called"]
+
+    menu = window._build_table_menu("Lots", view.visualRect(view.currentIndex()).center())
+    action = next(a for a in menu.actions() if a.text() == "Match lots…")
+    action.trigger()
+    assert calls == ["called", "called"]
 
 
 def test_custom_exposure_categories_share_input_navigation_and_movable_columns(window, monkeypatch):
@@ -646,3 +669,97 @@ def test_custom_exposure_categories_share_input_navigation_and_movable_columns(w
         assert table.currentColumn() == 0
     finally:
         dialog.close()
+
+
+def test_every_report_table_follows_the_shared_table_contract(window, monkeypatch):
+    """Every ReportTable (and InputReportTable) instance shares one read-only,
+    no-row-number, movable-column contract, regardless of which tab built it."""
+    window.db.add_position({"display_ticker": "DEF US Equity", "ib_symbol": "DEF"})
+    window._refresh_models()
+    portfolio_view = window.views["Portfolio"]
+    portfolio_view.setCurrentIndex(window.models["Portfolio"].index(0, 0))
+    dialogs = []
+    monkeypatch.setattr(ui.QDialog, "exec", lambda dialog: dialogs.append(dialog) or 0)
+    window.show_position_details()
+    details_dialog = next(child for child in window.findChildren(QDialog)
+                          if child.windowTitle().endswith("position details"))
+    window.open_history_import()
+    tables = (window.cash_tab.table, window.calcs_tab.table,
+             window.analytics_tab.pnl_table, window.analytics_tab.capital_table,
+             window.analytics_tab.cash_share_table, window.analytics_tab.monthly_table,
+             window.analytics_tab.exposure_page.groups,
+             window.analytics_tab.exposure_page.positions,
+             window.analytics_tab.return_page.table,
+             window.analytics_tab.return_page.details_table,
+             window.history_import_dialog.periods_table,
+             *details_dialog.findChildren(ReportTable))
+    tables = [table for table in tables if table is not None]
+    assert len(tables) >= 11
+    for table in tables:
+        assert isinstance(table, ReportTable)
+        assert table.editTriggers() == QAbstractItemView.NoEditTriggers
+        assert not table.wordWrap()
+        assert not table.showGrid()
+        assert not table.verticalHeader().isVisible()
+        assert table.verticalHeader().defaultSectionSize() == 25
+        assert table.horizontalHeader().sectionsMovable()
+    details_dialog.close()
+
+
+def test_analytics_subtabs_are_movable_and_persist_order(tmp_path, monkeypatch):
+    db_path = tmp_path / "subtabs.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    try:
+        sections = window.analytics_tab.sections
+        bar = sections.tabBar()
+        assert bar.isMovable()
+        order_before = [bar.tabData(i) for i in range(bar.count())]
+        assert order_before == list(window.analytics_tab.SECTION_IDS)
+        bar.moveTab(0, bar.count() - 1)
+        key = f"analytics_section_layout_{window.portfolio_id}"
+        import json as _json
+        saved = _json.loads(window.db.setting(key))
+        assert saved["order"][-1] == order_before[0]
+    finally:
+        window.close()
+    reopened = ui.MainWindow()
+    try:
+        bar = reopened.analytics_tab.sections.tabBar()
+        assert [bar.tabData(i) for i in range(bar.count())][-1] == order_before[0]
+    finally:
+        reopened.close()
+
+
+def test_section_titles_share_one_font_size_and_weight(window):
+    titles = window.findChildren(QLabel, "sectionTitle")
+    assert len(titles) >= 3
+    sizes = {QFontInfo(label.font()).pixelSize() for label in titles}
+    weights = {label.font().weight() for label in titles}
+    assert len(sizes) == 1
+    assert len(weights) == 1
+
+
+def test_no_stray_stylesheets_or_hardcoded_colors_outside_theme_module():
+    """setStyleSheet(...) calls and 6-digit hex literals belong only in
+    ui_theme.py (the shared palette/stylesheet source) and the single
+    top-level stylesheet(...) application in app/ui.py's _apply_theme."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    allowed_hex_files = {root / "app" / "views" / "ui_theme.py",
+                        root / "app" / "views" / "themed_checkbox.py"}
+    hex_pattern = re.compile(r"#[0-9a-fA-F]{6}\b")
+    style_pattern = re.compile(r"\.setStyleSheet\(")
+    offenders = []
+    for path in (root / "app" / "ui.py", *(root / "app" / "views").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if path not in allowed_hex_files and hex_pattern.search(text):
+            offenders.append(f"{path.name}: hardcoded hex color")
+        for match in style_pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            if path.name == "ui.py" and "stylesheet(self.theme)" in text.splitlines()[line - 1]:
+                continue
+            offenders.append(f"{path.name}:{line}: setStyleSheet(...)")
+    assert not offenders, offenders

@@ -1,7 +1,9 @@
 # Security design and release gates
 
-Status: design in progress. The current application uses unencrypted SQLite
-and unencrypted SQLite backups. It must not be described as production secure.
+Status: design in progress. New portfolio databases and new backups use
+SQLCipher. Existing databases stay plaintext until converted, and migration
+retains a plaintext original. Old backups and exports may also remain plaintext.
+The application must not be described as production secure.
 
 ## Assets and boundaries
 
@@ -31,16 +33,17 @@ must remain read-only.
 6. A failed upgrade corrupts the only copy of the portfolio.
 
 The application cannot protect data from malware already running with the
-same user's access while the portfolio is open. Encryption at rest and the
-Windows credential store address different risks; both require review.
+same user's access while the portfolio is open. SQLCipher uses a random
+per-portfolio key stored in Windows Credential Manager for automatic unlock.
+The user must keep the recovery code separately to restore on another profile.
+This approach and its packaged dependency still require release review.
 
 ## Decisions still required
 
-- Select a vetted encrypted SQLite approach and a key storage method. Include
-  journals, temporary files, and crash recovery in tests.
-- Design encrypted backups that can be restored on a different computer after
-  the original Windows profile is lost. Test wrong key, interrupted export,
-  and restoration against a fresh installation.
+- Verify the packaged SQLCipher binding, journals, temporary files, crash
+  recovery, and key handling on clean supported Windows installations.
+- Test encrypted backup restoration after the original Windows profile is lost,
+  including wrong keys, interrupted exports, and older plaintext backups.
 - Define supported IBKR account types, base currencies, instruments, report
   formats, and historical coverage limits before the importer can claim a
   complete result.

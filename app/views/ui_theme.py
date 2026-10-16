@@ -13,6 +13,11 @@ COLORS = {
         "checkbox_checked": "#087da8",
         "sync_green": "#167347", "sync_green_hover": "#0f5d39",
         "sync_red": "#b72b34", "sync_red_hover": "#91222a",
+        "series": ["#087da8", "#54836e", "#b8794f", "#7a6aa8", "#b78b44", "#6285a0"],
+        "unclassified": "#939da5", "zero": "#647789",
+        "bar_positive": "#137333", "bar_negative": "#b3261e",
+        "grid_neutral_text": "#30343b", "grid_default_text": "#1d2b3a",
+        "grid_warning_text": "#9b4917",
     },
     "dark": {
         "canvas": "#0b0b0d", "surface": "#171719", "surface_alt": "#222225",
@@ -23,11 +28,25 @@ COLORS = {
         "checkbox_checked": "#77777e",
         "sync_green": "#187a4d", "sync_green_hover": "#14643f",
         "sync_red": "#c23d45", "sync_red_hover": "#a92f36",
+        "series": ["#8ac5dc", "#73b69b", "#dda878", "#ae9bd1", "#d4b66f", "#94afcf"],
+        "unclassified": "#8b8b92", "zero": "#aaaab0",
+        "bar_positive": "#52c7a6", "bar_negative": "#ff8b91",
+        "grid_neutral_text": "#f0f0f2", "grid_default_text": "#f0f0f2",
+        "grid_warning_text": "#ffb871",
     },
 }
 
 TOOLBAR_ITEM_SPACING = 8
 TOOLBAR_GROUP_SPACING = 16
+
+PAGE_MARGINS = (14, 12, 14, 12)
+PAGE_SPACING = 8
+SUBPAGE_MARGINS = (0, 10, 0, 0)
+CARD_MARGINS = (12, 8, 12, 8)
+DIALOG_MARGINS = (20, 18, 20, 18)
+DIALOG_SPACING = 10
+SPLITTER_HANDLE = 8
+CONTROL_HEIGHT = 32
 
 
 def style_toolbar_dropdown(widget):
@@ -72,7 +91,19 @@ QListWidget#helpNavigation::item { padding: 9px 10px; margin: 2px; border-radius
 QListWidget#helpNavigation::item:selected { background: ${selection}; color: ${selection_text}; }
 QListWidget#helpNavigation::item:hover:!selected { background: ${accent_soft}; }
 QLabel#heading { color: ${text}; font-size: 19px; font-weight: 650; }
+QLabel#sectionTitle { color: ${text}; font-size: 14px; font-weight: 600; }
+QLabel#fieldLabel { color: ${muted}; font-size: 12px; }
 QLabel#metricLabel, QLabel#hint { color: ${muted}; font-size: 12px; }
+QWidget#card { background: ${surface}; border: 1px solid ${line}; border-radius: 6px; }
+QLabel#chartHoverCard {
+    background: ${surface}; color: ${text}; border: 1px solid ${accent};
+    border-radius: 6px; padding: 8px 10px; font-size: 13px;
+}
+QWidget#chartHoverLine { background: ${accent}; }
+QPlainTextEdit {
+    background: ${surface}; color: ${text}; border: 1px solid ${line};
+    border-radius: 4px; padding: 6px;
+}
 QWidget#historyImportForm { background: ${surface}; border: 1px solid ${line}; border-radius: 6px; }
 QLabel#historyFieldLabel { color: ${muted}; font-size: 12px; }
 QLabel#historyProgressLabel { color: ${text}; font-size: 12px; }
@@ -118,13 +149,15 @@ QPushButton#secondary, QPushButton#themeToggle {
 QPushButton#secondary:hover, QPushButton#themeToggle:hover {
     background: ${accent_soft}; border-color: ${accent};
 }
-QPushButton#rebalanceSyncButton {
-    background: ${surface}; color: ${text}; border-color: ${line};
+QPushButton#danger {
+    background: ${surface}; color: ${negative}; border-color: ${negative};
 }
-QPushButton#rebalanceSyncButton:hover {
-    background: ${accent_soft}; border-color: ${accent};
+QPushButton#danger:hover { background: ${accent_soft}; border-color: ${negative}; }
+QPushButton#link, QToolButton#link {
+    background: transparent; color: ${accent}; border: 0; padding: 2px 0;
+    font-weight: 600; min-height: 0;
 }
-QPushButton#rebalanceSyncButton:focus { border: 2px solid ${accent}; }
+QPushButton#link:hover, QToolButton#link:hover { color: ${accent_hover}; }
 QComboBox#toolbarDropdown, QPushButton#toolbarDropdown {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 4px; padding: 5px 8px; font-weight: 600;

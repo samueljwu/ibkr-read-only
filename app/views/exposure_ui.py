@@ -8,18 +8,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGridLayout, QHBoxL
                                QVBoxLayout, QWidget)
 
 from app.finance.exposure import add_custom_set, custom_sets, exposure_mix, exposure_snapshot
+from app.views import widgets
 from app.views.exposure_custom_ui import CustomSetDialog
-from app.views.table_ui import ReportTable, SortItem
+from app.views.table_ui import ReportTable, SortItem, money as _money, percent
 from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
 
 
-def _money(value):
-    return "—" if value is None else f"${value:,.2f}"
-
-
 def _percent(value, nav):
-    return "—" if value is None or not nav else f"{value / nav * 100:+,.2f}%"
+    return percent(value / nav * 100) if value is not None and nav else "—"
 
 
 class ExposurePanel(QWidget):
@@ -97,8 +94,7 @@ class ExposurePanel(QWidget):
         mix_layout = QVBoxLayout(self.mix_pane)
         mix_layout.setContentsMargins(0, 0, 0, 0)
         mix_layout.setSpacing(5)
-        self.mix_heading = QLabel("Adjusted exposure mix")
-        self.mix_heading.setObjectName("helpSection")
+        self.mix_heading = widgets.section_title("Adjusted exposure mix")
         mix_layout.addWidget(self.mix_heading)
         self.chart_layout = QBoxLayout(QBoxLayout.LeftToRight)
         self.chart_layout.setSpacing(8)
@@ -113,6 +109,11 @@ class ExposurePanel(QWidget):
         self.groups.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.groups.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.groups.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.groups.configure_numbers(db, f"exposure_groups_decimals_{portfolio_id}",
+                                      {1: (2, "usd"), 2: (1, "percent")})
+        self.groups.setSortingEnabled(True)
+        self.groups.sortItems(1, Qt.DescendingOrder)
+        self.groups.remember_layout(db, f"exposure_groups_layout_{portfolio_id}")
         self.groups.itemSelectionChanged.connect(self._category_selected)
         self.chart_layout.addWidget(self.groups, 3)
         mix_layout.addLayout(self.chart_layout, 1)
@@ -125,8 +126,7 @@ class ExposurePanel(QWidget):
         positions_layout.setContentsMargins(0, 0, 0, 0)
         positions_layout.setSpacing(5)
         positions_header = QHBoxLayout()
-        self.positions_heading = QLabel("Positions · All categories")
-        self.positions_heading.setObjectName("helpSection")
+        self.positions_heading = widgets.section_title("Positions · All categories")
         positions_header.addWidget(self.positions_heading)
         self.clear_filter_button = QPushButton("Clear filter")
         self.clear_filter_button.setObjectName("secondary")
@@ -337,13 +337,11 @@ class ExposurePanel(QWidget):
             positions = []
         mix = exposure_mix(positions, group_field, value_field)
         categories = sorted({row[group_field] for row in positions}, key=str.casefold)
-        palette = (["#087da8", "#54836e", "#b8794f", "#7a6aa8", "#b78b44", "#6285a0"]
-                   if self.palette_name == "light" else
-                   ["#8ac5dc", "#73b69b", "#dda878", "#ae9bd1", "#d4b66f", "#94afcf"])
-        color_by_category = {name: ("#939da5" if name == "Unclassified" else
+        colors = COLORS[self.palette_name]
+        palette = colors["series"]
+        color_by_category = {name: (colors["unclassified"] if name == "Unclassified" else
                                     palette[index % len(palette)])
                              for index, name in enumerate(categories)}
-        colors = COLORS[self.palette_name]
         chart = QChart()
         chart.setBackgroundVisible(True)
         chart.setBackgroundBrush(QColor(colors["surface"]))
@@ -381,6 +379,9 @@ class ExposurePanel(QWidget):
                                        for row in positions) for name in categories}
         categories.sort(key=lambda name: (-gross_by_category.get(name, 0), name))
         self._rendering = True
+        header = self.groups.horizontalHeader()
+        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
+        self.groups.setSortingEnabled(False)
         try:
             self.groups.setRowCount(len(categories))
             for index, category in enumerate(categories):
@@ -391,17 +392,19 @@ class ExposurePanel(QWidget):
                 label = SortItem(f"● {category}", category.casefold())
                 label.setForeground(QColor(color_by_category[category]))
                 label.setData(Qt.UserRole, category)
-                gross_item = SortItem(_money(gross), gross)
-                share_item = SortItem(f"{share:,.1f}%" if share is not None else "—", share)
+                gross_item = self.groups.numeric_item(1, gross)
+                share_item = self.groups.numeric_item(2, share)
                 for column, item in enumerate((label, gross_item, share_item)):
                     item.setToolTip((f"{category} · {_money(gross)} gross"
                                      + (f" · {missing_by_category[category]} unavailable"
                                         if missing_by_category[category] else "")))
                     self.groups.setItem(index, column, item)
+            self.groups.setSortingEnabled(True)
+            self.groups.sortItems(sort_column if 0 <= sort_column < self.groups.columnCount() else 1,
+                                  sort_order)
             self.groups.clearSelection()
-            matched = next((index for index, category in enumerate(categories)
-                            if category == self.category_filter), None)
-            if matched is not None:
+            matched = self.groups.row_for_key(self.category_filter)
+            if matched >= 0:
                 self.groups.selectRow(matched)
             else:
                 self.category_filter = None

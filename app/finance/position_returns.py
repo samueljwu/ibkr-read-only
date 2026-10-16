@@ -1,12 +1,37 @@
 """Cumulative, auditable USD results for every recorded security position."""
 
 from collections import defaultdict
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 
 from app.finance.calculations import valid_multiplier, valid_price
 
 
 INCOME_KINDS = {"Dividend", "Payment in lieu", "Withholding tax", "Bond interest"}
+
+
+def _cash_covered(windows, first, last):
+    """Whether complete Cash Flex windows cover every calendar day in the period."""
+    cursor = date.fromisoformat(first)
+    end = date.fromisoformat(last)
+    for start, stop in windows:
+        left, right = date.fromisoformat(start), date.fromisoformat(stop)
+        if right < cursor:
+            continue
+        if left > cursor:
+            return False
+        cursor = max(cursor, right + timedelta(days=1))
+        if cursor > end:
+            return True
+    return cursor > end
+
+
+def _trade_accrued_cash(movement):
+    """The Trade accruedInt already represents these Cash Transaction entries."""
+    description = (movement["description"] or "").strip().casefold()
+    return (movement["income_type"] == "Bond interest" and
+            description.startswith(("accrued interest paid", "accrued interest received")))
 
 
 def _usd_amount(db, movement, fx_cache):
@@ -41,6 +66,8 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
     sell_by_match = {match["match_id"]: match["sell_trade_id"]
                      for match in db.rows("trade_matches", portfolio_id)}
     fx_cache = {}
+    account_id = db.setting("ib_account_id")
+    cash_windows = db.completed_flex_windows(account_id)["cash"]
 
     by_con_id, by_symbol = defaultdict(set), defaultdict(set)
     for position in positions.values():
@@ -51,7 +78,7 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                 by_symbol[symbol.strip().upper()].add(position["id"])
 
     movements = [m for m in db.cash_movement_rows(portfolio_id)
-                 if m["income_type"] != "Transaction tax" and
+                 if m["income_type"] != "Transaction tax" and not _trade_accrued_cash(m) and
                  (m["kind"] in INCOME_KINDS or m["income_type"] == "Bond interest")]
     assigned, unattributed = defaultdict(list), []
     transaction_positions = defaultdict(set)
@@ -115,6 +142,17 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
             issues.append("Position difference")
         if any(t["security_type"] != position["security_type"] for t in position_trades):
             issues.append("Security type mismatch")
+        first_trade = min((t["trade_date"] for t in position_trades if t["trade_date"]), default=None)
+        estimated_baseline = next((t["trade_date"] for t in position_trades
+                                   if t["source"] == "CSV market baseline"), None)
+        last_trade = max((t["trade_date"] for t in position_trades if t["trade_date"]), default=None)
+        last_income = max((m["reported_day"] for m in assigned[position_id]), default=None)
+        cash_through = ((date.today() - timedelta(days=1)).isoformat() if open_position else
+                        max((day for day in (last_trade, last_income) if day), default=None))
+        cash_from = ((date.fromisoformat(estimated_baseline) + timedelta(days=1)).isoformat()
+                     if estimated_baseline else first_trade)
+        if not cash_from or not cash_through or not _cash_covered(cash_windows, cash_from, cash_through):
+            issues.append("Cash history incomplete")
 
         realized = (sum(float(l["realized_net"]) for l in closed)
                     if all(l.get("realized_net") is not None for l in closed) and not unmatched
@@ -139,19 +177,42 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
             detail = dict(movement)
             detail["amount_usd"] = _usd_amount(db, movement, fx_cache)
             income_details.append(detail)
+        if position["security_type"] == "BOND":
+            for trade in position_trades:
+                accrued = float(trade["accrued_interest_usd"] or 0)
+                if accrued:
+                    income_details.append({"source_key": f"trade-accrued:{trade['id']}",
+                        "reported_day": trade["trade_date"], "kind": "Bond interest",
+                        "income_type": "Accrued interest", "amount": str(accrued),
+                        "amount_usd": accrued, "currency": "USD", "fx_to_usd": "1",
+                        "description": "Accrued interest paid" if accrued < 0 else "Accrued interest received",
+                        "transaction_id": trade["trade_id"]})
+            if open_position:
+                accrued = valuation.get("bond_accrued_interest_usd")
+                try:
+                    accrued = float(accrued)
+                except (TypeError, ValueError):
+                    accrued = None
+                if accrued is None or not isfinite(accrued):
+                    issues.append("Bond accrued interest unavailable")
+                else:
+                    income_details.append({"source_key": f"open-accrued:{position_id}",
+                        "reported_day": date.today().isoformat(), "kind": "Bond interest",
+                        "income_type": "Unpaid accrued interest", "amount": str(accrued),
+                        "amount_usd": accrued, "currency": "USD", "fx_to_usd": "1",
+                        "description": "Current accrued interest receivable", "transaction_id": ""})
+        income_details.sort(key=lambda item: (item["reported_day"], item["source_key"]))
         income = (sum(d["amount_usd"] for d in income_details)
                   if all(d["amount_usd"] is not None for d in income_details) else None)
         if income is None:
             issues.append("Income FX missing")
-        first_trade = min((t["trade_date"] for t in position_trades if t["trade_date"]), default=None)
-        last_trade = max((t["trade_date"] for t in position_trades if t["trade_date"]), default=None)
-        if first_trade and any(m["reported_day"] < first_trade for m in income_details):
+        if first_trade and any(m["reported_day"] < first_trade for m in assigned[position_id]):
             issues.append("Income predates recorded trades")
         if unattributed:
             issues.append("Unattributed income")
         total = (realized + unrealized + income
-                 if realized is not None and unrealized is not None and income is not None and
-                 not unattributed and not issues else None)
+                 if realized is not None and unrealized is not None and income is not None and not issues
+                 else None)
         cost = 0.0
         cost_valid = True
         for trade in position_trades:
@@ -164,6 +225,9 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                 break
             cost += float(trade["quantity"]) * float(trade["price"]) * multiplier * fx
             cost += float(trade["commission_usd"])
+            # accrued_interest_usd is negative on a BUY (cash paid out), so subtracting
+            # it increases cost, mirroring the closed_lot/open_lot proration convention.
+            cost -= float(trade["accrued_interest_usd"] or 0)
         percent = total / cost * 100 if total is not None and cost_valid and cost > 0 and not short else None
         if not cost_valid:
             issues.append("Purchase cost missing")
@@ -175,6 +239,7 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                      "total": total, "percent": percent, "cost": cost if cost_valid else None,
                      "issues": issues, "lots": position_lots, "income_details": income_details,
                      "first_trade": first_trade, "last_trade": last_trade,
+                     "estimated_baseline": estimated_baseline,
                      "price_source": valuation.get("price_source") or "",
                      "last_updated": valuation.get("last_updated") or ""})
     return rows, unattributed

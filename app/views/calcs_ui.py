@@ -4,20 +4,20 @@ import json
 import math
 import re
 import time
-from copy import deepcopy
-from datetime import date, datetime
+from datetime import date
 
 from PySide6.QtCore import QByteArray, QEvent, QSize, QStringListModel, Qt, QTimer
-from PySide6.QtGui import QActionGroup, QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QCompleter, QDoubleSpinBox, QGridLayout, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSizePolicy,
+                               QHeaderView, QLabel, QLineEdit, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from app.finance.calcs import calculate_targets, scale_target_weights, scenario_metrics
 from app.finance.calculations import choose_price, valid_price
 from app.market.market_data import IBKRMarketDataProvider
-from app.views.table_ui import InputReportTable, SortItem
-from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
+from app.views import widgets
+from app.views.table_ui import InputReportTable, SortItem, build_header_menu
+from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
 
 
@@ -48,8 +48,6 @@ class CalcsTab(QWidget):
         self._search_request = None
         self._search_labels = {}
         self._last_idea_quote_cache_at = 0.0
-        self._frozen_snapshot = None
-        self._theme = "light"
         self._keyboard_controls = {}
         self._scenario_controls = {}
         self._setting_key = f"calcs_targets_{portfolio_id}"
@@ -71,8 +69,7 @@ class CalcsTab(QWidget):
         self._load_ideas()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(6)
+        widgets.apply_layout(layout, "page")
         top = QHBoxLayout()
         top.setSpacing(TOOLBAR_GROUP_SPACING)
         self.mode_label = QLabel()
@@ -94,14 +91,6 @@ class CalcsTab(QWidget):
         self.view_choice.currentIndexChanged.connect(lambda: self._set_view_mode(self.view_choice.currentData()))
         view_controls.addWidget(self.view_choice)
         top.addLayout(view_controls)
-        self.pause_button = QPushButton("Pause updates")
-        self.pause_button.setObjectName("rebalanceSyncButton")
-        self.pause_button.setProperty("syncState", "active")
-        self.pause_button.setIconSize(QSize(12, 12))
-        self._update_pause_icon()
-        self.pause_button.setToolTip("Freeze prices, weights and cash in Rebalance while the other tabs keep syncing")
-        self.pause_button.clicked.connect(self.toggle_pause)
-        top.addWidget(self.pause_button)
         reset = QPushButton("Reset targets")
         reset.setObjectName("secondary")
         reset.clicked.connect(self.reset_targets)
@@ -138,17 +127,15 @@ class CalcsTab(QWidget):
         layout.addWidget(self.idea_notice)
 
         cash_panel = QWidget()
-        cash_panel.setObjectName("calcsCashPanel")
+        cash_panel.setObjectName("card")
         cash_panel.setMinimumHeight(92)
         cash_layout = QGridLayout(cash_panel)
         cash_layout.setContentsMargins(12, 5, 12, 5)
         cash_layout.setHorizontalSpacing(18)
-        title = QLabel("Cash allocation")
-        title.setObjectName("calcsCashTitle")
+        title = widgets.section_title("Cash allocation")
         cash_layout.addWidget(title, 0, 0, 1, 3)
         for column, title in enumerate(("Current cash / weight", "Target weight · input", "Cash change")):
-            label = QLabel(title)
-            label.setObjectName("calcsFieldLabel")
+            label = widgets.field_label(title)
             cash_layout.addWidget(label, 1, column)
         self.cash_value = QLabel("—")
         self.cash_editor = QDoubleSpinBox()
@@ -217,57 +204,6 @@ class CalcsTab(QWidget):
         self.view_mode = mode
         self.db.set_setting(self._view_key, mode)
         self._apply_view_mode()
-
-    @property
-    def updates_paused(self):
-        return self._frozen_snapshot is not None
-
-    def set_theme(self, theme):
-        self._theme = theme if theme in COLORS else "light"
-        self._update_pause_icon()
-
-    def _update_pause_icon(self):
-        color = COLORS[self._theme]["sync_green" if self.updates_paused else "sync_red"]
-        pixmap = QPixmap(12, 12)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(color))
-        painter.drawEllipse(2, 2, 8, 8)
-        painter.end()
-        self.pause_button.setIcon(QIcon(pixmap))
-
-    def toggle_pause(self):
-        if self.updates_paused:
-            self._frozen_snapshot = None
-            self.pause_button.setText("Pause updates")
-            self.pause_button.setToolTip("Freeze prices, weights and cash in Rebalance while the other tabs keep syncing")
-        else:
-            holdings = deepcopy([row for row in self.service.portfolio_rows()
-                                 if abs(float(row.get("position_qty") or 0)) > 1e-9])
-            self._reconcile_acquired_ideas(holdings)
-            self._frozen_snapshot = {
-                "holdings": holdings,
-                "ideas": deepcopy(self._idea_rows()),
-                "nav": self.db.effective_nav(self.portfolio_id),
-                "cash_record": deepcopy(self.db.account_value(self.portfolio_id, "TotalCashValue")),
-                "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            self.pause_button.setText("Resume updates")
-            self.pause_button.setToolTip("Rebalance is frozen; click to use the latest prices, weights and cash")
-        self.pause_button.setProperty("syncState", "paused" if self.updates_paused else "active")
-        self._update_pause_icon()
-        self.refresh()
-
-    def _update_frozen_idea(self, ticker):
-        if not self.updates_paused:
-            return
-        idea_id = f"idea:{ticker}"
-        self._frozen_snapshot["ideas"] = [row for row in self._frozen_snapshot["ideas"]
-                                          if row["id"] != idea_id]
-        self._frozen_snapshot["ideas"].extend(row for row in self._idea_rows()
-                                              if row["id"] == idea_id)
 
     def _apply_view_mode(self):
         visible = ({0, 1, 2, 3, 4, 5, 6, 15} if self.view_mode == "allocation" else
@@ -504,7 +440,6 @@ class CalcsTab(QWidget):
             self._save_ideas()
             if isinstance(self.market, IBKRMarketDataProvider):
                 self.market.set_idea_contracts(self.ideas)
-            self._update_frozen_idea(ticker)
             self.idea_input.clear()
             self._selected_contract = None
             self.idea_notice.hide()
@@ -515,7 +450,6 @@ class CalcsTab(QWidget):
 
     def _remove_idea(self, ticker):
         self.ideas.pop(ticker, None)
-        self._update_frozen_idea(ticker)
         if isinstance(self.market, IBKRMarketDataProvider):
             self.market.set_idea_contracts(self.ideas)
         self.targets.pop(f"idea:{ticker}", None)
@@ -672,37 +606,13 @@ class CalcsTab(QWidget):
         self.refresh()
 
     def _build_header_menu(self, column):
-        menu = QMenu(self)
-        menu.addAction("Sort ascending", lambda: self.table.sortItems(column, Qt.AscendingOrder))
-        menu.addAction("Sort descending", lambda: self.table.sortItems(column, Qt.DescendingOrder))
-        if column in self.NUMERIC_COLUMNS:
-            decimals_menu = QMenu("Decimal places", menu)
-            menu.addMenu(decimals_menu)
-            group = QActionGroup(decimals_menu)
-            group.setExclusive(True)
-            for places in range(4):
-                action = decimals_menu.addAction(f"{places} decimal place{'s' if places != 1 else ''}")
-                action.setCheckable(True)
-                action.setChecked(self.decimals_for(column) == places)
-                group.addAction(action)
-                action.triggered.connect(lambda checked=False, number=column, count=places:
-                                         self.set_column_decimals(number, count))
-            custom = decimals_menu.addAction("Custom…")
-            custom.setCheckable(True)
-            custom.setChecked(self.decimals_for(column) > 3)
-            group.addAction(custom)
-            custom.triggered.connect(lambda checked=False, number=column:
-                                     self._choose_column_decimals(number))
-        menu.addSeparator()
-        menu.addAction("Hide column", lambda: self.table.hideColumn(column))
-        menu.addAction("Show all columns", lambda: self.table._show_all_columns())
-        return menu
-
-    def _choose_column_decimals(self, column):
-        places, accepted = QInputDialog.getInt(self, "Custom decimal places",
-                                                "Decimal places (0–30):", self.decimals_for(column), 0, 30)
-        if accepted:
-            self.set_column_decimals(column, places)
+        header = self.table.horizontalHeader()
+        sort = lambda col, ascending: self.table.sortItems(
+            col, Qt.AscendingOrder if ascending else Qt.DescendingOrder)
+        decimals = (self.decimals_for, self.set_column_decimals) if column in self.NUMERIC_COLUMNS else None
+        labels = [self.table.horizontalHeaderItem(index).text() if self.table.horizontalHeaderItem(index) else ""
+                  for index in range(self.table.columnCount())]
+        return build_header_menu(self, header, column, sort=sort, decimals=decimals, labels=labels)
 
     def _header_menu(self, point):
         header = self.table.horizontalHeader()
@@ -842,11 +752,7 @@ class CalcsTab(QWidget):
             self._scenario_value_changed(position_id, "up" if column == 9 else "down", value)
 
     def _row_for_position(self, position_id):
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item and item.data(Qt.UserRole) == position_id:
-                return row
-        return -1
+        return self.table.row_for_key(position_id)
 
     def _keep_editor_column_wide(self, column, _old, width):
         minimum = {4: 145, 8: 100, 9: 180, 11: 110, 12: 180}.get(column)
@@ -1095,15 +1001,13 @@ class CalcsTab(QWidget):
             header = self.table.horizontalHeader()
             sort_column = header.sortIndicatorSection() if self.table.isSortingEnabled() else 0
             sort_order = header.sortIndicatorOrder() if self.table.isSortingEnabled() else Qt.AscendingOrder
-            snapshot = self._frozen_snapshot
-            rows = (deepcopy(snapshot["holdings"]) if snapshot else
-                    [row for row in (source_rows if source_rows is not None
-                                     else self.service.portfolio_rows())
-                     if abs(float(row.get("position_qty") or 0)) > 1e-9])
+            rows = [row for row in (source_rows if source_rows is not None
+                                   else self.service.portfolio_rows())
+                    if abs(float(row.get("position_qty") or 0)) > 1e-9]
             self._reconcile_acquired_ideas(rows)
-            rows.extend(deepcopy(snapshot["ideas"]) if snapshot else self._idea_rows())
-            nav = snapshot["nav"] if snapshot else self.db.effective_nav(self.portfolio_id)
-            cash_record = snapshot["cash_record"] if snapshot else self.db.account_value(self.portfolio_id, "TotalCashValue")
+            rows.extend(self._idea_rows())
+            nav = self.db.effective_nav(self.portfolio_id)
+            cash_record = self.db.account_value(self.portfolio_id, "TotalCashValue")
             if cash_record and cash_record["currency"] == "USD":
                 cash = cash_record["value"]
                 cash_note = f"IBKR TotalCashValue as of {cash_record['as_of']}"
@@ -1139,9 +1043,8 @@ class CalcsTab(QWidget):
                 if not isinstance(target, (int, float)) or not math.isfinite(target):
                     target = 0
                 self._shown_targets[str(row["id"])] = target
-                snapshot_note = f"Paused Rebalance snapshot · {snapshot['as_of']}\n" if snapshot else ""
                 self._cell(index, 0, row["display_ticker"],
-                           tip=snapshot_note + str(row.get("contract_tooltip") or row.get("price_source") or ""),
+                           tip=str(row.get("contract_tooltip") or row.get("price_source") or ""),
                            position_id=row["id"])
                 self._cell(index, 1, self._number(row["position_qty"], 1), sort_value=row["position_qty"])
                 self._cell(index, 2, self._number(row.get("value"), 2), sort_value=row.get("value"))
@@ -1170,7 +1073,7 @@ class CalcsTab(QWidget):
                     self._idea_price_editor(index, row["ib_symbol"], current_price, reuse=in_place)
                 else:
                     self._cell(index, 7, self._number(current_price, 7, f" {currency}"),
-                               tip=snapshot_note + str(row.get("price_source") or "Current price unavailable"),
+                               tip=str(row.get("price_source") or "Current price unavailable"),
                                sort_value=current_price)
                 scenario = self._scenario_for(row["id"])
                 metrics = scenario_metrics(current_price, scenario["up_mode"], scenario["up_value"],
@@ -1209,7 +1112,7 @@ class CalcsTab(QWidget):
             cash_weight = cash / nav if cash is not None and nav and nav > 0 else None
             self.cash_value.setText("—" if cash is None else
                                     f"${cash:,.2f}  ·  " + (_text(cash_weight * 100, 4) + "%" if cash_weight is not None else "weight unavailable"))
-            self.cash_value.setToolTip((f"Paused Rebalance snapshot · {snapshot['as_of']}\n" if snapshot else "") + cash_note)
+            self.cash_value.setToolTip(cash_note)
             cash_target = calc.get("cash_target")
             if cash_target is None:
                 cash_target = self.cash_target if self.mode == "proportional" else cash_weight
@@ -1220,8 +1123,7 @@ class CalcsTab(QWidget):
             cash_gap = calc.get("cash_gap")
             self.cash_gap.setText("—" if cash_gap is None else
                                   ("Increase " if cash_gap >= 0 else "Decrease ") + f"${abs(cash_gap):,.2f}")
-            self.mode_label.setText(("Paused · " if snapshot else "") +
-                                    ("Cash target scales position weights" if self.mode == "proportional"
+            self.mode_label.setText(("Cash target scales position weights" if self.mode == "proportional"
                                      else "Individual targets") +
                                     (f"  ·  NAV ${nav:,.2f}" if nav is not None else ""))
             if calc["error"]:

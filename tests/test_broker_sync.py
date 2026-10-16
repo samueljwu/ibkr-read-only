@@ -223,6 +223,78 @@ def test_bond_redemption_uses_percent_of_par_and_rebate_sign(tmp_path):
         db.conn.close()
 
 
+def test_bond_buy_accrued_interest_stored_signed_negative(tmp_path):
+    db = Database(tmp_path / "bond_buy_accrued.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
+        <Trade levelOfDetail="EXECUTION" tradeID="B2" ibExecID="BOND.02" tradeDate="20240101"
+          buySell="BUY" quantity="1000" tradePrice="95" conid="900000004" symbol="TESTBOND2"
+          currency="USD" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="USD"
+          accruedInt="12.5" fxRateToBase="1"/>
+        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
+        records, _ = parse_flex_xml(xml, ACCOUNT)
+        assert records[0]["raw"]["accruedInt"] == "12.5"
+        ingestor.ingest_many(records, "flex")
+        bond = db.rows("trades", 1)[0]
+        # Negative: accrued interest adds to the buyer's cash paid out at settlement.
+        assert bond["accrued_interest_usd"] == pytest.approx(-12.5)
+    finally:
+        db.conn.close()
+
+
+def test_bond_sell_accrued_interest_stored_signed_positive(tmp_path):
+    db = Database(tmp_path / "bond_sell_accrued.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
+        <Trade levelOfDetail="EXECUTION" tradeID="B3" ibExecID="BOND.03" tradeDate="20240101"
+          buySell="SELL" quantity="1000" tradePrice="97" conid="900000005" symbol="TESTBOND3"
+          currency="USD" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="USD"
+          accruedInt="8.25" fxRateToBase="1"/>
+        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
+        records, _ = parse_flex_xml(xml, ACCOUNT)
+        ingestor.ingest_many(records, "flex")
+        bond = db.rows("trades", 1)[0]
+        # Positive: accrued interest adds to the seller's cash received at settlement.
+        assert bond["accrued_interest_usd"] == pytest.approx(8.25)
+    finally:
+        db.conn.close()
+
+
+def test_bond_accrued_interest_converted_via_trade_fx_rate(tmp_path):
+    db = Database(tmp_path / "bond_fx_accrued.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
+        <Trade levelOfDetail="EXECUTION" tradeID="B4" ibExecID="BOND.04" tradeDate="20240101"
+          buySell="BUY" quantity="1000" tradePrice="95" conid="900000006" symbol="TESTBOND4"
+          currency="EUR" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="EUR"
+          accruedInt="10" fxRateToBase="1.1"/>
+        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
+        records, _ = parse_flex_xml(xml, ACCOUNT)
+        ingestor.ingest_many(records, "flex")
+        bond = db.rows("trades", 1)[0]
+        assert bond["accrued_interest_usd"] == pytest.approx(-11.0)
+    finally:
+        db.conn.close()
+
+
+def test_non_bond_instrument_ignores_stray_accrued_interest_attribute(tmp_path):
+    db = Database(tmp_path / "stray_accrued.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        # A stray accruedInt attribute on a non-bond trade must never be converted.
+        stock = execution(commission=-1, con_id=777, symbol="XYZ")
+        stock["raw"] = dict(stock.get("raw") or {}, accruedInt="999")
+        ingestor.ingest_many([stock], "tws")
+        row = db.rows("trades", 1)[0]
+        assert row["security_type"] == "STK"
+        assert row["accrued_interest_usd"] == 0
+    finally:
+        db.conn.close()
+
+
 def test_completed_forward_split_reconciles_closed_position(tmp_path):
     db = Database(tmp_path / "split.sqlite3")
     try:

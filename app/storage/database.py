@@ -1,16 +1,19 @@
 """Small SQLite store. Raw trades are never rewritten by lot matching."""
 
-import sqlite3
+from sqlcipher3 import dbapi2 as sqlite3
 import json
 import math
 import os
 from uuid import uuid4
+from secrets import token_hex
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
 from app.platform.paths import (default_data_dir, legacy_source_dir, local_config_path,
                                 new_portfolio_dir, user_data_dir)
+from app.platform import secret_store
+from app.storage.encryption import encrypted_copy, is_plaintext, open_database
 from app.finance.option_labels import option_label
 
 
@@ -26,20 +29,29 @@ POSITION_FIELDS = ("display_ticker", "ib_symbol", "security_type", "exchange", "
                    "currency", "local_symbol", "expiry", "option_right", "strike", "trading_class",
                    "multiplier", "position_qty", "average_cost", "fx_to_usd", "notes")
 TRADE_FIELDS = ("trade_id", "trade_date", "display_ticker", "ib_symbol", "side", "quantity",
-                "price", "security_type", "multiplier", "currency", "fx_to_usd", "commission_usd", "notes")
+                "price", "security_type", "multiplier", "currency", "fx_to_usd", "commission_usd",
+                "accrued_interest_usd", "notes")
 
 
 class Database:
-    def __init__(self, path=None):
+    def __init__(self, path=None, *, recovery_key=None):
+        new_default = path is None and not local_config_path().is_file()
         self.path = Path(path) if path is not None else self._default_path()
-        if self.path.is_file():
-            self._require_plain_sqlite(self.path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, timeout=30)
+        new_file = not self.path.is_file()
+        self.conn = open_database(self.path, key=recovery_key)
+        self.encrypted = not is_plaintext(self.path)
+        self._key = (recovery_key or secret_store.load_database_key(self.path)) if self.encrypted else None
+        self.recovery_code = self._key if (new_file or new_default) and self.encrypted else None
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA busy_timeout=30000")
-        self._init()
+        try:
+            self._init()
+            if recovery_key is not None:
+                secret_store.save_database_key(self.path, recovery_key)
+        except Exception:
+            self.conn.close()
+            raise
 
     @staticmethod
     def _require_plain_sqlite(path):
@@ -86,16 +98,25 @@ class Database:
         try:
             source = cls._legacy_database()
             if source is not None:
-                cls._require_plain_sqlite(source)
-                with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as original:
-                    with closing(sqlite3.connect(target)) as copied:
-                        original.backup(copied)
-                        if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                            raise RuntimeError("Copied portfolio database failed integrity check")
+                if is_plaintext(source):
+                    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as original:
+                        with closing(sqlite3.connect(target)) as copied:
+                            original.backup(copied)
+                            if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                                raise RuntimeError("Copied portfolio database failed integrity check")
+                            with copied:
+                                copied.execute("UPDATE settings SET value='' WHERE key='data_directory'")
+                else:
+                    key = secret_store.load_database_key(source)
+                    if key is None:
+                        cls._require_plain_sqlite(source)
+                    encrypted_copy(source, target, key)
+                    secret_store.save_database_key(target, key)
+                    with closing(open_database(target, key=key)) as copied:
                         with copied:
                             copied.execute("UPDATE settings SET value='' WHERE key='data_directory'")
             else:
-                with closing(sqlite3.connect(target)):
+                with closing(open_database(target)):
                     pass
             config_path.parent.mkdir(parents=True, exist_ok=True)
             with config_path.open("x", encoding="utf-8") as config:
@@ -228,7 +249,7 @@ class Database:
           portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), account_id TEXT NOT NULL,
           position_id INTEGER NOT NULL REFERENCES positions(id) ON DELETE CASCADE, as_of TEXT NOT NULL,
           symbol TEXT NOT NULL, currency TEXT NOT NULL,
-          quantity TEXT NOT NULL, source_hash TEXT NOT NULL,
+          quantity TEXT NOT NULL, source_hash TEXT NOT NULL, close_price TEXT, con_id INTEGER,
           PRIMARY KEY(portfolio_id, account_id, as_of, symbol, currency)
         );
         CREATE TABLE IF NOT EXISTS legacy_statement_sources (
@@ -309,7 +330,8 @@ class Database:
             "position_id": "INTEGER",
             "source": "TEXT NOT NULL DEFAULT 'manual'",
             "executed_at": "TEXT NOT NULL DEFAULT ''",
-            "security_type": "TEXT NOT NULL DEFAULT 'STK'", "multiplier": "REAL DEFAULT 1"})
+            "security_type": "TEXT NOT NULL DEFAULT 'STK'", "multiplier": "REAL DEFAULT 1",
+            "accrued_interest_usd": "REAL NOT NULL DEFAULT 0"})
         self._add_missing_columns("trade_matches", {"origin": "TEXT NOT NULL DEFAULT 'manual'"})
         self._add_missing_columns("account_history", {"daily_pnl_usd": "REAL"})
         self._add_missing_columns("cash_movements", {
@@ -317,7 +339,8 @@ class Database:
             "transaction_id": "TEXT NOT NULL DEFAULT ''", "fx_to_usd": "TEXT",
             "income_type": "TEXT NOT NULL DEFAULT ''"})
         added_opening_fields = self._add_missing_columns("legacy_position_openings", {
-            "symbol": "TEXT NOT NULL DEFAULT ''", "currency": "TEXT NOT NULL DEFAULT ''"})
+            "symbol": "TEXT NOT NULL DEFAULT ''", "currency": "TEXT NOT NULL DEFAULT ''",
+            "close_price": "TEXT", "con_id": "INTEGER"})
         with self.conn:
             if "symbol" in added_opening_fields:
                 self.conn.execute("""UPDATE legacy_position_openings SET symbol=COALESCE((
@@ -832,7 +855,7 @@ class Database:
         # A Flex sync may hold the writer lock. Quote caching is optional, so skip
         # that batch rather than blocking the UI behind the main 30-second timeout.
         try:
-            with closing(sqlite3.connect(self.path, timeout=0.05)) as cache_conn:
+            with closing(open_database(self.path, key=self._key, timeout=0.05)) as cache_conn:
                 with cache_conn:
                     cache_conn.executemany("""INSERT INTO market_quotes
                         (portfolio_id,account_id,position_id,con_id,price,source,as_of)
@@ -878,11 +901,12 @@ class Database:
         target_dir = Path(directory or self.setting("backup_directory") or self.path.parent / "backups")
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"portfolio-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3"
-        destination = sqlite3.connect(target)
-        try:
-            self.conn.backup(destination)
-        finally:
-            destination.close()
+        key = self._key or secret_store.load_database_key(self.path)
+        if key is None:
+            key = token_hex(32)
+            secret_store.save_database_key(self.path, key)
+            self.recovery_code = key
+        encrypted_copy(self.path, target, key)
         return target
 
     def configure_data_directory(self, directory):
@@ -893,10 +917,13 @@ class Database:
         temporary = target_dir / f".portfolio-{uuid4().hex}.sqlite3"
         created = False
         try:
-            with closing(sqlite3.connect(temporary)) as destination:
-                self.conn.backup(destination)
-                if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise RuntimeError("Copied portfolio database failed integrity check")
+            if self.encrypted:
+                encrypted_copy(self.path, temporary, self._key)
+            else:
+                with closing(sqlite3.connect(temporary)) as destination:
+                    self.conn.backup(destination)
+                    if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise RuntimeError("Copied portfolio database failed integrity check")
             os.replace(temporary, target)
             created = True
         except Exception:
@@ -907,6 +934,8 @@ class Database:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_temp = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
         try:
+            if self.encrypted:
+                secret_store.save_database_key(target, self._key)
             config_temp.write_text(json.dumps({"data_directory": str(target_dir)}), encoding="utf-8")
             os.replace(config_temp, config_path)
         except Exception:

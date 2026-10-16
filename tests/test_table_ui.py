@@ -78,6 +78,37 @@ def test_analytics_table_keeps_numeric_sort_and_precision_after_refresh(tmp_path
         db.conn.close()
 
 
+def test_pending_table_layout_is_saved_before_database_closes(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "layout.sqlite3")
+    table = ReportTable(0, 2)
+    try:
+        table.remember_layout(db, "layout")
+        table.horizontalHeader().resizeSection(0, 175)
+        assert table._layout_timer.isActive()
+        table.close()
+        assert not table._layout_timer.isActive()
+        assert db.setting("layout") is not None
+        db.conn.close()
+        app.processEvents()
+    finally:
+        table.close()
+        db.conn.close()
+
+
+def test_main_window_stops_pending_table_layouts_before_database_close(tmp_path):
+    from app.ui import MainWindow
+
+    QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path / "window.sqlite3")
+    table = window.analytics_tab.return_page.table
+    table.horizontalHeader().resizeSection(0, 175)
+    assert table._layout_timer.isActive()
+    window.close()
+    assert not table._layout_timer.isActive()
+    QApplication.instance().processEvents()
+
+
 def test_report_table_context_menu_copies_selected_text():
     app = QApplication.instance() or QApplication([])
     table = ReportTable(1, 1)
