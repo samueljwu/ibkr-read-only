@@ -13,7 +13,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel, QModelIndex, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
                                QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QTabWidget,
@@ -444,6 +444,9 @@ class DisplayAmountSpinBox(QDoubleSpinBox):
 class MainWindow(QMainWindow):
     DEFAULT_TAB_ORDER = ("Portfolio", "Trades", "Lots", "Cash", "Analytics", "Rebalance")
     TAB_LAYOUT_KEY = "tab_layout_v1"
+    MIN_ZOOM = 70
+    MAX_ZOOM = 150
+    ZOOM_STEP = 10
 
     def __init__(self, database_path=None, *, recovery_key=None):
         super().__init__()
@@ -453,6 +456,13 @@ class MainWindow(QMainWindow):
                     min(850, max(480, available.height() - 40)))
         self.db = (Database(database_path, recovery_key=recovery_key) if recovery_key is not None else
                    Database(database_path) if database_path else Database())
+        self._base_font = self.font()
+        saved_zoom = self.db.setting("ui_zoom_percent")
+        try:
+            zoom = int(saved_zoom)
+        except (TypeError, ValueError):
+            zoom = 100
+        self.zoom_percent = zoom if self.MIN_ZOOM <= zoom <= self.MAX_ZOOM and zoom % self.ZOOM_STEP == 0 else 100
         self._pending_data_directory = None
         self.log = configure_diagnostics(self.db.path, "monitor")
         self.log.info("Portfolio Monitor opened; database=%s", self.db.path)
@@ -594,6 +604,7 @@ class MainWindow(QMainWindow):
         self.analytics_tab = AnalyticsTab(self.db, self.service, self.portfolio_id)
         self.tabs.addTab(self.analytics_tab, "Analytics")
         self.calcs_tab = CalcsTab(self.db, self.service, self.portfolio_id)
+        self.calcs_tab.remove_row_shortcut.setEnabled(False)
         self.tabs.addTab(self.calcs_tab, "Rebalance")
         widgets.persist_tab_order(self.tabs, self.db, self.TAB_LAYOUT_KEY,
                                   ids=list(self.DEFAULT_TAB_ORDER), remember_active=True)
@@ -614,7 +625,8 @@ class MainWindow(QMainWindow):
         self._restore_columns()
         self._restore_default_views()
         self._update_summary_visibility()
-        self._apply_theme(self.db.setting("ui_theme") or "light")
+        self.theme = self.db.setting("ui_theme") or "light"
+        self._apply_zoom()
         self._sync_progress_active = True
         self._start_provider()
         if isinstance(self.market, IBKRMarketDataProvider):
@@ -677,7 +689,7 @@ class MainWindow(QMainWindow):
 
     def _apply_theme(self, theme):
         self.theme = theme if theme in ("light", "dark") else "light"
-        self.setStyleSheet(stylesheet(self.theme))
+        self.setStyleSheet(stylesheet(self.theme, self.zoom_percent))
         for visual in self.help_visuals:
             visual.set_theme(self.theme)
         self.analytics_tab.set_theme(self.theme)
@@ -700,6 +712,49 @@ class MainWindow(QMainWindow):
         theme = "light" if self.theme == "dark" else "dark"
         self.db.set_setting("ui_theme", theme)
         self._apply_theme(theme)
+
+    def _apply_zoom(self):
+        font = self._base_font
+        scaled_font = QFont(font)
+        if font.pointSizeF() > 0:
+            scaled_font.setPointSizeF(font.pointSizeF() * self.zoom_percent / 100)
+        else:
+            scaled_font.setPixelSize(round(font.pixelSize() * self.zoom_percent / 100))
+        self.setFont(scaled_font)
+        for table in self.findChildren(QTableView):
+            header = table.verticalHeader()
+            base = header.property("zoom_base_row_height")
+            if base is None:
+                base = header.defaultSectionSize()
+                header.setProperty("zoom_base_row_height", base)
+            header.setDefaultSectionSize(round(base * self.zoom_percent / 100))
+        self.zoom_level_action.setText(f"Zoom: {self.zoom_percent}%")
+        self.zoom_in_action.setEnabled(self.zoom_percent < self.MAX_ZOOM)
+        self.zoom_reset_action.setEnabled(self.zoom_percent != 100)
+        self._apply_theme(self.theme)
+
+    def set_zoom(self, percent):
+        percent = max(self.MIN_ZOOM, min(self.MAX_ZOOM, percent))
+        if percent == self.zoom_percent:
+            return
+        self.zoom_percent = percent
+        self.db.set_setting("ui_zoom_percent", str(percent))
+        self._apply_zoom()
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom_percent + self.ZOOM_STEP)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom_percent - self.ZOOM_STEP)
+
+    def _zoom_out_or_remove_rows(self):
+        table = self.calcs_tab.table
+        focus = QApplication.focusWidget()
+        if (self.tabs.currentWidget() is self.calcs_tab and focus is not None and
+                (focus is table or table.isAncestorOf(focus)) and
+                self.calcs_tab._zero_or_remove_selected_rows()):
+            return
+        self.zoom_out()
 
     def _update_pause_sync_button(self):
         action = "Resume sync" if self._sync_paused else "Pause sync"
@@ -1648,10 +1703,13 @@ class MainWindow(QMainWindow):
         for number, (keys, action) in enumerate((
             ("Ctrl+Tab / Ctrl+Shift+Tab", "Move to the next or previous tab"),
             ("Ctrl+Shift+H", "Show or hide the account summary"),
+            ("Ctrl++ / Ctrl+=", "Zoom in"),
+            ("Ctrl+-", "With the Rebalance table focused and one or more full rows selected, remove those ideas or set those holdings' targets to 0%. With only cells or partial rows selected, zoom out."),
+            ("Ctrl+Shift+-", "Always zoom out"),
+            ("Ctrl+0", "Reset zoom to 100%"),
             ("Enter / F2", "Open a selected input; Enter saves and moves down"),
             ("Esc", "Cancel an unfinished input"),
             ("Arrow keys", "Move between input cells, saving the current edit"),
-            ("Ctrl+-", "On a selected Rebalance row, remove an idea or set a holding target to 0%"),
             ("Shift+Space", "Select the current row"),
             ("Ctrl+Space", "Select the current column"),
             ("Ctrl+C", "Copy the selection"),
@@ -1698,6 +1756,18 @@ class MainWindow(QMainWindow):
         self.show_summary_action.setChecked(self._show_account_summary)
         self.show_summary_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
         self.show_summary_action.toggled.connect(self._set_account_summary_visible)
+        view_menu.addSeparator()
+        self.zoom_in_action = view_menu.addAction("Zoom in", self.zoom_in)
+        self.zoom_in_action.setShortcuts([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
+        self.zoom_out_action = view_menu.addAction("Zoom out", self.zoom_out)
+        self.zoom_out_action.setShortcut(QKeySequence("Ctrl+Shift+-"))
+        self.zoom_out_context_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.zoom_out_context_shortcut.setContext(Qt.WindowShortcut)
+        self.zoom_out_context_shortcut.activated.connect(self._zoom_out_or_remove_rows)
+        self.zoom_reset_action = view_menu.addAction("Reset zoom", lambda: self.set_zoom(100))
+        self.zoom_reset_action.setShortcut(QKeySequence("Ctrl+0"))
+        self.zoom_level_action = view_menu.addAction("Zoom: 100%")
+        self.zoom_level_action.setEnabled(False)
         view_menu.addSeparator()
         self.save_view_action = view_menu.addAction(
             "Save current tab view",

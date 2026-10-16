@@ -107,6 +107,15 @@ def test_visible_inputs_fit_across_tabs_and_settings(window, theme, width):
     window.settings_dialog.close()
 
 
+def test_zoomed_inputs_fit(window):
+    app = QApplication.instance()
+    window.set_zoom(150)
+    for index in range(window.tabs.count()):
+        window.tabs.setCurrentIndex(index)
+        app.processEvents()
+        _assert_input_text_fits(window.tabs.currentWidget())
+
+
 def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
     app = QApplication.instance() or QApplication([])
     db = Database(tmp_path / "input-fit.sqlite3")
@@ -759,7 +768,7 @@ def test_no_stray_stylesheets_or_hardcoded_colors_outside_theme_module():
             offenders.append(f"{path.name}: hardcoded hex color")
         for match in style_pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
-            if path.name == "ui.py" and "stylesheet(self.theme)" in text.splitlines()[line - 1]:
+            if path.name == "ui.py" and "stylesheet(self.theme, self.zoom_percent)" in text.splitlines()[line - 1]:
                 continue
             offenders.append(f"{path.name}:{line}: setStyleSheet(...)")
     assert not offenders, offenders

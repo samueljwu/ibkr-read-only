@@ -1,6 +1,7 @@
 """Shared color and spacing rules for the portfolio monitor."""
 
 from string import Template
+import re
 
 
 COLORS = {
@@ -245,5 +246,10 @@ QToolTip { background: ${surface}; color: ${text}; border: 1px solid ${line}; }
 """)
 
 
-def stylesheet(theme):
-    return STYLESHEET.substitute(COLORS[theme])
+def stylesheet(theme, zoom_percent=100):
+    style = STYLESHEET.substitute(COLORS[theme])
+    if zoom_percent == 100:
+        return style
+    return re.sub(r"(font-size:\s*)(\d+)px",
+                  lambda match: f"{match[1]}{max(1, round(int(match[2]) * zoom_percent / 100))}px",
+                  style)

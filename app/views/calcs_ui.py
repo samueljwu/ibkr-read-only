@@ -173,14 +173,14 @@ class CalcsTab(QWidget):
 
         self.table = CalcsTable(0, len(self.HEADERS))
         self.table.cash_editor = self.cash_editor
-        self.table.setToolTip("Tinted cells are editable. Drag column headers to reorder them. Arrows move between cells; Enter saves and moves down; Esc cancels an edit. Select a full row with Shift+Space, then Ctrl+- to remove an idea or set a holding's target to 0%.")
+        self.table.setToolTip("Tinted cells are editable. Drag column headers to reorder them. Arrows move between cells; Enter saves and moves down; Esc cancels an edit. Select full rows with Shift+Space, then Ctrl+- to remove ideas or set holdings' targets to 0%.")
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.verticalHeader().setDefaultSectionSize(25)
         self.remove_row_shortcut = QShortcut(QKeySequence("Ctrl+-"), self.table)
         self.remove_row_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-        self.remove_row_shortcut.activated.connect(self._zero_or_remove_selected_row)
+        self.remove_row_shortcut.activated.connect(self._zero_or_remove_selected_rows)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(65)
@@ -477,27 +477,45 @@ class CalcsTab(QWidget):
         self._save_scenarios()
         self.refresh()
 
-    def _zero_or_remove_selected_row(self):
+    def _zero_or_remove_selected_rows(self):
         selected_rows = self.table.selectionModel().selectedRows()
-        if len(selected_rows) != 1:
-            return
-        row = selected_rows[0].row()
-        if any(index.row() != row for index in self.table.selectedIndexes()):
-            return
-        item = self.table.item(row, 0)
-        if item is None:
-            return
-        position_id = item.data(Qt.UserRole)
-        if isinstance(position_id, str) and position_id.startswith("idea:"):
-            ticker = position_id.removeprefix("idea:")
-            if ticker not in self.ideas:
-                return
-            column = max(0, self.table.currentColumn())
-            self._remove_idea(ticker)
-            if self.table.rowCount():
-                self.table.select_cell(min(row, self.table.rowCount() - 1), column, focus=True)
-        elif position_id is not None:
-            self._position_changed(position_id, 0)
+        if not selected_rows:
+            return False
+        rows = sorted(index.row() for index in selected_rows)
+        position_ids = [item.data(Qt.UserRole) for row in rows
+                        if (item := self.table.item(row, 0)) is not None]
+        if not position_ids:
+            return False
+        column = max(0, self.table.currentColumn())
+        removed_ideas = False
+        zeroed_holdings = False
+        for position_id in position_ids:
+            if isinstance(position_id, str) and position_id.startswith("idea:"):
+                ticker = position_id.removeprefix("idea:")
+                if ticker in self.ideas:
+                    self.ideas.pop(ticker)
+                    self.targets.pop(position_id, None)
+                    self.scenarios.pop(position_id, None)
+                    removed_ideas = True
+            elif position_id is not None:
+                self.targets[str(position_id)] = 0.0
+                zeroed_holdings = True
+        if not removed_ideas and not zeroed_holdings:
+            return False
+        if removed_ideas:
+            if isinstance(self.market, IBKRMarketDataProvider):
+                self.market.set_idea_contracts(self.ideas)
+            self._save_ideas()
+            self._save_scenarios()
+        if zeroed_holdings:
+            self.mode = "individual"
+            self.cash_target = None
+            self._target_error = ""
+        self._save()
+        self.refresh()
+        if self.table.rowCount():
+            self.table.select_cell(min(rows[0], self.table.rowCount() - 1), column, focus=True)
+        return True
 
     def _idea_price_changed(self, ticker, value):
         if self._loading or ticker not in self.ideas or self.ideas[ticker].get("con_id"):

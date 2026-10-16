@@ -4,7 +4,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QPainter, QPalette, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget
@@ -36,6 +36,94 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
         window._history_process = None
     finally:
         window.close()
+
+
+def test_zoom_menu_shortcuts_and_saved_level(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    db_path = tmp_path / "zoom.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    try:
+        window.show()
+        app.processEvents()
+        table = window.views["Portfolio"]
+        base_row_height = table.verticalHeader().defaultSectionSize()
+        base_font_size = window.font().pointSizeF()
+        table.setFocus()
+        QTest.keyClick(table, Qt.Key_Equal, Qt.ControlModifier)
+        assert window.zoom_percent == 110
+        assert table.verticalHeader().defaultSectionSize() > base_row_height
+        assert window.font().pointSizeF() > base_font_size
+        QTest.keyClick(table, Qt.Key_Minus, Qt.ControlModifier)
+        assert window.zoom_percent == 100
+        window.zoom_in_action.trigger()
+        assert window.zoom_level_action.text() == "Zoom: 110%"
+        QTest.keyClick(table, Qt.Key_0, Qt.ControlModifier)
+        assert window.zoom_percent == 100
+        window.tabs.setCurrentWidget(window.calcs_tab)
+        window.calcs_tab.require_ibkr_ideas = False
+        window.calcs_tab.idea_input.setText("NEW")
+        window.calcs_tab.add_idea()
+        assert "NEW" in window.calcs_tab.ideas
+        idea_row = window.calcs_tab._row_for_position("idea:NEW")
+        window.calcs_tab.table.select_cell(idea_row, 4, focus=True)
+        QTest.keyClick(window.calcs_tab.table, Qt.Key_Space, Qt.ShiftModifier)
+        assert len(window.calcs_tab.table.selectionModel().selectedRows()) == 1
+        QTest.keyClick(window.calcs_tab.table, Qt.Key_Minus, Qt.ControlModifier)
+        assert "NEW" not in window.calcs_tab.ideas
+        assert window.zoom_percent == 100
+        for ticker in ("ONE", "TWO"):
+            window.calcs_tab.idea_input.setText(ticker)
+            window.calcs_tab.add_idea()
+        calcs_table = window.calcs_tab.table
+        first = window.calcs_tab._row_for_position("idea:ONE")
+        second = window.calcs_tab._row_for_position("idea:TWO")
+        calcs_table.selectionModel().select(
+            calcs_table.model().index(first, 0), QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        calcs_table.selectionModel().select(
+            calcs_table.model().index(second, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        assert len(calcs_table.selectionModel().selectedRows()) == 2
+        calcs_table.setFocus()
+        QTest.keyClick(calcs_table, Qt.Key_Minus, Qt.ControlModifier)
+        assert not {"ONE", "TWO"} & window.calcs_tab.ideas.keys()
+        assert window.zoom_percent == 100
+        window.calcs_tab.idea_input.setText("PART")
+        window.calcs_tab.add_idea()
+        partial_row = window.calcs_tab._row_for_position("idea:PART")
+        calcs_table.select_cell(partial_row, 4, focus=True)
+        assert not calcs_table.selectionModel().selectedRows()
+        QTest.keyClick(calcs_table, Qt.Key_Minus, Qt.ControlModifier)
+        assert "PART" in window.calcs_tab.ideas
+        assert window.zoom_percent == 90
+        window.set_zoom(100)
+        QTest.keyClick(calcs_table, Qt.Key_Space, Qt.ShiftModifier)
+        assert len(calcs_table.selectionModel().selectedRows()) == 1
+        window.zoom_out_action.trigger()
+        assert "PART" in window.calcs_tab.ideas
+        assert window.zoom_percent == 90
+        window.set_zoom(100)
+        window.calcs_tab.table.clearSelection()
+        window.calcs_tab.table.setFocus()
+        app.processEvents()
+        QTest.keyClick(window.calcs_tab.table, Qt.Key_Minus, Qt.ControlModifier)
+        assert window.zoom_percent == 90
+        window.set_zoom(100)
+        QTest.keyClick(window.calcs_tab.table, Qt.Key_Minus, Qt.ControlModifier | Qt.ShiftModifier)
+        assert window.zoom_percent == 90
+        window.set_zoom(150)
+        assert not window.zoom_in_action.isEnabled()
+        window.set_zoom(70)
+        window.zoom_out_action.trigger()
+        assert window.zoom_percent == 70
+        window.set_zoom(120)
+    finally:
+        window.close()
+    reopened = ui.MainWindow()
+    try:
+        assert reopened.zoom_percent == 120
+        assert reopened.views["Portfolio"].verticalHeader().defaultSectionSize() == round(base_row_height * 1.2)
+    finally:
+        reopened.close()
 
 
 def test_pause_button_pauses_active_job_and_resumes_pending_queue(tmp_path, monkeypatch):
@@ -1241,7 +1329,9 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
                      "Ctrl+Space", "Ctrl+C", "Ctrl+Tab", "Ctrl+Shift+Tab",
                      "Ctrl+Shift+H", "F1", "read-only"):
             assert term in guide
-        assert "Ctrl+-" in guide
+        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0", "one or more full rows",
+                     "only cells or partial rows selected, zoom out"):
+            assert term in guide
         for visual, label in zip(window.help_visuals, (
                 "Sync IBKR", "Hide closed", "Adjusted NAV change", "Show")):
             assert label in " ".join(child.text() for child in visual.findChildren(QLabel))

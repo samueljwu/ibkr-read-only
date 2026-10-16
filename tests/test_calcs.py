@@ -650,7 +650,7 @@ def test_ctrl_minus_zeros_holdings_removes_ideas_and_is_rebalance_only(tmp_path)
         other_row = tab._row_for_position("idea:NEW")
         tab.table.selectionModel().select(tab.table.model().index(other_row, 0), QItemSelectionModel.Select)
         QTest.keyClick(tab.table, Qt.Key_Minus, Qt.ControlModifier)
-        assert tab.targets.get("1") != 0
+        assert tab.targets["1"] == 0
         QTest.keyClick(tab.table, Qt.Key_Space, Qt.ShiftModifier)
         QTest.keyClick(tab.table, Qt.Key_Minus, Qt.ControlModifier)
         assert tab.targets["1"] == 0
