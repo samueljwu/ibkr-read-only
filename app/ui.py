@@ -1360,7 +1360,8 @@ class MainWindow(QMainWindow):
             return
         if self._analytics_process is not None and self._analytics_process.poll() is None:
             return
-        if not manual and time.monotonic() - self._last_analytics_sync_attempt < 300:
+        if (not manual and self._last_analytics_sync_attempt and
+                time.monotonic() - self._last_analytics_sync_attempt < 300):
             return
         self._last_analytics_sync_attempt = time.monotonic()
         try:

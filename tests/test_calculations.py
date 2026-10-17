@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from app.finance.calculations import (adv20, advx, choose_price, closed_lot, flow_adjusted_daily_pnl, historical_returns,
-                              open_lot, position_metrics)
+                              open_lot, position_metrics, prepare_history)
 
 
 def test_position_daily_move_and_value():
@@ -95,6 +95,16 @@ def test_history_uses_previous_sessions_for_month_and_year():
     assert returns["mtd"] == pytest.approx(0.05)
     assert historical_returns(120, history, date(2026, 10, 6))["ytd"] == pytest.approx(0.20)
     assert returns["1m"] == pytest.approx(105 / 102 - 1)  # closest prior completed session
+
+
+@pytest.mark.parametrize("as_of, expected", [
+    (date(2026, 3, 31), (date(2026, 2, 28), date(2025, 12, 31), date(2025, 9, 30))),
+    (date(2024, 3, 31), (date(2024, 2, 29), date(2023, 12, 31), date(2023, 9, 30))),
+    (date(2026, 1, 30), (date(2025, 12, 30), date(2025, 10, 30), date(2025, 7, 30))),
+])
+def test_history_month_offsets_clamp_at_month_end(as_of, expected):
+    _, targets = prepare_history([], as_of)
+    assert tuple(targets[window] for window in ("1m", "3m", "6m")) == expected
 
 
 def test_price_fallback_and_adv():

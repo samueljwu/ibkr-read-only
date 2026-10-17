@@ -80,9 +80,12 @@ class Database:
         config_paths += [base / "local_config.json", legacy_source_dir() / "local_config.json"]
         for config in config_paths:
             if config.is_file():
-                candidate = cls._configured_database(config)
-                if candidate.is_file():
-                    return candidate
+                try:
+                    return cls._configured_database(config)
+                except FileNotFoundError:
+                    # A moved or deleted legacy selection must not block other
+                    # existing sources from being considered for migration.
+                    continue
         candidates = ([base / "stable" / "data" / "portfolio.sqlite3"] if profile == "prod" else [])
         candidates += [base / "portfolio.sqlite3", legacy_source_dir() / "data" / "portfolio.sqlite3"]
         return next((candidate for candidate in candidates if candidate.is_file()), None)

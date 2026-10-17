@@ -1,8 +1,7 @@
-PySide6>=6.7
-pandas>=2.1
-numpy>=1.26
-ibapi>=9.81.1
+PySide6-Addons==6.8.1
+ibapi @ https://interactivebrokers.github.io/downloads/twsapi_macunix.1050.01.zip#sha256=aa065722ca732a41aab202c7bb72932e179b86e7ec51cefa063eb1983fe9f597&subdirectory=IBJts/source/pythonclient
 openpyxl>=3.1
 certifi>=2026.7.22
 sqlcipher3==0.6.4
+tzdata>=2025.2; sys_platform == "win32"
 keyring>=25; sys_platform == "darwin"

@@ -23,6 +23,9 @@ def test_main_passes_explicit_database_to_window(monkeypatch, tmp_path):
         def setApplicationDisplayName(self, value):
             pass
 
+        def setWindowIcon(self, value):
+            pass
+
         def exec(self):
             return 0
 
@@ -34,6 +37,7 @@ def test_main_passes_explicit_database_to_window(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(main, "QApplication", App)
+    monkeypatch.setattr(main, "QIcon", lambda path: None)
     monkeypatch.setattr(main, "MainWindow", Window)
     chosen = tmp_path / "fresh run" / "portfolio.sqlite3"
     assert main.main(["--database", str(chosen)]) == 0

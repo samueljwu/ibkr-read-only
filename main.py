@@ -2,10 +2,12 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox
 
 from app.ui import MainWindow
 from app.storage.encryption import InvalidDatabaseKey, MissingDatabaseKey
+from app.version import VERSION
 
 
 def _show_recovery_code(parent, code):
@@ -21,6 +23,31 @@ def _show_recovery_code(parent, code):
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--bundle-check"]:
+        from zoneinfo import ZoneInfo
+
+        from sqlcipher3 import dbapi2 as sqlite3
+        from PySide6.QtGui import QPixmap
+        from app.market.market_data import EClient
+        from scripts import (encrypt_database, history_worker, legacy_history_worker,
+                             sync_analytics, sync_cash, sync_trades)
+        if sys.platform == "darwin":
+            from keyring.backends.macOS import Keyring
+
+        app = QApplication(sys.argv)
+        root = Path(__file__).resolve().parent
+        images = (root / "app" / "assets" / "app_icon.png",
+                  root / "app" / "views" / "help_assets" / "start_connection_light.png")
+        licenses = (root / "licenses" / "inventory.json",
+                    root / "licenses" / "Python-LICENSE.txt",
+                    root / "licenses" / "Apache-2.0.txt")
+        with sqlite3.connect(":memory:") as connection:
+            cipher_available = bool(connection.execute("PRAGMA cipher_version").fetchone())
+        return 0 if (cipher_available and EClient is not None
+                     and ZoneInfo("America/New_York")
+                     and all(not QPixmap(str(path)).isNull() for path in images)
+                     and (not getattr(sys, "frozen", False)
+                          or all(path.is_file() for path in licenses))) else 1
     if args and args[0] == "--history-worker":
         from scripts.history_worker import main as history_worker
         return history_worker(args[1:])
@@ -47,6 +74,8 @@ def main(argv=None):
     app = QApplication(sys.argv)
     app.setApplicationName("Portfolio Monitor")
     app.setApplicationDisplayName("Portfolio Monitor")
+    app.setApplicationVersion(VERSION)
+    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "app" / "assets" / "app_icon.png")))
     try:
         window = MainWindow(database_path=database_path)
     except (MissingDatabaseKey, InvalidDatabaseKey):

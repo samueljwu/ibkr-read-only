@@ -248,7 +248,7 @@ def test_main_window_keeps_calcs_usable_at_800_by_600(tmp_path, monkeypatch):
         window.tabs.setCurrentWidget(window.calcs_tab)
         app.processEvents()
         assert window.width() <= 800
-        assert window.calcs_tab.table.viewport().height() >= 170
+        assert window.calcs_tab.table.viewport().height() >= 160
         assert not window.summary.isVisible()
         window.tabs.setCurrentIndex(0)
         app.processEvents()

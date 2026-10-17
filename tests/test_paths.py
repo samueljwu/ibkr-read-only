@@ -12,14 +12,26 @@ from app.storage.database import Database
 from app.ui import MainWindow
 
 
+def _isolate_app_data(monkeypatch, base):
+    location = base / "CustomIBMonitor"
+    monkeypatch.setattr(paths, "user_data_dir", lambda: location)
+    monkeypatch.setattr("app.storage.database.user_data_dir", lambda: location)
+
+
 def test_macos_uses_application_support(monkeypatch):
     monkeypatch.setattr(paths.sys, "platform", "darwin")
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     assert paths.user_data_dir() == Path.home() / "Library" / "Application Support" / "CustomIBMonitor"
 
 
-def test_new_install_uses_per_user_directory(tmp_path, monkeypatch):
+def test_windows_uses_localappdata(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths.sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert paths.user_data_dir() == tmp_path / "CustomIBMonitor"
+
+
+def test_new_install_uses_per_user_directory(tmp_path, monkeypatch):
+    _isolate_app_data(monkeypatch, tmp_path)
     monkeypatch.setattr(paths, "legacy_source_dir", lambda: tmp_path / "source")
     monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
     root = tmp_path / "CustomIBMonitor" / "dev" / "data"
@@ -40,7 +52,7 @@ def test_new_install_uses_per_user_directory(tmp_path, monkeypatch):
 
 
 def test_existing_source_database_is_copied_to_dev_folder(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "profile"))
+    _isolate_app_data(monkeypatch, tmp_path / "profile")
     monkeypatch.setattr(paths, "legacy_source_dir", lambda: tmp_path / "source")
     monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
     source = tmp_path / "profile" / "CustomIBMonitor" / "portfolio.sqlite3"
@@ -58,7 +70,7 @@ def test_existing_source_database_is_copied_to_dev_folder(tmp_path, monkeypatch)
 
 
 def test_encrypted_legacy_database_is_left_untouched(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    _isolate_app_data(monkeypatch, tmp_path)
     monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
     source = tmp_path / "CustomIBMonitor" / "portfolio.sqlite3"
     source.parent.mkdir(parents=True)
@@ -83,7 +95,7 @@ def test_audit_uses_selected_portfolio_database(tmp_path, monkeypatch):
 
 
 def test_frozen_install_never_uses_source_directory(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "profile"))
+    _isolate_app_data(monkeypatch, tmp_path / "profile")
     monkeypatch.setattr(paths, "legacy_source_dir", lambda: tmp_path / "source")
     monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
     monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
@@ -105,8 +117,62 @@ def test_frozen_install_never_uses_source_directory(tmp_path, monkeypatch):
         db.conn.close()
 
 
+def test_missing_stable_selection_falls_back_to_existing_legacy_database(tmp_path, monkeypatch):
+    _isolate_app_data(monkeypatch, tmp_path)
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
+    base = tmp_path / "CustomIBMonitor"
+    source = base / "portfolio.sqlite3"
+    old = Database(source)
+    old.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
+    old.conn.close()
+    stable_config = base / "stable" / "data" / "local_config.json"
+    stable_config.parent.mkdir(parents=True)
+    stale = base / "stable" / "data" / "missing" / "portfolio.sqlite3"
+    stable_config.write_text(json.dumps({"data_directory": str(stale.parent)}))
+
+    db = Database()
+    try:
+        assert db.path.parent.parent == paths.default_data_dir()
+        assert db.rows("positions", 1)[0]["ib_symbol"] == "ABC"
+        assert source.is_file()
+        assert json.loads(stable_config.read_text())["data_directory"] == str(stale.parent)
+    finally:
+        db.conn.close()
+
+
+def test_missing_stable_selection_without_fallback_starts_new_portfolio(tmp_path, monkeypatch):
+    _isolate_app_data(monkeypatch, tmp_path)
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr("app.storage.database.legacy_source_dir", lambda: tmp_path / "source")
+    stable_config = tmp_path / "CustomIBMonitor" / "stable" / "data" / "local_config.json"
+    stable_config.parent.mkdir(parents=True)
+    stable_config.write_text(json.dumps({"data_directory": str(stable_config.parent / "missing")}))
+
+    db = Database()
+    try:
+        assert db.path.parent.parent == paths.default_data_dir()
+        assert db.path.is_file()
+        assert stable_config.is_file()
+    finally:
+        db.conn.close()
+
+
+def test_missing_active_selection_still_fails_without_creating_database(tmp_path, monkeypatch):
+    _isolate_app_data(monkeypatch, tmp_path)
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    config = paths.local_config_path()
+    config.parent.mkdir(parents=True)
+    missing = config.parent / "missing" / "portfolio.sqlite3"
+    config.write_text(json.dumps({"data_directory": str(missing.parent)}))
+
+    with pytest.raises(FileNotFoundError, match="Configured portfolio database is missing"):
+        Database()
+    assert not missing.exists()
+
+
 def test_encrypted_stable_profile_does_not_select_empty_prod(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    _isolate_app_data(monkeypatch, tmp_path)
     monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
     stable = tmp_path / "CustomIBMonitor" / "stable" / "data"
     old_folder = stable / "20261010_123456789abc"

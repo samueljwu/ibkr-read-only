@@ -1,17 +1,19 @@
 import json
 import os
+import sys
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, QSize, Qt
-from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QPainter, QPalette, QWheelEvent
+from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QPainter, QPalette, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QToolButton, QVBoxLayout, QWidget
 
 import app.ui as ui
 from app.storage.database import Database
 from app.views.ui_theme import COLORS, TOOLBAR_GROUP_SPACING
+from app.views.shortcuts import native_text, shortcut
 
 
 def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
@@ -357,17 +359,17 @@ def test_tab_and_summary_keyboard_shortcuts_follow_visible_layout(tmp_path, monk
         window.tabs.setCurrentIndex(window._tab_index("Portfolio"))
         assert window.summary.isVisible()
         window.views["Portfolio"].setFocus()
-        QTest.keyClick(window.views["Portfolio"], Qt.Key_H,
-                       Qt.ControlModifier)
+        summary_modifier = Qt.ControlModifier | (Qt.ShiftModifier if sys.platform == "darwin" else Qt.NoModifier)
+        QTest.keyClick(window.views["Portfolio"], Qt.Key_H, summary_modifier)
         assert not window.show_summary_action.isChecked()
         assert not window.summary.isVisible()
         assert window.db.setting("show_account_summary") == "0"
-        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_H, summary_modifier)
         assert window.show_summary_action.isChecked()
         assert window.summary.isVisible()
         assert window.db.setting("show_account_summary") == "1"
         window.tabs.setCurrentWidget(window.calcs_tab)
-        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_H, summary_modifier)
         assert not window.show_summary_action.isChecked()
         assert not window.summary.isVisible()
     finally:
@@ -386,7 +388,8 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
         window.show_summary_action.setChecked(False)
         window.tabs.setCurrentWidget(window.cash_tab)
 
-        QTest.keyClick(window.tabs, Qt.Key_M, Qt.ControlModifier)
+        compact_modifier = Qt.ControlModifier | (Qt.ShiftModifier if sys.platform == "darwin" else Qt.NoModifier)
+        QTest.keyClick(window.tabs, Qt.Key_M, compact_modifier)
         app.processEvents()
         assert window.compact_summary_action.isChecked()
         assert window.tabs.currentIndex() == window._tab_index("Portfolio")
@@ -410,7 +413,7 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
 
         window.compact_summary_action.trigger()
         app.processEvents()
-        QTest.keyClick(window.tabs, Qt.Key_M, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_M, compact_modifier)
         app.processEvents()
         assert not window.compact_summary_action.isChecked()
         assert window.geometry() == original
@@ -418,7 +421,7 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
         window.compact_summary_action.trigger()
         app.processEvents()
         assert window.expand_full_view_action.isEnabled()
-        QTest.keyClick(window.tabs, Qt.Key_L, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_L, compact_modifier)
         app.processEvents()
         assert not window.compact_summary_action.isChecked()
         assert not window.expand_full_view_action.isEnabled()
@@ -1414,11 +1417,15 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             "Take a tour…", "Start", "Portfolio", "Matched lots", "Analytics", "Rebalance",
             "Views & data", "Shortcuts"]
         guide = " ".join(label.text() for label in window.help_dialog.findChildren(QLabel))
+        next_tab = native_text(shortcut("Ctrl+Tab", "Meta+Tab"))
+        previous_tab = native_text(shortcut("Ctrl+Shift+Tab", "Meta+Shift+Tab"))
         for term in ("Overview", "Trades", "P&L", "Shift+Space",
-                     "Ctrl+Space", "Ctrl+C", "Ctrl+Tab", "Ctrl+Shift+Tab",
-                     "Ctrl+H", "F1", "Read-Only API"):
+                     native_text(shortcut("Ctrl+Space")), native_text(QKeySequence(QKeySequence.Copy)),
+                     next_tab, previous_tab, native_text(shortcut("Ctrl+H", "Ctrl+Shift+H")),
+                     "F1", "Read-Only API"):
             assert term in guide
-        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0",
+        for term in (native_text(shortcut("Ctrl+-")), native_text(shortcut("Ctrl+Shift+-")),
+                     native_text(shortcut("Ctrl+0")),
                      "Rebalance: remove idea or zero target", "elsewhere zoom out"):
             assert term in guide
         for title, phrase in (("Start", "Performance & Reports → Flex Queries"),
@@ -1427,7 +1434,7 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
                               ("Analytics", "Exposure"),
                               ("Rebalance", "Target weight"),
                               ("Views & data", "Save current tab view"),
-                              ("Shortcuts", "Ctrl+Tab / Ctrl+Shift+Tab")):
+                              ("Shortcuts", f"{next_tab} / {previous_tab}")):
             window.help_navigation.setCurrentRow(window.help_section_indices[title])
             app.processEvents()
             assert window.help_sections.currentWidget().isVisible()
@@ -1484,7 +1491,13 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
         window.activateWindow()
         window.setFocus()
         app.processEvents()
-        QTest.keyClick(window, Qt.Key_F1)
+        if sys.platform == "darwin":
+            # The offscreen macOS plugin cannot raise the window for a native
+            # application shortcut, so exercise the registered action.
+            assert window.help_f1_shortcut.key() == QKeySequence("F1")
+            window.help_f1_shortcut.activated.emit()
+        else:
+            QTest.keyClick(window, Qt.Key_F1)
         app.processEvents()
         assert window.help_dialog.isVisible()
     finally:

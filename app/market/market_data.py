@@ -5,8 +5,6 @@ import queue
 import threading
 from datetime import date, datetime, timedelta
 
-import pandas as pd
-
 from app.finance.calculations import choose_price, looks_like_option_ticker, valid_price
 from app.broker.broker_sync import record_from_tws
 
@@ -18,6 +16,18 @@ def five_year_start(today=None):
         return today.replace(year=today.year - 5)
     except ValueError:  # February 29
         return today.replace(year=today.year - 5, day=28)
+
+
+def _mock_history_days(today, count=270):
+    day = today - timedelta(days=1)
+    days = []
+    while len(days) < count:
+        if day.weekday() < 5:
+            days.append(day)
+        day -= timedelta(days=1)
+    days.reverse()
+    return days
+
 
 try:
     from ibapi.client import EClient
@@ -115,8 +125,8 @@ class MockMarketDataProvider(MarketDataProvider):
             seed = sum(ord(c) for c in symbol)
             close = round(25 + seed % 170 + (seed % 17) / 10, 2)
             last = round(close * (1 + ((seed % 11) - 5) / 1000), 2)
-            days = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=1), periods=270)
-            history = [{"day": stamp.date().isoformat(),
+            days = _mock_history_days(date.today())
+            history = [{"day": stamp.isoformat(),
                         "close": round(close * (0.94 + 0.06 * (index + 1) / len(days)), 2),
                         "volume": float(200000 + seed * 100 + (index % 20) * 1000)}
                        for index, stamp in enumerate(days)]

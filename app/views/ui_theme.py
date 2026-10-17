@@ -88,6 +88,10 @@ QLabel#sectionTitle { color: ${text}; font-size: 14px; font-weight: 600; }
 QLabel#fieldLabel { color: ${muted}; font-size: 12px; }
 QLabel#metricLabel, QLabel#hint { color: ${muted}; font-size: 12px; }
 QWidget#card { background: ${surface}; border: 1px solid ${line}; border-radius: 6px; }
+QWidget#tutorialCard { background: ${surface}; border: 2px solid ${accent}; border-radius: 8px; }
+QWidget#tutorialCard QLabel { color: ${text}; border: none; }
+QWidget#tutorialCard QLabel#tutorialProgress { color: ${muted}; }
+QWidget#tutorialCard QLabel#tutorialTitle { font-size: 17px; font-weight: 600; }
 QLabel#chartHoverCard {
     background: ${surface}; color: ${text}; border: 1px solid ${accent};
     border-radius: 6px; padding: 8px 10px; font-size: 13px;

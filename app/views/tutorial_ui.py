@@ -55,13 +55,6 @@ class TutorialOverlay(QWidget):
         self.next_button.setText("Finish" if number == total else "Next")
         self.target_rect = target_rect
         self.theme = theme
-        colors = COLORS[theme]
-        self.card.setStyleSheet(
-            "QWidget#tutorialCard { background: %s; border: 2px solid %s; border-radius: 8px; } "
-            "QLabel { color: %s; border: none; } "
-            "QLabel#tutorialProgress { color: %s; } "
-            "QLabel#tutorialTitle { font-size: 17px; font-weight: 600; }" %
-            (colors["surface"], colors["accent"], colors["text"], colors["muted"]))
         self._place_card()
         self.update()
         self.show()

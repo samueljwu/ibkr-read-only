@@ -1,12 +1,10 @@
 """All financial conventions used by the pilot live here."""
 
+from calendar import monthrange
 from datetime import date, timedelta
-from math import isfinite
+from math import fsum, isfinite
 from decimal import Decimal, InvalidOperation
 import re
-
-import pandas as pd
-import numpy as np
 
 
 def looks_like_option_ticker(display_ticker):
@@ -70,7 +68,7 @@ def position_metrics(qty, average_cost, fx, current, prior_close, nav, multiplie
 
 def adv20(history):
     volumes = [float(row["volume"]) for row in history[-20:] if row.get("volume") is not None]
-    return float(np.mean(volumes)) if len(volumes) == 20 else None
+    return fsum(volumes) / 20 if len(volumes) == 20 else None
 
 
 def advx(qty, adv):
@@ -90,15 +88,21 @@ def prepare_history(history, as_of):
         if day < as_of and valid_price(close):
             bars.append((day, float(close)))
     bars.sort()
-    stamp = pd.Timestamp(as_of)
     targets = {
-        "1m": (stamp - pd.DateOffset(months=1)).date(),
-        "3m": (stamp - pd.DateOffset(months=3)).date(),
-        "6m": (stamp - pd.DateOffset(months=6)).date(),
+        "1m": _months_before(as_of, 1),
+        "3m": _months_before(as_of, 3),
+        "6m": _months_before(as_of, 6),
         "mtd": as_of.replace(day=1) - timedelta(days=1),
         "ytd": date(as_of.year - 1, 12, 31),
     }
     return bars, targets
+
+
+def _months_before(day, months):
+    month_index = day.year * 12 + day.month - 1 - months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
 
 
 def window_returns(current, bars, targets):
