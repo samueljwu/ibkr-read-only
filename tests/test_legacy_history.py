@@ -1,11 +1,14 @@
 """Synthetic pre-Flex CSV import and coverage checks."""
 
 import csv
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from app.storage.database import Database
+from app.flex import flex_import
+from app.sync import legacy_history
 from app.platform.history_status import read_status
 from app.finance.services import PortfolioService
 from app.finance.position_returns import position_return_rows
@@ -59,6 +62,18 @@ def reports(tmp_path, *, account=ACCOUNT, ending_nav="120", ending_cash="20",
         ["Open Positions", "Data", "Summary", "Stocks", "USD", "TEST", closing_qty, close_price or ""],
     ])
     return pa, statement
+
+
+def test_older_csv_cutoff_tracks_flex_window(tmp_path, monkeypatch):
+    _, statement = reports(tmp_path)
+    rows, _ = legacy_history._read_csv(statement)
+    monkeypatch.setattr(flex_import, "flex_today", lambda: date(2024, 6, 1))
+    assert flex_import.oldest_flex_date() == date(2020, 1, 1)
+    with pytest.raises(LegacyHistoryError, match="before 2020-01-01"):
+        legacy_history._parse_activity_statement(rows, ACCOUNT)
+    monkeypatch.setattr(flex_import, "flex_today", lambda: date(2026, 6, 1))
+    assert flex_import.oldest_flex_date() == date(2022, 1, 1)
+    assert legacy_history._parse_activity_statement(rows, ACCOUNT)[1] == date(2021, 5, 31)
 
 
 def test_monthly_history_and_evidence_are_separate_from_daily_data(tmp_path):

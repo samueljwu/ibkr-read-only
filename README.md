@@ -5,7 +5,7 @@ A Windows desktop app for viewing one Interactive Brokers account. It combines l
 ## IBKR setup
 
 1. Sign in to TWS or IB Gateway and enable its socket API with **Read-Only API**. Note the host and socket port; use `127.0.0.1` when it runs on the same computer.
-2. In IBKR Client Portal, create three account-scoped **Activity Flex Queries** with XML output: **Trades**, **Analytics**, and **Cash**. Enable Flex Web Service and generate a token. See [Historical reports](HISTORICAL_REPORTS.md) for the required query sections and fields. The app currently expects a USD base account.
+2. In IBKR Client Portal, create three account-scoped **Activity Flex Queries** with XML output: **Trades**, **Analytics**, and **Cash**. Enable Flex Web Service and generate a token. For the sections and fields to select, open **Help → User guide (F1) → Start** in the app. The app currently expects a USD base account.
 
 ## App setup
 
@@ -18,7 +18,9 @@ python main.py
 
 The app starts in Mock mode. Open **Settings**, choose **Use IBKR**, enter the host, port, account ID, and three Flex query IDs, then click **Apply Settings**. The client ID is under **Advanced settings** if you need to change it. Paste the Flex Web Service token and click **Save Flex token**. The app never asks for your IBKR login password.
 
-Press **Sync IBKR** to refresh live data and catch up on recent reports. Use **File → Import Data** to request older report dates and review coverage gaps. You can also import a matching PortfolioAnalyst and Activity Statement CSV pair for older monthly history; see [Historical reports](HISTORICAL_REPORTS.md) for its limits.
+Press **Sync IBKR** to refresh live data and catch up on recent reports. Use **File → Import Data** to request older report dates and review coverage gaps. You can also import a matching PortfolioAnalyst and Activity Statement CSV pair for older monthly history; see **Help → User guide (F1) → Start** for the steps and limits.
+
+For a guided introduction to the controls and tabs, choose **Help → Take a tour**. The tour is also available from the Help dialog.
 
 ## What it does
 

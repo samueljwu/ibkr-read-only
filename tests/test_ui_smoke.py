@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QPainter, QPalette, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QToolButton, QVBoxLayout, QWidget
 
 import app.ui as ui
 from app.storage.database import Database
@@ -1397,30 +1397,26 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             window._apply_theme(theme)
             app.processEvents()
             assert settings_page.palette().color(settings_page.backgroundRole()).name() == COLORS[theme]["canvas"]
-            assert len(window.help_visuals) == 10
-            assert next(visual.chart for visual in window.help_visuals
-                        if visual.chart is not None).theme == theme
+            assert len(window.help_screenshots) == 28
+            assert all(not image._original.isNull()
+                       for image in window.help_screenshots)
         window.settings_dialog.close()
         window.help_button.click()
         app.processEvents()
         assert window.help_dialog.isVisible()
         assert window.help_navigation.currentItem().text() == "Portfolio"
         assert [window.help_navigation.item(i).text() for i in range(window.help_navigation.count())] == [
-            "Start", "Portfolio", "Matched lots", "Analytics", "Rebalance", "Views & data", "Shortcuts"]
+            "Take a tour…", "Start", "Portfolio", "Matched lots", "Analytics", "Rebalance",
+            "Views & data", "Shortcuts"]
         guide = " ".join(label.text() for label in window.help_dialog.findChildren(QLabel))
         for term in ("Overview", "Trades", "P&L", "Shift+Space",
                      "Ctrl+Space", "Ctrl+C", "Ctrl+Tab", "Ctrl+Shift+Tab",
-                     "Ctrl+H", "F1", "Read-only API"):
+                     "Ctrl+H", "F1", "Read-Only API"):
             assert term in guide
-        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0", "Rebalance full rows",
-                     "Otherwise zoom out"):
+        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0",
+                     "Rebalance: remove idea or zero target", "elsewhere zoom out"):
             assert term in guide
-        visual_labels = " ".join(child.text() for visual in window.help_visuals
-                                 for child in visual.findChildren(QLabel))
-        for label in ("Sync IBKR", "Hide closed", "Match lots…", "Adjusted NAV change",
-                      "Target weight", "Save current tab view"):
-            assert label in visual_labels
-        for title, phrase in (("Start", "Source status"),
+        for title, phrase in (("Start", "Performance & Reports → Flex Queries"),
                               ("Portfolio", "Hide closed"),
                               ("Matched lots", "Reset sale to automatic"),
                               ("Analytics", "Exposure"),
@@ -1430,16 +1426,43 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             window.help_navigation.setCurrentRow(window.help_section_indices[title])
             app.processEvents()
             assert window.help_sections.currentWidget().isVisible()
-            if title in ("Start", "Portfolio", "Matched lots", "Analytics", "Rebalance"):
-                assert not window.help_sections.currentWidget().horizontalScrollBar().isVisible()
+            if title in ("Start", "Portfolio", "Matched lots", "Analytics", "Rebalance",
+                         "Views & data"):
+                assert not window.help_sections.currentWidget().horizontalScrollBar().isVisible(), title
             section_text = " ".join(label.text() for label in
                                     window.help_sections.currentWidget().findChildren(QLabel))
             assert phrase in section_text
+            if title == "Start":
+                for instruction in ("Global Configuration", "Gateway: Configure", "7496", "4001",
+                                    "7497", "4002", "it may differ from the defaults",
+                                    "Enter the host, Socket Port"):
+                    assert instruction in section_text
+                for instruction in ("Trades → Executions", "IB Execution ID", "Corporate Actions",
+                                    "Position Amount in Base", "Cash Transactions", "save the Flex token",
+                                    "PortfolioAnalyst since-inception monthly Detailed CSV",
+                                    "Activity Statement CSV", f"before {ui.oldest_flex_date().isoformat()}",
+                                    "PortfolioAnalyst must include that month", "Change in NAV",
+                                    "Select both files together", "not missing daily NAV"):
+                    assert instruction in section_text
+                disclosures = window.help_sections.currentWidget().findChildren(QToolButton)
+                assert [button.text() for button in disclosures] == [
+                    "Trades query · fields to select", "Analytics query · fields to select",
+                    "Cash query · fields to select"]
+                disclosures[0].click()
+                app.processEvents()
+                assert disclosures[0].isChecked()
+                assert [window.help_jump_menu.itemText(i) for i in range(1, 8)] == [
+                    "Port", "Connect", "Sync", "Flex queries", "Flex token", "Import history", "Older CSV"]
             if title == "Matched lots":
                 for action in ("Remove split", "Rebuild automatic matches", "FIFO", "LIFO",
                                "Max realized gain", "Max unrealized gain",
                                "Clear match for selected lot", "Save changes"):
                     assert action in section_text
+            if title == "Analytics":
+                assert window.help_jump_menu.itemText(5) == "Monthly P&L"
+                window.help_jump_menu.activated.emit(5)
+                app.processEvents()
+                assert window.help_sections.currentWidget().verticalScrollBar().value() > 0
         window.help_dialog.close()
         window.tabs.setCurrentWidget(window.views["Lots"].parentWidget())
         window.open_help()

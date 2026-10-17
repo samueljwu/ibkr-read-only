@@ -310,7 +310,7 @@ def test_later_hard_failure_takes_precedence_over_prior_review(tmp_path, monkeyp
 @pytest.mark.parametrize("source", ["trades", "cash"])
 def test_window_crossing_history_floor_keeps_every_available_day(tmp_path, monkeypatch, source):
     path = configured_database(tmp_path)
-    floor = date(date.today().year - import_history.HISTORY_YEARS, 1, 1)
+    floor = import_history.oldest_flex_date()
     first = (floor - timedelta(days=7)).isoformat()
     last = (floor + timedelta(days=6)).isoformat()
     requested = []

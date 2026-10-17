@@ -6,7 +6,7 @@ that only appears once a run has produced something to show, a permanent
 one-time legacy import/removal path.
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (QCalendarWidget, QComboBox, QDialog, QDialogButtonBox,
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QCalendarWidget, QComboBox, QDialog, QDialogButto
                                QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 from app.platform.history_status import format_history_details, merge_periods
-from app.flex.flex_import import HISTORY_YEARS, flex_today
+from app.flex.flex_import import flex_today, oldest_flex_date
 from app.views import widgets
 from app.views.table_ui import ReportTable, SortItem
 
@@ -235,7 +235,7 @@ class HistoryImportDialog(QDialog):
             self.ensure_content_fits()
 
     def refresh_flex_limit(self):
-        oldest = date(flex_today().year - HISTORY_YEARS, 1, 1)
+        oldest = oldest_flex_date()
         self.older_card_title.setText(f"Older CSV history (before {oldest.isoformat()})")
 
     def _sync_progress_card(self):

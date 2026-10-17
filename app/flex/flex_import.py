@@ -18,6 +18,11 @@ def flex_today():
     return datetime.now(ZoneInfo("America/New_York")).date()
 
 
+def oldest_flex_date():
+    """First day in IBKR's current-year-plus-history Flex window."""
+    return date(flex_today().year - HISTORY_YEARS, 1, 1)
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     def redirect_request(self, request, response, code, message, headers, new_url):
         # Flex authenticates with a token in the URL. Never forward it to a

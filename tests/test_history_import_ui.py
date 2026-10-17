@@ -1,7 +1,6 @@
 """Synthetic UI coverage: credential handling and asynchronous dated imports."""
 
 import os
-from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCalendarWidget, QLineEdit
 
 import app.ui as ui
-from app.flex.flex_import import HISTORY_YEARS
+from app.flex.flex_import import oldest_flex_date
 from app.platform.history_status import pause_request_path, read_status, write_status
 
 
@@ -144,7 +143,7 @@ def test_import_dialog_keeps_explanation_and_results_compact(window):
     assert not dialog.pause_button.isVisible()
     assert not dialog.progress_label.isVisible()
     assert dialog.periods_table.isVisible()
-    assert f"{date.today().year - HISTORY_YEARS}-01-01" in dialog.older_card_title.text()
+    assert oldest_flex_date().isoformat() in dialog.older_card_title.text()
     assert dialog.import_button.width() < dialog.width() // 2
     dialog.help_button.click()
     assert dialog.help_text.isVisible()

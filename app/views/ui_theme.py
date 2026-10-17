@@ -75,23 +75,7 @@ QLabel#settingsInfo { color: ${muted}; font-size: 12px; }
 QLabel#helpHeading { color: ${text}; font-size: 18px; font-weight: 600; }
 QLabel#helpSection { color: ${text}; font-size: 14px; font-weight: 600; }
 QLabel#helpKey { color: ${accent}; font-weight: 600; }
-QLabel#helpShortcutKey { color: ${text}; background: ${surface_alt}; border: 1px solid ${line};
-    border-radius: 4px; padding: 3px 6px; font-weight: 600; }
-QFrame#helpMockup { background: ${surface}; border: 1px solid ${line}; border-radius: 5px; }
-QLabel#helpMockTitle { color: ${text}; font-size: 12px; font-weight: 600; }
-QLabel#helpMockButton, QLabel#helpMockControl {
-    background: ${surface_alt}; color: ${text}; border: 1px solid ${line};
-    border-radius: 3px; padding: 3px 5px; font-size: 11px;
-}
-QLabel#helpMockTab, QLabel#helpMockTabSelected {
-    color: ${muted}; padding: 3px 5px; font-size: 11px;
-}
-QLabel#helpMockTabSelected { color: ${text}; border-bottom: 2px solid ${accent}; font-weight: 600; }
-QLabel#helpMockStatus, QLabel#helpMockCell { color: ${text}; font-size: 11px; }
-QLabel#helpMockHeader { color: ${muted}; font-size: 11px; font-weight: 600; }
-QLabel#helpMockCaption { color: ${muted}; font-size: 11px; }
-QLabel#helpMockStep, QLabel#helpMockArrow { color: ${accent}; font-weight: 700; }
-QLabel#helpMockStep { background: ${accent_soft}; border-radius: 8px; padding: 1px 5px; }
+QFrame#helpDivider { background: ${line}; border: 0; }
 QListWidget#helpNavigation {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 6px; outline: 0;

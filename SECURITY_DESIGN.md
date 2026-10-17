@@ -1,9 +1,29 @@
 # Security design and release gates
 
-Status: design in progress. New portfolio databases and new backups use
-SQLCipher. Existing databases stay plaintext until converted, and migration
-retains a plaintext original. Old backups and exports may also remain plaintext.
-The application must not be described as production secure.
+Status: design in progress. Freshly initialized portfolio databases and new
+backups use SQLCipher. Existing databases stay plaintext until converted, and
+migration retains a plaintext original. Old backups, workbook exports,
+imported source files, and diagnostic logs may remain plaintext. The application must not be
+described as production secure.
+
+## Current storage behavior
+
+- A freshly initialized portfolio gets a random SQLCipher key stored in Windows
+  Credential Manager. The app shows its recovery code on first launch and can
+  show it again from **File → Show Database Recovery Code**. Restoring an encrypted file on
+  another Windows profile requires that code.
+- **File → Create SQLite Backup** and automatic backups of changed imports
+  create encrypted copies, including when the active database is still
+  plaintext. Earlier backups are not converted automatically.
+- A previously created plaintext database remains plaintext during normal use.
+  **File → Encrypt Database** converts it after verification and retains a
+  plaintext recovery copy beside it. Copying a plaintext portfolio to a new
+  data directory also leaves that copy plaintext. Check every retained copy,
+  older backup, export, and source CSV before treating a folder as encrypted.
+- Workbook exports, selected older CSV reports, diagnostic logs, and worker
+  status files are outside SQLCipher's database protection. Downloaded Flex XML
+  is not saved by default. Keep data and backup folders local and protected;
+  a user-selected folder may be synchronized by another service.
 
 ## Assets and boundaries
 
@@ -33,10 +53,9 @@ must remain read-only.
 6. A failed upgrade corrupts the only copy of the portfolio.
 
 The application cannot protect data from malware already running with the
-same user's access while the portfolio is open. SQLCipher uses a random
-per-portfolio key stored in Windows Credential Manager for automatic unlock.
-The user must keep the recovery code separately to restore on another profile.
-This approach and its packaged dependency still require release review.
+same user's access while the portfolio is open. Keep the recovery code
+separately from the database and backups. SQLCipher integration and its
+packaged dependency still require release review.
 
 ## Decisions still required
 
@@ -60,5 +79,7 @@ This approach and its packaged dependency still require release review.
   revocation handling.
 - Test schema migrations, encrypted backup and restore, clean install, upgrade,
   offline startup, and uninstall data retention on a clean Windows account.
+- Check backups made from plaintext databases and the residual copies, logs,
+  status files, and exports left after migration or a changed data directory.
 - Review the build dependency list, sign release packages, verify provenance,
   and inspect the exact files shipped.

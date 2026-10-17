@@ -12,13 +12,13 @@ from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel, QModelIndex, QSize, QTimer, Qt
+from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel, QModelIndex, QRect, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
                                QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QTabWidget,
                                QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QTableView, QVBoxLayout, QWidget)
+                               QStyleOptionViewItem, QTableView, QToolButton, QVBoxLayout, QWidget)
 
 from app.storage.database import Database
 from app.platform.paths import default_data_dir
@@ -34,17 +34,18 @@ from app.broker.broker_sync import BrokerIngestor
 from app.storage.excel_io import export_workbook
 from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, MockMarketDataProvider
 from app.finance.services import PortfolioService
-from app.flex.flex_import import flex_today
+from app.flex.flex_import import flex_today, oldest_flex_date
 from app.sync.sync_service import trade_sync_paused
 from app.views.table_ui import (ReportTable, SortItem, TableClickAwayFilter,
                                 copy_table_selection, display_number, handle_table_shortcut)
 from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           stylesheet, style_toolbar_dropdown)
 from app.views.themed_checkbox import ThemedCheckBox
-from app.views.help_visuals import HelpVisual
+from app.views.help_visuals import HelpScreenshot
 from app.views.history_import_ui import HistoryImportDialog
 from app.views.action_icons import action_icon
 from app.views.lot_matching_ui import LotMatchDialog
+from app.views.tutorial_ui import TutorialOverlay
 from app.views import widgets
 from app.views.widgets import enable_label_copy
 
@@ -629,6 +630,10 @@ class MainWindow(QMainWindow):
         self._make_settings_tab()
         self._make_help_dialog()
         self._make_menu()
+        self.tutorial = TutorialOverlay(self, self._tutorial_back,
+                                        self._tutorial_next, self._tutorial_exit)
+        self._tutorial_index = -1
+        self._tutorial_original_tab = None
         self._update_match_lots_availability()
         self._table_click_away_filter = TableClickAwayFilter(self)
         QApplication.instance().installEventFilter(self._table_click_away_filter)
@@ -746,7 +751,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, theme):
         self.theme = theme if theme in ("light", "dark") else "light"
         self.setStyleSheet(stylesheet(self.theme, self.zoom_percent))
-        for visual in self.help_visuals:
+        for visual in self.help_screenshots:
             visual.set_theme(self.theme)
         self.analytics_tab.set_theme(self.theme)
         color = COLORS[self.theme]["text"]
@@ -1644,12 +1649,25 @@ class MainWindow(QMainWindow):
         self.help_navigation.setObjectName("helpNavigation")
         self.help_navigation.setFixedWidth(165)
         self.help_navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.help_navigation.addItem("Take a tour…")
         self.help_sections = QStackedWidget()
-        self.help_navigation.currentRowChanged.connect(self.help_sections.setCurrentIndex)
+        self.help_navigation.currentRowChanged.connect(self._on_help_navigation_changed)
         self.help_section_indices = {}
-        self.help_visuals = []
+        self.help_step_targets = {}
+        self.help_screenshots = []
         guide_layout.addWidget(self.help_navigation)
-        guide_layout.addWidget(self.help_sections, 1)
+        page_layout = QVBoxLayout()
+        jump_layout = QHBoxLayout()
+        jump_layout.addWidget(QLabel("Jump to"))
+        self.help_jump_menu = QComboBox()
+        self.help_jump_menu.setObjectName("helpJumpMenu")
+        self.help_jump_menu.setFixedWidth(210)
+        self.help_jump_menu.activated.connect(self._jump_to_help_step)
+        jump_layout.addWidget(self.help_jump_menu)
+        jump_layout.addStretch()
+        page_layout.addLayout(jump_layout)
+        page_layout.addWidget(self.help_sections, 1)
+        guide_layout.addLayout(page_layout, 1)
         dialog_layout.addLayout(guide_layout)
 
         def add_section(title):
@@ -1664,8 +1682,11 @@ class MainWindow(QMainWindow):
             heading = QLabel(title)
             heading.setObjectName("helpHeading")
             content.addWidget(heading)
+            content.setProperty("helpTitle", title)
             scroller.setWidget(page)
-            self.help_section_indices[title] = self.help_sections.addWidget(scroller)
+            self.help_sections.addWidget(scroller)
+            self.help_section_indices[title] = self.help_navigation.count()
+            self.help_step_targets[title] = []
             self.help_navigation.addItem(title)
             return content
 
@@ -1673,93 +1694,246 @@ class MainWindow(QMainWindow):
             label = QLabel(body)
             label.setObjectName("helpBody")
             label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             content.addWidget(label)
 
-        def add_visual(content, kind):
-            visual = HelpVisual(kind)
-            self.help_visuals.append(visual)
-            content.addWidget(visual)
+        def add_picture(content, name, description):
+            image = HelpScreenshot(name, description)
+            self.help_screenshots.append(image)
+            content.addWidget(image)
+
+        def add_step(content, title, body=None, screenshot=None, jump_label=None):
+            if content.property("hasHelpStep"):
+                divider = QFrame()
+                divider.setObjectName("helpDivider")
+                divider.setFixedHeight(1)
+                content.addWidget(divider)
+            content.setProperty("hasHelpStep", True)
+            heading = QLabel(title)
+            heading.setObjectName("helpStep")
+            font = heading.font()
+            font.setBold(True)
+            heading.setFont(font)
+            heading.setWordWrap(True)
+            heading.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            content.addWidget(heading)
+            menu_label = jump_label or title
+            if menu_label[:1].isdigit():
+                menu_label = menu_label.split("  ", 1)[-1]
+            menu_label = menu_label.split("→", 1)[0].strip()
+            self.help_step_targets[content.property("helpTitle")].append((menu_label, heading))
+            if body:
+                add_note(content, body)
+            if screenshot:
+                add_picture(content, screenshot, title)
+
+        def add_disclosure(content, title, lines):
+            toggle = QToolButton()
+            toggle.setText(title)
+            toggle.setCheckable(True)
+            toggle.setArrowType(Qt.RightArrow)
+            toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            toggle.setAutoRaise(True)
+            details = QWidget()
+            detail_layout = QVBoxLayout(details)
+            detail_layout.setContentsMargins(14, 0, 0, 0)
+            detail_layout.setSpacing(4)
+            for line in lines:
+                add_note(detail_layout, line)
+            details.hide()
+
+            def show_details(checked):
+                toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+                details.setVisible(checked)
+
+            toggle.toggled.connect(show_details)
+            content.addWidget(toggle)
+            content.addWidget(details)
 
         start_content = add_section("Start")
-        add_visual(start_content, "start")
-        add_note(start_content, "Set host, port and account in Settings. Hover Sync IBKR for each source's status.")
-        add_visual(start_content, "start_import")
-        add_note(start_content, "For trade, performance and Cash history: set Flex query IDs, save the "
-                 "token in Settings, then import a date range and check coverage gaps.")
+        add_step(start_content, "1  Find the Socket Port in TWS or IB Gateway", jump_label="Port")
+        add_note(start_content, "TWS: Global Configuration → API → Settings · live 7496 / paper 7497")
+        add_note(start_content, "Gateway: Configure → Settings → API → Settings · live 4001 / paper 4002")
+        add_note(start_content, "Enable socket clients and Read-Only API. Use the Socket Port shown there; it may differ from the defaults.")
+        add_step(start_content, "2  Settings → connect to IBKR",
+                 "Enter the host, Socket Port and account. Click Use IBKR, or Apply Settings if IBKR is already selected.",
+                 "start_connection", jump_label="Connect")
+        add_picture(start_content, "start_apply", "Use IBKR and Apply Settings")
+        add_step(start_content, "3  Sync IBKR",
+                 "Click the circular arrows in the top toolbar. Hover for each source's status.",
+                 "start_sync", jump_label="Sync")
+
+        # Keep the Flex field lists and CSV requirements aligned with HISTORICAL_REPORTS.md.
+        add_step(start_content, "4  Client Portal → Performance & Reports → Flex Queries",
+                 "Create three Activity Flex Queries (XML): Trades, Analytics and Cash. Use one USD-base account, custom dates, all currencies and instruments, and no symbol filter.",
+                 jump_label="Flex queries")
+        add_disclosure(start_content, "Trades query · fields to select", (
+            "Trades → Executions: Account ID, Trade ID, IB Execution ID, Trade Date, Trade Time (or Date/Time), Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Class, Currency, Multiplier, FX Rate to Base, IB Commission, IB Commission Currency. Options also need Expiry, Put/Call and Strike.",
+            "Corporate Actions: Account ID, Type, Description, Date/Time, Transaction ID, Conid, Symbol, Asset Class, Currency, Quantity, Proceeds, Multiplier, FX Rate to Base.",
+            "Options, Exercises and Expirations: Account ID, Date, Transaction Type, Asset Class, Conid, Quantity, Trade Price, Proceeds.",
+            "Transfers (ACATS, Internal): Account ID, Date, Direction, Asset Class, Conid, Symbol, Quantity, Currency, FX Rate to Base, Transaction ID. Account Information: Currency.",
+        ))
+        add_disclosure(start_content, "Analytics query · fields to select", (
+            "NAV Summary in Base: Account ID, Report Date, Total, Cash. Cash Transactions: Account ID, Date/Time, Type, Amount, Currency, FX Rate to Base.",
+            "Transfers (ACATS, Internal): Account ID, Report Date, Date, Direction, Asset Class, Position Amount in Base, Currency, FX Rate to Base, Transaction ID. Account Information: Currency.",
+        ))
+        add_disclosure(start_content, "Cash query · fields to select", (
+            "Cash Transactions: Account ID, Currency, Date/Time, Type, Amount, Description, Conid, Symbol, FX Rate to Base. Add Report Date or Transaction ID if offered.",
+        ))
+        add_step(start_content, "5  Settings → apply query IDs, then save the Flex token",
+                 "Use the matching Trades, Analytics and Cash query IDs. Apply the account before saving its token.",
+                 "start_flex", jump_label="Flex token")
+        add_step(start_content, "6  File → Import Data → import Flex history",
+                 "Select All reports, set From and To through yesterday, then click Import history. Check progress and coverage gaps.",
+                 "start_import", jump_label="Import history")
+        add_step(start_content, "7  Import older CSV history (optional)",
+                 f"For history before {oldest_flex_date().isoformat()}, use a PortfolioAnalyst since-inception monthly Detailed CSV and an Activity Statement CSV for the same USD-base account. The statement must run from inception through a month end before that date; PortfolioAnalyst must include that month.",
+                 "setup_older_csv", jump_label="Older CSV")
+        add_note(start_content, "PortfolioAnalyst: Reports → Default Reports → Since Inception → Detailed (CSV). Activity Statement: Statements → Activity Statement → CSV.")
+        add_note(start_content, "Include Account Information, Net Asset Value, Change in NAV, and dated activity or positions in the Activity Statement.")
+        add_note(start_content, "If that older statement is unavailable in Client Portal, ask IBKR whether an archived CSV is available.")
+        add_note(start_content, "File → Import Data → Import older CSV history… Select both files together (Ctrl-click). This adds monthly history, not missing daily NAV or cash dates.")
 
         portfolio_content = add_section("Portfolio")
-        add_visual(portfolio_content, "portfolio")
-        add_note(portfolio_content, "Overview shows totals and broker differences. Trades can filter BUY/SELL; "
-                 "realized P&L appears on both trades in a match. Lots can filter Open/Closed.")
-        add_visual(portfolio_content, "cash")
-        add_note(portfolio_content, "Cash Flex supplies deposits, dividends, interest, tax and fees.")
+        add_step(portfolio_content, "1  Overview → inspect holdings",
+                 "Use Columns, Hide closed or search. Scroll right for Reconciliation and Data status; double-click a holding for its trades and lots.",
+                 "portfolio_overview")
+        add_step(portfolio_content, "2  Trades → filter BUY or SELL",
+                 "Search an instrument to narrow the table. Matched realized P&L appears on both trade rows.",
+                 "portfolio_trades")
+        add_step(portfolio_content, "3  Cash → choose a date range",
+                 "Cash Flex supplies deposits, dividends, interest, tax and fees.",
+                 "portfolio_cash_range")
+        add_picture(portfolio_content, "portfolio_cash", "Imported Cash transactions")
+        add_note(portfolio_content, "Lots filters Open and Closed; use Match lots… to change allocations.")
 
         matched_content = add_section("Matched lots")
-        add_visual(matched_content, "matched")
-        add_note(matched_content, "Open = held · Closed = sold · Closed short = covered. Drag only to an "
-                 "earlier compatible buy with free quantity. Preview P&L needs fees, FX and multiplier.")
-        add_visual(matched_content, "matching_actions")
-        add_note(matched_content, "Rebuild keeps manual choices. FIFO uses oldest buys; LIFO newest. "
-                 "Max realized gain favors net gain; Max unrealized gain sells highest USD cost first. "
-                 "Clear frees that match. Cancel discards the preview; short covers are read only.")
+        add_step(matched_content, "1  Lots → select a lot → Match lots…",
+                 "Open = held · Closed = sold. Double-clicking a lot also opens matching.",
+                 "matched_lots", jump_label="Open matching")
+        add_step(matched_content, "2  Drag a sale onto an eligible purchase",
+                 "Sales are above purchases. The purchase must be earlier and have free quantity.",
+                 "matched_sale", jump_label="Drag to match")
+        add_picture(matched_content, "matched_purchase", "Purchases before a manual match")
+        add_step(matched_content, "3  Review chosen and automatic quantities → Save changes",
+                 "The preview updates before saving. Cancel discards the edit.", "matched_after",
+                 jump_label="Save changes")
+        add_note(matched_content, "Split selected purchase to allocate smaller parts; Remove split joins them. Reset sale to automatic removes your choice.")
+        add_step(matched_content, "Other matching actions", screenshot="matched_menu",
+                 jump_label="Other actions")
+        add_note(matched_content, "Rebuild automatic matches keeps manual choices. Auto-match remaining: FIFO (oldest), LIFO (newest), Max realized gain or Max unrealized gain (highest cost).")
+        add_note(matched_content, "Clear match for selected lot frees its shares. Short-sale covers are automatic and cannot be edited here. Missing fees, FX or multiplier can prevent a match.")
 
         analytics_content = add_section("Analytics")
-        add_visual(analytics_content, "analytics")
-        add_note(analytics_content, "P&L shows NAV and returns; Capital deployment shows invested cash "
-                 "and trading. Hover for values, drag for dates. S&P 500 starts at 0% at its first point.")
-        add_visual(analytics_content, "analytics_more")
-        add_note(analytics_content, "Returns includes matched lots and income. ≈ partial flags missing Cash, "
-                 "matches, FX or attribution; hover for details. Open bonds need accrued interest.")
-        add_note(analytics_content, "Buy / sell levels compares trades with daily closes. Load older prices "
-                 "for up to five years; markers hide if split history cannot be verified.")
+        add_step(analytics_content, "P&L → choose a range and chart metric",
+                 "Toggle S&P 500 or drag the chart to focus dates. Adjusted change removes external flows; gaps need more NAV and flow history.",
+                 "analytics_pnl")
+        add_step(analytics_content, "Capital deployment → choose a view",
+                 "Net deployed, buy/sell activity and cash/portfolio share the same range controls.",
+                 "analytics_capital")
+        add_step(analytics_content, "Returns → select an instrument",
+                 "Inspect matched lots and income below. ≈ marks partial data; hover for the reason. Open bonds need accrued interest.",
+                 "analytics_returns")
+        add_step(analytics_content, "Exposure → group and inspect positions",
+                 "Choose Sector or Custom and Adjusted or Market value. Select a slice or category; create or manage custom sets here.",
+                 "analytics_exposure")
+        add_step(analytics_content, "Monthly P&L → review each month",
+                 "Partial months and missing baselines may leave returns blank. Import older PortfolioAnalyst CSVs through File → Import Data.",
+                 "analytics_monthly")
+        add_step(analytics_content, "Buy / sell levels → choose a stock",
+                 "Zoom the chart or load older prices while connected to IBKR. Trade markers need verified split history.",
+                 "analytics_levels")
 
         rebalance_content = add_section("Rebalance")
-        add_visual(rebalance_content, "rebalance")
-        add_note(rebalance_content, "Enter target weights or a Cash target; add an idea for a new stock. "
-                 "Upside/downside cases compare outcomes. Show changes columns. This worksheet does not place orders.")
+        add_step(rebalance_content, "1  Set a Cash target or add an idea",
+                 "Type a ticker and click Add. Reset targets clears the worksheet's target inputs.",
+                 "rebalance_setup", jump_label="Targets")
+        add_step(rebalance_content, "2  Edit tinted Target weight cells",
+                 "The Buy / Sell USD estimate updates. Enter saves an edit; Esc cancels it.",
+                 "rebalance_table", jump_label="Target weights")
+        add_step(rebalance_content, "3  Show → Upside / downside",
+                 "Enter price or percentage assumptions to compare cases.",
+                 "rebalance_show", jump_label="Upside / downside")
+        add_picture(rebalance_content, "rebalance_cases", "Upside and downside case inputs")
+        add_note(rebalance_content, "This worksheet does not place orders.")
 
         views_content = add_section("Views & data")
-        add_visual(views_content, "views")
-        add_note(views_content, "Sort with a column heading; right-click for columns and decimals. "
-                 "Saved views remember filters and layout. Live values may be provisional; "
-                 "hover over missing values for details.")
+        add_step(views_content, "1  Right-click a column heading",
+                 "Sort, set decimal places or hide the column. Columns → Show all columns restores hidden columns.",
+                 "views_columns", jump_label="Columns")
+        add_step(views_content, "2  View → Save current tab view",
+                 "Saved views remember filters and layout. Drag tabs to reorder; View also resets tab order, changes zoom and toggles the account summary.",
+                 "views_view_menu", jump_label="View menu")
+        add_step(views_content, "3  File → export, back up or import",
+                 "Export Workbook and Create SQLite Backup are here. Import Data opens the dated history importer.",
+                 "views_file_menu", jump_label="File menu")
+        add_note(views_content, "Live values may be provisional. Hover over missing values for details.")
 
         shortcuts_content = add_section("Shortcuts")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(5)
-        for number, (keys, action) in enumerate((
-            ("Ctrl+Tab / Ctrl+Shift+Tab", "Move to the next or previous tab"),
-            ("Ctrl+M", "Toggle the compact account summary"),
-            ("Ctrl+L", "Return to the full view from the compact summary"),
-            ("Ctrl+H", "Show or hide the account summary"),
-            ("Ctrl++ / Ctrl+=", "Zoom in"),
-            ("Ctrl+-", "Rebalance full rows: remove ideas or set targets to 0%. Otherwise zoom out."),
-            ("Ctrl+Shift+-", "Always zoom out"),
-            ("Ctrl+0", "Reset zoom to 100%"),
-            ("Enter / F2", "Open a selected input; Enter saves and moves down"),
-            ("Esc", "Cancel an unfinished input"),
-            ("Arrow keys", "Move between input cells, saving the current edit"),
-            ("Shift+Space", "Select the current row"),
-            ("Ctrl+Space", "Select the current column"),
-            ("Ctrl+C", "Copy the selection"),
-            ("F1", "Open this guide"),
-        )):
-            key_label = QLabel(keys)
-            key_label.setObjectName("helpShortcutKey")
-            description = QLabel(action)
-            description.setWordWrap(True)
-            grid.addWidget(key_label, number, 0)
-            grid.addWidget(description, number, 1)
-        grid.setColumnStretch(1, 1)
-        shortcuts_content.addLayout(grid)
+        for group, rows in (
+            ("Navigate", (("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab"),
+                          ("F1", "Open this guide"))),
+            ("Display", (("Ctrl+M", "Compact summary"),
+                         ("Ctrl+L", "Full view"),
+                         ("Ctrl+H", "Show / hide account summary"),
+                         ("Ctrl++ / Ctrl+=", "Zoom in"),
+                         ("Ctrl+Shift+-", "Zoom out"),
+                         ("Ctrl+0", "Reset zoom"))),
+            ("Tables and inputs", (("Enter / F2", "Edit cell; Enter saves and moves down"),
+                                   ("Esc", "Cancel edit"),
+                                   ("Arrow keys", "Move and save current edit"),
+                                   ("Shift+Space", "Select row"),
+                                   ("Ctrl+Space", "Select column"),
+                                   ("Ctrl+C", "Copy selection"),
+                                   ("Ctrl+-", "Rebalance: remove idea or zero target; elsewhere zoom out"))),
+        ):
+            group_label = QLabel(group)
+            group_label.setObjectName("helpSection")
+            shortcuts_content.addWidget(group_label)
+            self.help_step_targets["Shortcuts"].append((group, group_label))
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 2)
+            grid.setHorizontalSpacing(20)
+            grid.setVerticalSpacing(5)
+            for number, (keys, action) in enumerate(rows):
+                key_label = QLabel(keys)
+                key_label.setObjectName("helpKey")
+                description = QLabel(action)
+                description.setWordWrap(True)
+                grid.addWidget(key_label, number, 0)
+                grid.addWidget(description, number, 1)
+            grid.setColumnStretch(1, 1)
+            shortcuts_content.addLayout(grid)
         for content in (start_content, portfolio_content, matched_content, analytics_content,
                         rebalance_content, views_content, shortcuts_content):
             content.addStretch()
-        self.help_navigation.setCurrentRow(0)
+        self.help_navigation.setCurrentRow(self.help_section_indices["Start"])
         buttons = widgets.dialog_buttons(self.help_dialog, QDialogButtonBox.Close)
         buttons.rejected.connect(self.help_dialog.reject)
         dialog_layout.addWidget(buttons)
+
+    def _on_help_navigation_changed(self, row):
+        if row == 0:
+            self.start_tutorial()
+        elif row > 0:
+            self.help_sections.setCurrentIndex(row - 1)
+            title = self.help_navigation.item(row).text()
+            self.help_jump_menu.clear()
+            self.help_jump_menu.addItem("Choose a section…")
+            for label, _ in self.help_step_targets[title]:
+                self.help_jump_menu.addItem(label)
+
+    def _jump_to_help_step(self, index):
+        if index < 1:
+            return
+        title = self.help_navigation.currentItem().text()
+        targets = self.help_step_targets.get(title, ())
+        if index > len(targets):
+            return
+        target = targets[index - 1][1]
+        scroller = self.help_sections.currentWidget()
+        scroller.verticalScrollBar().setValue(max(0, target.y() - 8))
+        self.help_jump_menu.setCurrentIndex(0)
 
     def open_help(self):
         current = self.tabs.currentWidget()
@@ -1770,6 +1944,92 @@ class MainWindow(QMainWindow):
         self.help_dialog.show()
         self.help_dialog.raise_()
         self.help_dialog.activateWindow()
+
+    def start_tutorial(self):
+        if self._tutorial_index < 0:
+            self._tutorial_original_tab = self.tabs.currentWidget()
+        self.help_dialog.hide()
+        self._tutorial_index = 0
+        self._show_tutorial_step()
+
+    def _tutorial_steps(self):
+        return (
+            ("Portfolio", "Overview", "Start with the account overview",
+             "The top summary shows account totals. The Overview table lists holdings, prices and broker position differences."),
+            ("Trades", "Trades", "Review your trades",
+             "Use Trades to inspect executions and their realized or open P&L. Filter BUY and SELL from this tab's toolbar."),
+            ("Lots", "Lots", "Inspect open and matched lots",
+             "Lots shows which purchases remain open and how sales are matched. Select a lot and use Matches → Match lots to review or adjust matching."),
+            ("Cash", "Cash", "Follow cash activity",
+             "Cash groups dated deposits, income, tax, fees and other activity from imported reports."),
+            ("Analytics", "Analytics", "Explore account history",
+             "Analytics contains performance, returns, exposure and price charts. Results can be partial when historical data is missing."),
+            ("Rebalance", "Rebalance", "Plan a rebalance",
+             "Set target weights and price scenarios here to estimate trades. This worksheet does not place orders."),
+            (None, "sync", "Refresh data with Sync IBKR",
+             "After configuring IBKR, use this button to refresh live data and recent reports. Hover over it for source status."),
+            (None, "settings", "Configure the connection in Settings",
+             "Open Settings to choose IBKR, enter the host, port, account and Flex query IDs, then apply. Save the Flex token there."),
+            (None, "help", "Return to the guide anytime",
+             "Open Help or press F1 for setup instructions and details about each area. Use File → Import Data for older reports."),
+        )
+
+    def _tutorial_target_rect(self, target):
+        if target in ("sync", "settings", "help"):
+            widget = {"sync": self.sync_button, "settings": self.settings_button,
+                      "help": self.help_button}[target]
+            return widget.geometry().translated(widget.parentWidget().mapTo(self, widget.parentWidget().rect().topLeft()))
+        for index in range(self.tabs.count()):
+            if self.tabs.tabBar().tabData(index) == target or self.tabs.tabText(index) == target:
+                bar = self.tabs.tabBar()
+                rect = bar.tabRect(index)
+                return QRect(bar.mapTo(self, rect.topLeft()), rect.size())
+        return QRect(self.tabs.mapTo(self, self.tabs.rect().topLeft()), self.tabs.size())
+
+    def _show_tutorial_step(self):
+        steps = self._tutorial_steps()
+        tab, target, title, body = steps[self._tutorial_index]
+        if tab is not None:
+            for index in range(self.tabs.count()):
+                if self.tabs.tabBar().tabData(index) == tab or self.tabs.tabText(index) == tab:
+                    self.tabs.setCurrentIndex(index)
+                    break
+        self.centralWidget().layout().activate()
+        self.tutorial.setGeometry(self.rect())
+        self.tutorial.show_step(self._tutorial_index + 1, len(steps), title, body,
+                                self._tutorial_target_rect(target), self.theme)
+        QTimer.singleShot(0, self._refresh_tutorial_position)
+
+    def _refresh_tutorial_position(self):
+        if self._tutorial_index < 0 or not self.tutorial.isVisible():
+            return
+        target = self._tutorial_steps()[self._tutorial_index][1]
+        self.tutorial.setGeometry(self.rect())
+        self.tutorial.update_target(self._tutorial_target_rect(target))
+
+    def _tutorial_back(self):
+        if self._tutorial_index > 0:
+            self._tutorial_index -= 1
+            self._show_tutorial_step()
+
+    def _tutorial_next(self):
+        if self._tutorial_index + 1 == len(self._tutorial_steps()):
+            self._tutorial_exit()
+        else:
+            self._tutorial_index += 1
+            self._show_tutorial_step()
+
+    def _tutorial_exit(self):
+        self.tutorial.hide()
+        self._tutorial_index = -1
+        if self._tutorial_original_tab is not None:
+            self.tabs.setCurrentWidget(self._tutorial_original_tab)
+        self._tutorial_original_tab = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "_tutorial_index", -1) >= 0:
+            self._show_tutorial_step()
 
     def _make_menu(self):
         file_menu = self.menuBar().addMenu("File")
@@ -1833,6 +2093,7 @@ class MainWindow(QMainWindow):
         self.matches_menu.addSeparator()
         self.matches_menu.addAction("Clear match for selected lot", self.clear_match)
         help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Take a tour…", self.start_tutorial)
         guide_action = QAction("User guide (F1)", self)
         guide_action.triggered.connect(self.open_help)
         help_menu.addAction(guide_action)

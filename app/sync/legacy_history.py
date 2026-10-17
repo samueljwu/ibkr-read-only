@@ -16,6 +16,7 @@ from pathlib import Path
 import json
 import re
 
+from app.flex.flex_import import oldest_flex_date
 from app.sync.sync_service import single_writer_lock
 
 
@@ -235,8 +236,10 @@ def _parse_activity_statement(rows, account):
         last = datetime.strptime(end_text, "%B %d, %Y").date()
     except ValueError as exc:
         raise LegacyHistoryError("Activity Statement has an invalid period.") from exc
-    if first > last or last >= date(2022, 1, 1) or last != _month_end(last.strftime("%Y%m")):
-        raise LegacyHistoryError("Choose a pre-2022 statement ending at month end.")
+    floor = oldest_flex_date()
+    if first > last or last >= floor or last != _month_end(last.strftime("%Y%m")):
+        raise LegacyHistoryError(
+            f"Choose a statement ending at month end before {floor.isoformat()}.")
     nav_parts = {}
     for item in _section_rows(rows, "Net Asset Value"):
         if "Asset Class" in item:

@@ -10,8 +10,9 @@ import time
 from app.flex.analytics_flex import run_analytics_flex_sync
 from app.flex.cash_flex import cash_import_windows, run_cash_flex_sync
 from app.storage.database import Database
-from app.flex.flex_import import (HISTORY_YEARS, MAX_FLEX_WINDOW_DAYS, FlexServiceError,
-                                  FlexValidationError, flex_today, safe_flex_error)
+from app.flex.flex_import import (MAX_FLEX_WINDOW_DAYS, FlexServiceError,
+                                  FlexValidationError, flex_today, oldest_flex_date,
+                                  safe_flex_error)
 from app.platform.diagnostics import configure_diagnostics
 from app.sync.sync_service import run_flex_sync
 
@@ -70,7 +71,7 @@ def main(argv=None, progress=None, should_pause=None, completed_windows=None) ->
         for source in sources:
             if not db.setting(QUERY_KEYS[source]):
                 parser.error(f"Set the {source} Flex query ID in the app first")
-        floor_day = date(flex_today().year - HISTORY_YEARS, 1, 1)
+        floor_day = oldest_flex_date()
         floor = floor_day.isoformat()
         spans = windows(args.from_date, args.to_date, WINDOW_DAYS)
         available_spans = [(max(start, floor), end) for start, end in spans if end >= floor]

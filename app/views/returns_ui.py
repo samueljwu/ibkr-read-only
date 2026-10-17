@@ -38,6 +38,14 @@ class ReturnPanel(QWidget):
         self.show.addItems(("All", "Currently held", "Closed"))
         self.show.currentIndexChanged.connect(self._filter)
         toolbar.addWidget(self.show)
+        toolbar.addWidget(QLabel("Type"))
+        self.type_filter = QComboBox()
+        style_toolbar_dropdown(self.type_filter)
+        for label, security_type in (("All", "All"), ("Stocks", "STK"),
+                                     ("Options", "OPT"), ("Bonds", "BOND")):
+            self.type_filter.addItem(label, security_type)
+        self.type_filter.currentIndexChanged.connect(self._filter)
+        toolbar.addWidget(self.type_filter)
         toolbar.addStretch()
         toolbar.addWidget(QLabel("Tables"))
         self.layout_combo = QComboBox()
@@ -152,10 +160,12 @@ class ReturnPanel(QWidget):
     def _filter(self, *_):
         query = self.search.text().strip().casefold()
         mode = self.show.currentText()
+        security_type = self.type_filter.currentData()
         visible = [row for row in self.rows
                    if (not query or query in row["name"].casefold() or
                        query in row["symbol"].casefold() or
                        query in str(row["con_id"] or "")) and
+                   (security_type == "All" or row["security_type"] == security_type) and
                    (mode == "All" or mode == "Closed" and row["status"] == "Closed" or
                     mode == "Currently held" and row["status"] != "Closed")]
         selected = self._selected_id() or self._preferred_id
@@ -329,6 +339,7 @@ class ReturnPanel(QWidget):
 
     def view_state(self):
         return {"search": self.search.text(), "show": self.show.currentText(),
+                "type": self.type_filter.currentData(),
                 "selected": self._selected_id(), "layout": self.layout_combo.currentText()}
 
     def apply_view_state(self, state):
@@ -340,6 +351,9 @@ class ReturnPanel(QWidget):
             self.search.setText(state["search"])
         if self.show.findText(state.get("show")) >= 0:
             self.show.setCurrentText(state["show"])
+        type_index = self.type_filter.findData(state.get("type"))
+        if type_index >= 0:
+            self.type_filter.setCurrentIndex(type_index)
         if self.layout_combo.findText(state.get("layout")) >= 0:
             self.layout_combo.setCurrentText(state["layout"])
         self._filter()

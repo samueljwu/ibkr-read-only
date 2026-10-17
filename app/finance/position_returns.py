@@ -257,6 +257,7 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                                 "earlier gains and losses are excluded.")
         rows.append({"position_id": position_id, "name": position["display_ticker"],
                      "symbol": position["ib_symbol"], "con_id": position["con_id"],
+                     "security_type": position["security_type"],
                      "status": "Short" if quantity < -1e-9 else "Open" if open_position else "Closed",
                      "realized": realized, "unrealized": unrealized, "income": income,
                      "total": total, "percent": percent, "cost": cost if cost_valid else None,

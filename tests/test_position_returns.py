@@ -430,6 +430,58 @@ def test_return_panel_lists_closed_instrument_and_income_detail(tmp_path):
         db.conn.close()
 
 
+def test_return_panel_filters_security_type_and_saves_choice(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from app.views.returns_ui import ReturnPanel
+
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "return-types.sqlite3")
+    panel = None
+    try:
+        service = PortfolioService(db, MockMarketDataProvider())
+        valuations = []
+        for ticker, security_type, multiplier in (
+                ("STOCK", "STK", 1), ("OPTION", "OPT", 100),
+                ("BOND", "BOND", 0.01)):
+            pid = db.add_position({"display_ticker": ticker, "ib_symbol": ticker,
+                                   "security_type": security_type, "multiplier": multiplier})
+            buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-02",
+                                "side": "BUY", "quantity": 1, "price": 10})
+            sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-05",
+                                 "side": "SELL", "quantity": 1, "price": 12})
+            service.matching.match(sell, [(buy, 1)])
+            valuations.append({"id": pid, "position_qty": 0, "reconciliation": "OK"})
+        _cover_cash(db, "2026-01-02", "2026-01-05")
+        panel = ReturnPanel(db, service, 1)
+        panel.refresh(valuations, service.lots_rows(valuations))
+        assert panel.table.rowCount() == 3
+        assert {row["security_type"] for row in panel.rows} == {"STK", "OPT", "BOND"}
+
+        for security_type, label, ticker, total in (
+                ("STK", "Stocks", "STOCK", "$2.00"),
+                ("OPT", "Options", "OPTION", "$200.00"),
+                ("BOND", "Bonds", "BOND", "$0.02")):
+            panel.type_filter.setCurrentIndex(panel.type_filter.findData(security_type))
+            assert panel.type_filter.currentText() == label
+            assert panel.table.rowCount() == 1
+            assert panel.table.item(0, 0).text() == ticker
+            assert panel.stats["Total return"].text() == total
+
+        panel.search.setText("STOCK")
+        assert panel.table.rowCount() == 0
+        panel.search.clear()
+        state = panel.view_state()
+        assert state["type"] == "BOND"
+        panel.type_filter.setCurrentText("All")
+        panel.apply_view_state(state)
+        assert panel.type_filter.currentText() == "Bonds"
+        assert panel.table.rowCount() == 1
+    finally:
+        if panel is not None:
+            panel.close()
+        db.conn.close()
+
+
 def test_old_analytics_view_selection_keeps_exposure_after_return_insert(tmp_path):
     from PySide6.QtWidgets import QApplication
     from app.views.analytics_ui import AnalyticsTab
