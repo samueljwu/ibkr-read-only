@@ -2,42 +2,15 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta
-import msvcrt
-from pathlib import Path
 import time
 
 from app.broker.broker_sync import BrokerIngestor, parse_flex_root, parse_flex_xml
 from app.platform.diagnostics import configure_diagnostics
-from app.flex.flex_import import FlexServiceError, FlexValidationError, flex_day, flex_today, safe_flex_error, fetch_flex
-from app.platform.secret_store import load_flex_token
+from app.platform.file_lock import single_writer_lock
+from app.flex.flex_import import (FlexServiceError, FlexValidationError, flex_day, flex_today,
+                                  safe_flex_error, fetch_flex, resolve_flex_token)
 from app.finance.services import MatchingService
-
-
-@contextmanager
-def single_writer_lock(database_path: Path, lock_name="ibkr-sync.lock"):
-    lock_path = database_path.parent / lock_name
-    handle = None
-    try:
-        handle = lock_path.open("a+b")
-        handle.seek(0)
-        if not handle.read(1):
-            handle.seek(0)
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError as exc:
-        if handle:
-            handle.close()
-        raise RuntimeError("Another IBKR Flex sync is running") from exc
-    try:
-        yield
-    finally:
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        handle.close()
 
 
 def planned_windows(db, account_id: str, today: date) -> list[tuple[str, str]]:
@@ -129,9 +102,7 @@ def run_flex_sync(db, account_id: str, query_id: str, *, today: date | None = No
         changed_position_ids = set()
         unchanged = updated = 0
         try:
-            secret = secret or load_flex_token(account_id)
-            if not secret:
-                raise ValueError("IBKR Flex token is missing; renew it in Client Portal")
+            secret = resolve_flex_token(account_id, secret)
             windows = windows_override if windows_override is not None else planned_windows(db, account_id, today)
             log.info("Run %s started; %s date windows planned through %s", run_id, len(windows), today - timedelta(days=1))
             if windows and not compare_existing:

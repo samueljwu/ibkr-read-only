@@ -2,9 +2,34 @@
 
 import pytest
 
-from app.flex.flex_import import FlexServiceError, FlexValidationError
+from app.flex.flex_import import FlexEnvironmentError, FlexServiceError, FlexValidationError
 from app.storage.database import Database
 from scripts import sync_analytics, sync_cash, sync_trades
+
+
+@pytest.mark.parametrize("module,runner,source,log_name", [
+    (sync_trades, "run_flex_sync", "flex", "sync-trades"),
+    (sync_analytics, "run_analytics_flex_sync", "analytics", "sync-analytics"),
+    (sync_cash, "run_cash_flex_sync", "cash", "sync-cash"),
+])
+def test_tls_failure_message_matches_across_sync_workers(
+        tmp_path, monkeypatch, capsys, module, runner, source, log_name):
+    message = "IBKR Flex TLS certificate verification failed. Check this Python installation's certificates."
+
+    def fail(*_args, **_kwargs):
+        raise FlexEnvironmentError(message)
+
+    monkeypatch.setattr(module, runner, fail)
+    path = tmp_path / "portfolio.sqlite3"
+    assert module.main(path) == 1
+    db = Database(path)
+    try:
+        assert db.metadata(f"ibkr_{source}_sync_status") == "failed"
+        assert db.metadata(f"ibkr_{source}_sync_error") == message
+        assert message in capsys.readouterr().err
+        assert message in (tmp_path / "logs" / f"{log_name}.log").read_text()
+    finally:
+        db.conn.close()
 
 
 @pytest.mark.parametrize("module,runner", [

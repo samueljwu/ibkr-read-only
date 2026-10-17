@@ -9,8 +9,8 @@ import re
 import xml.etree.ElementTree as ET
 
 from app.flex.flex_import import (MAX_FLEX_WINDOW_DAYS, FlexRequestPacer, FlexServiceError,
-                                  FlexValidationError, flex_day, flex_today, fetch_flex)
-from app.platform.secret_store import load_flex_token
+                                  FlexValidationError, flex_day, flex_today, fetch_flex,
+                                  resolve_flex_token)
 from app.sync.sync_service import single_writer_lock
 
 
@@ -243,9 +243,7 @@ def run_cash_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=None,
         db, portfolio_id, today, account_id)
     if not windows:
         return {"windows": 0, "movements": 0}
-    secret = token or load_flex_token(account_id)
-    if not secret:
-        raise FlexValidationError("IBKR Flex token is missing; renew it in Client Portal")
+    secret = resolve_flex_token(account_id, token)
     count = 0
     with single_writer_lock(db.path, "ibkr-cash-sync.lock"):
         if backup and not compare_existing:

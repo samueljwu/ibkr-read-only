@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel, QModelIndex, QRect, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
+                               QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QTabWidget,
                                QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTableView, QToolButton, QVBoxLayout, QWidget)
@@ -44,6 +44,7 @@ from app.views.themed_checkbox import ThemedCheckBox
 from app.views.help_visuals import HelpScreenshot
 from app.views.history_import_ui import HistoryImportDialog
 from app.views.action_icons import action_icon
+from app.views.shortcuts import native_text, shortcut
 from app.views.lot_matching_ui import LotMatchDialog
 from app.views.tutorial_ui import TutorialOverlay
 from app.views import widgets
@@ -591,6 +592,7 @@ class MainWindow(QMainWindow):
         summary_layout.addWidget(self.data_notice)
         root_layout.addWidget(summary)
         self.tabs = QTabWidget()
+        self.tabs.tabBar().setExpanding(False)
         root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
         self.sync_progress_label = QLabel("Syncing IBKR…")
@@ -638,15 +640,20 @@ class MainWindow(QMainWindow):
         self._table_click_away_filter = TableClickAwayFilter(self)
         QApplication.instance().installEventFilter(self._table_click_away_filter)
         enable_label_copy(self)
-        self.next_tab_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        self.next_tab_shortcut = QShortcut(shortcut("Ctrl+Tab", "Meta+Tab"), self)
         self.next_tab_shortcut.setContext(Qt.WindowShortcut)
         self.next_tab_shortcut.activated.connect(lambda: self._step_tab(1))
-        self.previous_tab_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        self.previous_tab_shortcut = QShortcut(shortcut("Ctrl+Shift+Tab", "Meta+Shift+Tab"), self)
         self.previous_tab_shortcut.setContext(Qt.WindowShortcut)
         self.previous_tab_shortcut.activated.connect(lambda: self._step_tab(-1))
-        self.help_shortcut = QShortcut(QKeySequence("F1"), self)
+        help_key = QKeySequence(QKeySequence.HelpContents) if sys.platform == "darwin" else QKeySequence("F1")
+        self.help_shortcut = QShortcut(help_key, self)
         self.help_shortcut.setContext(Qt.ApplicationShortcut)
         self.help_shortcut.activated.connect(self.open_help)
+        if sys.platform == "darwin":
+            self.help_f1_shortcut = QShortcut(QKeySequence("F1"), self)
+            self.help_f1_shortcut.setContext(Qt.ApplicationShortcut)
+            self.help_f1_shortcut.activated.connect(self.open_help)
         self._restore_columns()
         self._restore_default_views()
         self._update_summary_visibility()
@@ -1509,8 +1516,8 @@ class MainWindow(QMainWindow):
         page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
         widgets.apply_layout(layout, "page")
-        form = QFormLayout()
-        advanced_form = QFormLayout()
+        form = widgets.form_layout()
+        advanced_form = widgets.form_layout()
         self.settings_fields = {}
         definitions = [
             ("provider", "Market provider", ["Mock", "IBKR"]),
@@ -1870,22 +1877,29 @@ class MainWindow(QMainWindow):
         add_note(views_content, "Live values may be provisional. Hover over missing values for details.")
 
         shortcuts_content = add_section("Shortcuts")
+        next_tab_keys = (f"{native_text(shortcut('Ctrl+Tab', 'Meta+Tab'))} / "
+                         f"{native_text(shortcut('Ctrl+Shift+Tab', 'Meta+Shift+Tab'))}")
+        help_keys = native_text(QKeySequence(QKeySequence.HelpContents)
+                                if sys.platform == "darwin" else QKeySequence("F1"))
+        if sys.platform == "darwin":
+            help_keys += " / F1"
         for group, rows in (
-            ("Navigate", (("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab"),
-                          ("F1", "Open this guide"))),
-            ("Display", (("Ctrl+M", "Compact summary"),
-                         ("Ctrl+L", "Full view"),
-                         ("Ctrl+H", "Show / hide account summary"),
-                         ("Ctrl++ / Ctrl+=", "Zoom in"),
-                         ("Ctrl+Shift+-", "Zoom out"),
-                         ("Ctrl+0", "Reset zoom"))),
+            ("Navigate", ((next_tab_keys, "Next / previous tab"),
+                          (help_keys, "Open this guide"))),
+            ("Display", ((native_text(shortcut("Ctrl+M", "Ctrl+Shift+M")), "Compact summary"),
+                         (native_text(shortcut("Ctrl+L", "Ctrl+Shift+L")), "Full view"),
+                         (native_text(shortcut("Ctrl+H", "Ctrl+Shift+H")), "Show / hide account summary"),
+                         (" / ".join(native_text(shortcut(key)) for key in ("Ctrl++", "Ctrl+=")), "Zoom in"),
+                         (native_text(shortcut("Ctrl+Shift+-")), "Zoom out"),
+                         (native_text(shortcut("Ctrl+0")), "Reset zoom"))),
             ("Tables and inputs", (("Enter / F2", "Edit cell; Enter saves and moves down"),
                                    ("Esc", "Cancel edit"),
                                    ("Arrow keys", "Move and save current edit"),
                                    ("Shift+Space", "Select row"),
-                                   ("Ctrl+Space", "Select column"),
-                                   ("Ctrl+C", "Copy selection"),
-                                   ("Ctrl+-", "Rebalance: remove idea or zero target; elsewhere zoom out"))),
+                                   (native_text(shortcut("Ctrl+Space")), "Select column"),
+                                   (native_text(QKeySequence(QKeySequence.Copy)), "Copy selection"),
+                                   (native_text(shortcut("Ctrl+-")),
+                                    "Rebalance: remove idea or zero target; elsewhere zoom out"))),
         ):
             group_label = QLabel(group)
             group_label.setObjectName("helpSection")
@@ -2045,15 +2059,15 @@ class MainWindow(QMainWindow):
         self.show_summary_action = view_menu.addAction("Show account summary")
         self.show_summary_action.setCheckable(True)
         self.show_summary_action.setChecked(self._show_account_summary)
-        self.show_summary_action.setShortcut(QKeySequence("Ctrl+H"))
+        self.show_summary_action.setShortcut(shortcut("Ctrl+H", "Ctrl+Shift+H"))
         self.show_summary_action.toggled.connect(self._set_account_summary_visible)
         self.compact_summary_action = view_menu.addAction("Compact summary view")
         self.compact_summary_action.setCheckable(True)
-        self.compact_summary_action.setShortcut(QKeySequence("Ctrl+M"))
+        self.compact_summary_action.setShortcut(shortcut("Ctrl+M", "Ctrl+Shift+M"))
         self.compact_summary_action.toggled.connect(self._set_compact_summary)
         self.expand_full_view_action = view_menu.addAction(
             "Expand full view", lambda: self.compact_summary_action.setChecked(False))
-        self.expand_full_view_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.expand_full_view_action.setShortcut(shortcut("Ctrl+L", "Ctrl+Shift+L"))
         self.expand_full_view_action.setEnabled(False)
         view_menu.addSeparator()
         self.zoom_in_action = view_menu.addAction("Zoom in", self.zoom_in)
@@ -2776,7 +2790,8 @@ class MainWindow(QMainWindow):
         message.setWindowTitle("Save database recovery code")
         message.setIcon(QMessageBox.Warning)
         message.setText("Save this recovery code outside the data and backup folders. "
-                        "You need it to restore an encrypted database on another Windows profile.\n\n" + code)
+                        "You need it to open an encrypted database if its stored key is unavailable, "
+                        "including on another device or user account.\n\n" + code)
         message.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         message.exec()
 

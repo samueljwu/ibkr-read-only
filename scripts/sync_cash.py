@@ -20,11 +20,12 @@ def main(database_path=None):
         log.info("Cash history sync complete: %s", result)
         return 0
     except Exception as exc:
+        message = safe_flex_error(exc)
         db.set_metadata("ibkr_cash_sync_status", "failed")
-        db.set_metadata("ibkr_cash_sync_error", safe_flex_error(exc))
-        log.error("Cash history sync failed: %s", type(exc).__name__)
+        db.set_metadata("ibkr_cash_sync_error", message)
+        log.error("Cash history sync failed: %s: %s", type(exc).__name__, message)
         if sys.stderr is not None:
-            print(f"IBKR Cash history sync failed: {type(exc).__name__}", file=sys.stderr)
+            print(f"IBKR Cash history sync failed: {message}", file=sys.stderr)
         return 1
     finally:
         db.conn.close()

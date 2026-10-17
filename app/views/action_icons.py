@@ -1,7 +1,7 @@
 """Small theme-colored icons for the main window actions."""
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 
@@ -33,10 +33,12 @@ def action_icon(name, color):
            f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
            f'{_PATHS[name]}</svg>')
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
-    pixmap = QPixmap(60, 60)
-    pixmap.setDevicePixelRatio(3)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter, QRectF(0, 0, 20, 20))
+    renderer.setAspectRatioMode(Qt.KeepAspectRatio)
+    image = QImage(60, 60, QImage.Format_ARGB32_Premultiplied)
+    image.fill(Qt.transparent)
+    painter = QPainter(image)
+    renderer.render(painter, QRectF(0, 0, 60, 60))
     painter.end()
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(3)
     return QIcon(pixmap)

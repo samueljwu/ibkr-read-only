@@ -8,7 +8,7 @@ rules in ui_theme.py.
 import json
 
 from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
                                QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
 from app.views.ui_theme import (CARD_MARGINS, DIALOG_MARGINS, DIALOG_SPACING,
@@ -34,6 +34,16 @@ def apply_layout(layout, kind):
         layout.setSpacing(DIALOG_SPACING)
     else:
         raise ValueError(f"Unknown layout kind: {kind!r}")
+    return layout
+
+
+def form_layout(parent=None):
+    """Keep forms left aligned and let their fields grow on every OS."""
+    layout = QFormLayout(parent)
+    layout.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+    layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+    layout.setRowWrapPolicy(QFormLayout.DontWrapRows)
     return layout
 
 

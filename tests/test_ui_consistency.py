@@ -11,7 +11,7 @@ from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QDialogButtonBox, QHeaderView,
-                               QDoubleSpinBox, QLabel, QLineEdit, QPushButton,
+                               QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
                                QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 import app.ui as ui
@@ -53,6 +53,17 @@ def _font_size(widget):
 def _margins(widget):
     margins = widget.layout().contentsMargins()
     return margins.left(), margins.top(), margins.right(), margins.bottom()
+
+
+def test_tabs_and_settings_use_explicit_left_alignment(window):
+    assert not window.tabs.tabBar().expanding()
+    assert not window.analytics_tab.sections.tabBar().expanding()
+    settings_page = window.settings_dialog.findChild(QScrollArea, "settingsScroll").widget()
+    forms = (settings_page.layout().itemAt(0).layout(), window.advanced_settings.layout())
+    for form in forms:
+        assert form.formAlignment() & Qt.AlignLeft
+        assert form.labelAlignment() & Qt.AlignLeft
+        assert form.fieldGrowthPolicy() == QFormLayout.ExpandingFieldsGrow
 
 
 def _assert_input_text_fits(root):

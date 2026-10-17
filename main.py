@@ -13,7 +13,8 @@ def _show_recovery_code(parent, code):
     message.setWindowTitle("Save database recovery code")
     message.setIcon(QMessageBox.Warning)
     message.setText("Save this recovery code outside the database and backup folders. "
-                    "It is required to restore your portfolio on another Windows profile.\n\n" + code)
+                    "You need it to open an encrypted portfolio if its stored key is unavailable, "
+                    "including on another device or user account.\n\n" + code)
     message.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
     message.exec()
 

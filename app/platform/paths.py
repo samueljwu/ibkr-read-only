@@ -13,6 +13,8 @@ APP_DATA_NAME = "CustomIBMonitor"
 
 
 def user_data_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DATA_NAME
     base = os.environ.get("LOCALAPPDATA")
     if base:
         return Path(base) / APP_DATA_NAME

@@ -7,8 +7,8 @@ from hashlib import sha256
 import time
 import xml.etree.ElementTree as ET
 
-from app.flex.flex_import import FlexServiceError, FlexValidationError, flex_day, flex_today, require_usd_base, fetch_flex
-from app.platform.secret_store import load_flex_token
+from app.flex.flex_import import (FlexServiceError, FlexValidationError, flex_day, flex_today,
+                                  require_usd_base, fetch_flex, resolve_flex_token)
 from app.sync.sync_service import single_writer_lock
 
 
@@ -220,9 +220,7 @@ def run_analytics_flex_sync(db, account_id, query_id, *, portfolio_id=1, today=N
         raise FlexValidationError("IBKR account and Analytics Flex query ID are required")
     db.validate_account_ownership(account_id)
     today = today or flex_today()
-    secret = token or load_flex_token(account_id)
-    if not secret:
-        raise FlexValidationError("IBKR Flex token is missing; renew it in Client Portal")
+    secret = resolve_flex_token(account_id, token)
     with single_writer_lock(db.path, "ibkr-analytics-sync.lock"):
         windows = windows_override if windows_override is not None else planned_analytics_windows(db, account_id, today)
         if windows and not compare_existing:

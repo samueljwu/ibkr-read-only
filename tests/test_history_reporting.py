@@ -7,7 +7,7 @@ import pytest
 
 from app.flex.analytics_flex import run_analytics_flex_sync
 from app.flex.cash_flex import run_cash_flex_sync
-from app.flex.flex_import import FlexServiceError
+from app.flex.flex_import import FlexEnvironmentError, FlexServiceError
 from app.platform import history_status
 from app.platform.history_status import (format_history_details, format_imported_periods,
                                          pause_request_path, read_status, write_status)
@@ -56,6 +56,24 @@ def configured_database(tmp_path):
         db.set_setting(key, "synthetic-query")
     db.conn.close()
     return path
+
+
+def test_tls_failure_is_saved_for_history_import(tmp_path, monkeypatch):
+    path = configured_database(tmp_path)
+    status_file = tmp_path / "history-import-synthetic.json"
+    message = "IBKR Flex TLS certificate verification failed. Check this Python installation's certificates."
+
+    def fail(_db, _account, _query, *, windows_override, on_window_start, **_kwargs):
+        on_window_start(*windows_override[0])
+        raise FlexEnvironmentError(message)
+
+    monkeypatch.setitem(import_history.RUNNERS, "trades", fail)
+    args = arguments(path)
+    assert history_worker.main(["--status-file", str(status_file), *args]) == 1
+    status = read_status(status_file)
+    assert status["state"] == "failed"
+    assert status["message"] == message
+    assert message in format_history_details(status)
 
 
 def test_completed_flex_windows_include_prior_runs_for_selected_account_only(tmp_path):

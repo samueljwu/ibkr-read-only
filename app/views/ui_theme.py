@@ -240,6 +240,8 @@ QScrollBar:horizontal { background: ${canvas}; border: 0; height: 10px; margin: 
 QScrollBar::handle:horizontal { background: ${line}; border-radius: 5px; min-width: 28px; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QTabWidget::pane { border: 0; border-top: 1px solid ${line}; }
+QTabWidget::tab-bar { subcontrol-position: left; }
+QTabBar { alignment: left; }
 QTabBar::tab {
     background: ${canvas}; color: ${muted}; padding: 9px 18px;
     border: 0; border-bottom: 2px solid transparent;

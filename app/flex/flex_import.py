@@ -1,12 +1,17 @@
 """Retrieve IBKR Activity Flex reports for automatic trade sync."""
 
 from datetime import date, datetime
+from ssl import SSLCertVerificationError, create_default_context
 from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 import time
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
+
+import certifi
+
+from app.platform.secret_store import load_flex_token
 
 
 MAX_FLEX_WINDOW_DAYS = 365
@@ -30,7 +35,13 @@ class _RejectRedirects(HTTPRedirectHandler):
         return None
 
 
-_opener = build_opener(_RejectRedirects)
+def _build_opener():
+    context = create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return build_opener(_RejectRedirects, HTTPSHandler(context=context))
+
+
+_opener = _build_opener()
 
 
 class FlexServiceError(ValueError):
@@ -45,6 +56,24 @@ class FlexServiceError(ValueError):
 
 class FlexValidationError(ValueError):
     """A local validation message containing no report values or server text."""
+
+
+class FlexEnvironmentError(ValueError):
+    """A fixed, credential-free description of a local import failure."""
+
+
+def resolve_flex_token(account_id, token=None):
+    if token:
+        return token
+    try:
+        secret = load_flex_token(account_id)
+    except Exception:
+        raise FlexEnvironmentError(
+            "The import process could not read the Flex token from the OS credential store. "
+            "Check Keychain access on macOS or Credential Manager on Windows.") from None
+    if not secret:
+        raise FlexValidationError("IBKR Flex token is missing; save it in Settings first")
+    return secret
 
 
 def flex_day(value):
@@ -82,7 +111,7 @@ def require_usd_base(statement, account_id, *, conversion_evidence=False):
 
 def safe_flex_error(exc):
     """Return only local validation text or allowlisted service context."""
-    if isinstance(exc, FlexValidationError):
+    if isinstance(exc, (FlexValidationError, FlexEnvironmentError)):
         return str(exc)
     if isinstance(exc, FlexServiceError):
         code = exc.code if type(exc.code) is int and 1000 <= exc.code <= 1999 else None
@@ -118,6 +147,17 @@ class FlexRequestPacer:
                     raise
 
 
+def _transport_failure(exc, stage):
+    if isinstance(exc, HTTPError):
+        return FlexEnvironmentError(f"IBKR Flex {stage} returned HTTP {exc.code}.")
+    if (isinstance(exc, SSLCertVerificationError) or
+            isinstance(exc, URLError) and isinstance(exc.reason, SSLCertVerificationError)):
+        return FlexEnvironmentError(
+            "IBKR Flex TLS certificate verification failed. Check this Python installation's certificates.")
+    return FlexEnvironmentError(
+        f"Could not connect to IBKR Flex during {stage}. Check the network and proxy settings.")
+
+
 def fetch_flex(query_id, token, timeout=20, from_day=None, to_day=None):
     """Fetch a saved Flex query; the token is supplied at call time only."""
     if not query_id or not token:
@@ -136,8 +176,8 @@ def fetch_flex(query_id, token, timeout=20, from_day=None, to_day=None):
     try:
         with _opener.open(Request(url, headers=headers), timeout=timeout) as response:
             status = ET.fromstring(response.read())
-    except (HTTPError, URLError, TimeoutError):
-        raise ValueError("Flex service request failed; check the query, token and connection") from None
+    except (HTTPError, URLError, SSLCertVerificationError, TimeoutError) as exc:
+        raise _transport_failure(exc, "request") from None
     if status.findtext("Status") != "Success":
         code = status.findtext("ErrorCode")
         message = status.findtext("ErrorMessage") or "Flex request failed"
@@ -152,8 +192,8 @@ def fetch_flex(query_id, token, timeout=20, from_day=None, to_day=None):
         try:
             with _opener.open(Request(url, headers=headers), timeout=timeout) as response:
                 data = response.read(30_000_001)
-        except (HTTPError, URLError, TimeoutError):
-            raise ValueError("Flex statement download failed; check the query, token and connection") from None
+        except (HTTPError, URLError, SSLCertVerificationError, TimeoutError) as exc:
+            raise _transport_failure(exc, "statement download") from None
         if len(data) > 30_000_000:
             raise ValueError("Flex report is too large")
         error = ET.fromstring(data)

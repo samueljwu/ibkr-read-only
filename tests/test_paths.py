@@ -12,6 +12,12 @@ from app.storage.database import Database
 from app.ui import MainWindow
 
 
+def test_macos_uses_application_support(monkeypatch):
+    monkeypatch.setattr(paths.sys, "platform", "darwin")
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert paths.user_data_dir() == Path.home() / "Library" / "Application Support" / "CustomIBMonitor"
+
+
 def test_new_install_uses_per_user_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(paths, "legacy_source_dir", lambda: tmp_path / "source")

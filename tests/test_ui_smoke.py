@@ -4,7 +4,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QPainter, QPalette, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QToolButton, QVBoxLayout, QWidget
@@ -25,6 +25,11 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
         assert [button.accessibleName() for button in buttons] == [
             "Sync IBKR", "Pause sync", "Switch to dark mode", "Help", "Settings"]
         assert all(button.toolTip() for button in buttons)
+        image = window.settings_button.icon().pixmap(QSize(20, 20)).toImage()
+        pixels = [(x, y) for y in range(image.height()) for x in range(image.width())
+                  if image.pixelColor(x, y).alpha() > 0]
+        assert abs((max(x for x, _ in pixels) - min(x for x, _ in pixels)) -
+                   (max(y for _, y in pixels) - min(y for _, y in pixels))) <= 2
         window.theme_button.click()
         assert window.theme_button.accessibleName() == "Switch to light mode"
         assert all(not button.icon().isNull() for button in buttons)

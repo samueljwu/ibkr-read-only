@@ -10,7 +10,7 @@ from collections import defaultdict
 from PySide6.QtCore import QMimeData, QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
-                               QDoubleSpinBox, QFormLayout, QHeaderView, QHBoxLayout, QLabel, QMessageBox,
+                               QDoubleSpinBox, QHeaderView, QHBoxLayout, QLabel, QMessageBox,
                                QScrollArea, QSplitter, QVBoxLayout, QWidget)
 
 from app.finance.calculations import closed_lot
@@ -563,7 +563,7 @@ class LotMatchDialog(QDialog):
         dialog.setWindowTitle("Split purchase")
         layout = QVBoxLayout(dialog)
         widgets.apply_layout(layout, "dialog")
-        form = QFormLayout()
+        form = widgets.form_layout()
         current_parts = self._parts(buy_id)
         count = style_toolbar_dropdown(QComboBox())
         max_lines = max(len(current_parts), min(100, int(total / 0.000001)))
@@ -576,7 +576,7 @@ class LotMatchDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         line_container = QWidget()
-        line_form = QFormLayout(line_container)
+        line_form = widgets.form_layout(line_container)
         scroll.setWidget(line_container)
         layout.addWidget(scroll)
         summary = widgets.hint("")

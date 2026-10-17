@@ -498,6 +498,7 @@ class AnalyticsTab(QWidget):
         controls.addLayout(detail_controls)
 
         self.sections = QTabWidget()
+        self.sections.tabBar().setExpanding(False)
         self.sections.setObjectName("analyticsSections")
         self.sections.setMinimumWidth(0)
         self.sections.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)

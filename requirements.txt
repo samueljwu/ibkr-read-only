@@ -3,4 +3,6 @@ pandas>=2.1
 numpy>=1.26
 ibapi>=9.81.1
 openpyxl>=3.1
+certifi>=2026.7.22
 sqlcipher3==0.6.4
+keyring>=25; sys_platform == "darwin"

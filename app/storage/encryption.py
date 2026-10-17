@@ -19,7 +19,7 @@ SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 class MissingDatabaseKey(ValueError):
-    """An encrypted database needs its recovery code on this Windows profile."""
+    """An encrypted database needs its recovery code when its stored key is unavailable."""
 
 
 class InvalidDatabaseKey(ValueError):

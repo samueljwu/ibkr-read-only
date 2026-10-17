@@ -16,6 +16,7 @@ from app.finance.calcs import calculate_targets, scale_target_weights, scenario_
 from app.finance.calculations import choose_price, valid_price
 from app.market.market_data import IBKRMarketDataProvider
 from app.views import widgets
+from app.views.shortcuts import native_text
 from app.views.table_ui import InputReportTable, SortItem, build_header_menu
 from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
@@ -173,7 +174,6 @@ class CalcsTab(QWidget):
 
         self.table = CalcsTable(0, len(self.HEADERS))
         self.table.cash_editor = self.cash_editor
-        self.table.setToolTip("Tinted cells are editable. Drag column headers to reorder them. Arrows move between cells; Enter saves and moves down; Esc cancels an edit. Select full rows with Shift+Space, then Ctrl+- to remove ideas or set holdings' targets to 0%.")
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
@@ -181,6 +181,11 @@ class CalcsTab(QWidget):
         self.remove_row_shortcut = QShortcut(QKeySequence("Ctrl+-"), self.table)
         self.remove_row_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.remove_row_shortcut.activated.connect(self._zero_or_remove_selected_rows)
+        self.table.setToolTip(
+            "Tinted cells are editable. Drag column headers to reorder them. "
+            "Arrows move between cells; Enter saves and moves down; Esc cancels an edit. "
+            f"Select full rows with Shift+Space, then {native_text(self.remove_row_shortcut.key())} "
+            "to remove ideas or set holdings' targets to 0%.")
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(65)
