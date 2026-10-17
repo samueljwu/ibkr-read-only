@@ -393,6 +393,7 @@ class Database:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_portfolio ON positions(portfolio_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_fee_adjustments_trade ON trade_fee_adjustments(trade_row_id)")
             # Ingest and matching look these up per record; without them SQLite
             # scans broker_source_records and trade_matches on every write.
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_source_records_trade ON broker_source_records(trade_row_id)")
@@ -447,16 +448,33 @@ class Database:
                     added.add(name)
         return added
 
-    def rows(self, table, portfolio_id=None):
+    def rows(self, table, portfolio_id=None, *, position_ids=None):
         if table not in ("positions", "trades", "trade_matches"):
             raise ValueError(table)
+        if position_ids is not None:
+            if portfolio_id is None:
+                raise ValueError("A portfolio is required for position-scoped rows")
+            position_ids = tuple(sorted(set(position_ids)))
+            if not position_ids:
+                return []
+            placeholders = ",".join("?" for _ in position_ids)
         if table == "trades":
-            query = "SELECT * FROM trades" + (" WHERE portfolio_id=?" if portfolio_id is not None else "") + " ORDER BY id"
-            raw = [dict(r) for r in self.conn.execute(query, (portfolio_id,) if portfolio_id is not None else ())]
+            where = (" WHERE portfolio_id=?" if portfolio_id is not None else "")
+            if position_ids is not None:
+                where += f" AND position_id IN ({placeholders})"
+            params = ((portfolio_id, *position_ids) if position_ids is not None else
+                      (portfolio_id,) if portfolio_id is not None else ())
+            raw = [dict(r) for r in self.conn.execute("SELECT * FROM trades" + where + " ORDER BY id", params)]
+            fee_where = (f" WHERE trade_row_id IN (SELECT id FROM trades{where})"
+                         if position_ids is not None else "")
+            fee_params = params if position_ids is not None else ()
             refunds = {r["trade_row_id"]: r["refund"] for r in self.conn.execute(
-                "SELECT trade_row_id,SUM(CAST(refund_usd AS REAL)) AS refund FROM trade_fee_adjustments GROUP BY trade_row_id")}
+                "SELECT trade_row_id,SUM(CAST(refund_usd AS REAL)) AS refund FROM trade_fee_adjustments" +
+                fee_where + " GROUP BY trade_row_id", fee_params)}
             pending_fees = {r[0] for r in self.conn.execute(
-                "SELECT trade_row_id FROM broker_executions WHERE status LIKE '%commission%'")}
+                "SELECT trade_row_id FROM broker_executions WHERE status LIKE '%commission%'" +
+                (f" AND trade_row_id IN (SELECT id FROM trades{where})"
+                 if position_ids is not None else ""), fee_params)}
             for row in raw:
                 row["commission_complete"] = row["id"] not in pending_fees
                 row["raw_commission_usd"] = row["commission_usd"]
@@ -465,12 +483,19 @@ class Database:
             return raw
         if portfolio_id is not None:
             if table == "trade_matches":
+                scoped = (f" AND b.position_id IN ({placeholders})"
+                          if position_ids is not None else "")
                 return [dict(r) for r in self.conn.execute("""SELECT m.* FROM trade_matches m
                     JOIN trades b ON b.id=m.buy_trade_id JOIN trades s ON s.id=m.sell_trade_id
-                    WHERE b.portfolio_id=? AND s.portfolio_id=? ORDER BY m.match_id""",
+                    WHERE b.portfolio_id=? AND s.portfolio_id=?""" + scoped +
+                    " ORDER BY m.match_id",
+                    (portfolio_id, portfolio_id, *position_ids) if position_ids is not None else
                     (portfolio_id, portfolio_id))]
             return [dict(r) for r in self.conn.execute(
-                f"SELECT * FROM {table} WHERE portfolio_id=? ORDER BY id", (portfolio_id,))]
+                f"SELECT * FROM {table} WHERE portfolio_id=?" +
+                (f" AND id IN ({placeholders})" if position_ids is not None else "") +
+                " ORDER BY id",
+                (portfolio_id, *position_ids) if position_ids is not None else (portfolio_id,))]
         return [dict(r) for r in self.conn.execute(f"SELECT * FROM {table} ORDER BY id" if table != "trade_matches" else
                                                    "SELECT * FROM trade_matches ORDER BY match_id")]
 

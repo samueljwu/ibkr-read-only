@@ -1,6 +1,7 @@
 """Portfolio projections and auditable many-to-many trade matching."""
 
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -15,14 +16,16 @@ class MatchingService:
         self.db = db
         self.portfolio_id = portfolio_id
 
-    def _snapshot(self):
+    def _snapshot(self, trades=None, matches=None):
         """Load trades and their unmatched quantities once for a batch of work.
 
         The methods below would otherwise re-read both tables on every iteration.
         """
-        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
+        trades = {t["id"]: t for t in (trades if trades is not None else
+                                      self.db.rows("trades", self.portfolio_id))}
         used = defaultdict(float)
-        for match in self.db.rows("trade_matches", self.portfolio_id):
+        for match in (matches if matches is not None else
+                      self.db.rows("trade_matches", self.portfolio_id)):
             used[match["buy_trade_id"]] += match["matched_qty"]
             used[match["sell_trade_id"]] += match["matched_qty"]
         remaining = {key: max(0.0, float(t["quantity"]) - used[key]) for key, t in trades.items()}
@@ -35,8 +38,8 @@ class MatchingService:
             index[trade["position_id"]].append(trade)
         return index
 
-    def remaining(self):
-        return self._snapshot()[1]
+    def remaining(self, *, trades=None, matches=None):
+        return self._snapshot(trades, matches)[1]
 
     @staticmethod
     def _precedes(buy, sell):
@@ -342,9 +345,10 @@ class MatchingService:
         manual_rows = [(b, s, q, "manual") for b, s, q in normalized]
         return manual_rows + auto
 
-    def apply_position_matches(self, position_id, manual_matches):
+    def apply_position_matches(self, position_id, manual_matches, *, settings=None):
         """Replace one instrument's matches with manual allocations plus a recalculated
-        automatic remainder. Validates first; on failure, no rows change (atomic).
+        automatic remainder. Optional view settings share the same transaction.
+        Validates first; on failure, no rows change (atomic).
         """
         planned = self.plan_position(position_id, manual_matches)
         _, matches = self.position_state(position_id)
@@ -353,6 +357,11 @@ class MatchingService:
             self.db.conn.executemany("DELETE FROM trade_matches WHERE match_id=?", [(i,) for i in old_ids])
             self.db.conn.executemany("""INSERT INTO trade_matches
                 (buy_trade_id,sell_trade_id,matched_qty,origin) VALUES (?,?,?,?)""", planned)
+            if settings:
+                self.db.conn.executemany(
+                    """INSERT INTO settings(key,value) VALUES (?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    [(key, str(value)) for key, value in settings.items()])
 
     def replace_sell_matches(self, sell_id, allocations):
         """Replace one sale's allocations while preserving its raw trade."""
@@ -392,10 +401,11 @@ class MatchingService:
         with self.db.conn:
             self.db.conn.execute("DELETE FROM trade_matches WHERE match_id=?", (match_id,))
 
-    def trade_rows(self):
-        remaining = self.remaining()
+    def trade_rows(self, *, trades=None, remaining=None):
+        trades = trades if trades is not None else self.db.rows("trades", self.portfolio_id)
+        remaining = remaining if remaining is not None else self.remaining(trades=trades)
         result = []
-        for trade in self.db.rows("trades", self.portfolio_id):
+        for trade in trades:
             row = dict(trade)
             if not trade["commission_complete"]:
                 row["commission_usd"] = None
@@ -440,6 +450,64 @@ class PortfolioService:
         self.db, self.market = db, market
         self.portfolio_id = portfolio_id
         self.matching = MatchingService(db, portfolio_id)
+        self._shared_trades = None
+        self._shared_matches = None
+        self._shared_positions = None
+        self._shared_remaining = None
+        self._shared_histories = None
+
+    @contextmanager
+    def shared_rows(self):
+        """Reuse one ledger read while building related views in a refresh."""
+        if self._shared_trades is not None:
+            yield
+            return
+        trades = self.db.rows("trades", self.portfolio_id)
+        matches = self.db.rows("trade_matches", self.portfolio_id)
+        positions = self.db.rows("positions", self.portfolio_id)
+        self._shared_trades = trades
+        self._shared_matches = matches
+        self._shared_positions = positions
+        self._shared_histories = {}
+        try:
+            yield
+        finally:
+            self._shared_trades = None
+            self._shared_matches = None
+            self._shared_positions = None
+            self._shared_remaining = None
+            self._shared_histories = None
+
+    def _trades(self, position_ids=None):
+        return (self._shared_trades if self._shared_trades is not None else
+                self.db.rows("trades", self.portfolio_id, position_ids=position_ids))
+
+    def _matches(self, position_ids=None):
+        return (self._shared_matches if self._shared_matches is not None else
+                self.db.rows("trade_matches", self.portfolio_id, position_ids=position_ids))
+
+    def _positions(self, position_ids=None):
+        return (self._shared_positions if self._shared_positions is not None else
+                self.db.rows("positions", self.portfolio_id, position_ids=position_ids))
+
+    def _remaining(self, trades, position_ids=None):
+        if self._shared_remaining is not None:
+            return self._shared_remaining
+        remaining = self.matching.remaining(trades=trades, matches=self._matches(position_ids))
+        if self._shared_trades is not None:
+            self._shared_remaining = remaining
+        return remaining
+
+    def _history(self, position, quote, histories):
+        if quote.get("mode") == "Mock":
+            return quote.get("history") or []
+        con_id = position.get("con_id")
+        if not con_id:
+            return []
+        cache = self._shared_histories if self._shared_histories is not None else histories
+        if con_id not in cache:
+            cache[con_id] = self.db.history(con_id)
+        return cache[con_id]
 
     def trade_rows(self, lots=None):
         """Show closed-lot P&L on both matched trades and open P&L on open buys.
@@ -478,7 +546,8 @@ class PortfolioService:
                         aggregate["net_unrealized"] += lot["net_unrealized"]
                         aggregate["open_basis"] += lot["buy_value_usd"] + lot["buy_commission"]
 
-        rows = self.matching.trade_rows()
+        trades = self._trades()
+        rows = self.matching.trade_rows(trades=trades, remaining=self._remaining(trades))
         for row in rows:
             aggregate = aggregates.get(row["id"])
             row.update({"realized_net": None, "realized_pct": None,
@@ -495,10 +564,10 @@ class PortfolioService:
                     row["unrealized_pct"] = aggregate["net_unrealized"] / aggregate["open_basis"]
         return rows
 
-    def portfolio_rows(self):
-        trades = self.db.rows("trades", self.portfolio_id)
+    def portfolio_rows(self, position_ids=None):
+        trades = self._trades(position_ids)
         openings = self.db.legacy_opening_quantities(self.portfolio_id)
-        remaining = self.matching.remaining()
+        remaining = self._remaining(trades, position_ids)
         ledger = defaultdict(float)
         by_position = defaultdict(list)
         for trade in trades:
@@ -515,7 +584,18 @@ class PortfolioService:
         nav = self.db.effective_nav(self.portfolio_id)
         rows = []
         prepared_history = {}
-        for position in self.db.rows("positions", self.portfolio_id):
+        histories = {}
+        fx_rates = {}
+
+        def fx_rate(currency, day):
+            key = (currency, day)
+            if key not in fx_rates:
+                fx_rates[key] = self.db.fx_rate(currency, day)
+            return fx_rates[key]
+
+        for position in self._positions(position_ids):
+            if position_ids is not None and position["id"] not in position_ids:
+                continue
             if position["security_type"] == "CASH":
                 continue  # FX pair executions do not represent security holdings.
             row = dict(position)
@@ -543,7 +623,7 @@ class PortfolioService:
                            t["commission_usd"] / t["quantity"] / t["fx_to_usd"])
                     for t, qty in open_buys) / (open_qty * multiplier)
                 if complete_open_lots else None)
-            current_fx = self.db.fx_rate(position["currency"], date.today().isoformat())
+            current_fx = fx_rate(position["currency"], date.today().isoformat())
             row["fx_to_usd"] = current_fx
             quote = self.market.quote(position["id"])
             price, source = choose_price(quote.get("ticks", {}), quote.get("mode", "Live"))
@@ -554,8 +634,7 @@ class PortfolioService:
                               looks_like_option_ticker(position["display_ticker"]))
             if suspect_option:
                 price, source = None, ""
-            history = ((quote.get("history") or []) if quote.get("mode") == "Mock" else
-                       self.db.history(position["con_id"]) if position["con_id"] else [])
+            history = self._history(position, quote, histories)
             as_of = self._as_of(position)
             prior_bar = next((bar for bar in reversed(history)
                               if bar["day"] < as_of.isoformat() and
@@ -600,7 +679,7 @@ class PortfolioService:
             row["traded_today"] = bool(today_trades)
             row["daily_pnl"] = flow_adjusted_daily_pnl(
                 row["position_qty"], price, current_fx, prior_close,
-                self.db.fx_rate(position["currency"], prior_day), position["multiplier"],
+                fx_rate(position["currency"], prior_day), position["multiplier"],
                 today_trades)
             if abs(row["position_qty"]) > 1e-9 and (
                 (cached_close and source != f"SAVED SESSION BAR {as_of.isoformat()}") or
@@ -676,12 +755,13 @@ class PortfolioService:
         return rows
 
     def lots_rows(self, portfolio_rows=None):
-        trades = {t["id"]: t for t in self.db.rows("trades", self.portfolio_id)}
-        positions = {p["id"]: p for p in self.db.rows("positions", self.portfolio_id)}
+        trade_rows = self._trades()
+        trades = {t["id"]: t for t in trade_rows}
+        positions = {p["id"]: p for p in self._positions()}
         valuations = {p["id"]: p for p in (portfolio_rows if portfolio_rows is not None else self.portfolio_rows())}
         reconciliation = {key: p["reconciliation"] for key, p in valuations.items()}
         rows = []
-        for match in self.db.rows("trade_matches", self.portfolio_id):
+        for match in self._matches():
             buy, sell = trades[match["buy_trade_id"]], trades[match["sell_trade_id"]]
             if buy["security_type"] == "CASH":
                 continue
@@ -713,9 +793,11 @@ class PortfolioService:
                 row["lot_note"] = "; ".join(filter(None, (row["lot_note"],
                     "Estimated CSV closing value; acquisition date unknown")))
             rows.append(row)
-        remaining = self.matching.remaining()
+        remaining = self._remaining(trade_rows)
         position_as_of = {}
         prepared_history = {}
+        histories = {}
+        returns_by_position = {}
         for buy in trades.values():
             if buy["security_type"] == "CASH":
                 continue
@@ -760,12 +842,14 @@ class PortfolioService:
                 bar_key = (position["con_id"], as_of)
                 prepared = prepared_history.get(bar_key) if position["con_id"] else None
                 if prepared is None:
-                    history = ((quote.get("history") or []) if quote.get("mode") == "Mock" else
-                               self.db.history(position["con_id"]) if position.get("con_id") else [])
+                    history = self._history(position, quote, histories)
                     prepared = prepare_history(history, as_of)
                     if position.get("con_id"):
                         prepared_history[bar_key] = prepared
-                returns = window_returns(price, prepared[0], prepared[1])
+                returns = returns_by_position.get(position["id"])
+                if returns is None:
+                    returns = window_returns(price, prepared[0], prepared[1])
+                    returns_by_position[position["id"]] = returns
                 row["mtd"], row["ytd"] = returns["mtd"], returns["ytd"]
             if buy["source"] == "CSV market baseline":
                 row["lot_note"] = "; ".join(filter(None, (row.get("lot_note"),

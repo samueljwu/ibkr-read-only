@@ -5,7 +5,7 @@ import pytest
 
 from app.broker.broker_sync import BrokerIngestor
 from app.storage.database import Database
-from app.market.market_data import IBKRMarketDataProvider
+from app.market.market_data import IBKRMarketDataProvider, five_year_start
 
 
 ACCOUNT = "U0000002"
@@ -120,3 +120,75 @@ def test_stale_contract_history_requests_only_missing_days():
     client.reqHistoricalData = lambda _request_id, _contract, _end, duration, *_args: durations.append(duration)
     provider._subscribe(1, _contract())
     assert durations == ["8 D"]
+
+
+def test_closed_stock_five_year_history_request_without_market_subscription():
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17, account_id=ACCOUNT)
+    provider.connected = True
+    provider.client.isConnected = lambda: True
+    calls = []
+    provider.client.reqHistoricalData = lambda *args: calls.append(args)
+    position = {"con_id": 123, "ib_symbol": "ABC", "security_type": "STK",
+                "exchange": "SMART", "currency": "USD"}
+    provider.client.history_ids[999] = 123  # A short routine refresh may be in flight.
+    assert provider.request_price_history(position, "2023-08-01")
+    assert len(calls) == 1
+    assert calls[0][1].conId == 123
+    assert calls[0][2] == "20230731 23:59:59"
+    assert calls[0][3] == "1 Y"
+    assert calls[0][4:7] == ("1 day", "TRADES", 1)
+    assert not provider.request_price_history(position, "2023-08-01")
+    assert len(calls) == 1
+    request_id = calls[0][0]
+    provider.client.error(request_id, 162, "Historical data unavailable")
+    assert provider.events.get_nowait() == (
+        "history_error", 123, "IBKR ERROR 162: Historical data unavailable")
+    assert request_id not in provider.client.history_ids
+    assert request_id not in provider.client.chart_history_ids
+    assert 123 not in provider.client.chart_history_jobs
+
+
+def test_one_click_pages_back_five_years_before_first_saved_close():
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17, account_id=ACCOUNT)
+    provider.connected = True
+    provider.client.isConnected = lambda: True
+    calls = []
+    provider.client.reqHistoricalData = lambda *args: calls.append(args)
+    position = {"con_id": 123, "ib_symbol": "ABC", "security_type": "STK",
+                "exchange": "SMART", "currency": "USD"}
+    saved = date.today() - timedelta(days=365 * 3)
+    assert provider.request_price_history(position, saved.isoformat())
+    assert calls[0][2] == f"{saved - timedelta(days=1):%Y%m%d} 23:59:59"
+    assert calls[0][3] == "1 Y"
+    for age in (4, 5):
+        request_id = calls[-1][0]
+        day = date.today() - timedelta(days=365 * age)
+        bar = SimpleNamespace(date=f"{day:%Y%m%d}", close=50 + age, volume=100)
+        provider.client.historicalData(request_id, bar)
+        provider.client.historicalDataEnd(request_id, "", "")
+    assert len(calls) == 2
+    events = [provider.events.get_nowait() for _ in range(2)]
+    assert events[0][0:2] == ("history", 123)
+    assert {bar["day"] for bar in events[0][2]} == {
+        (date.today() - timedelta(days=365 * age)).isoformat() for age in (4, 5)}
+    assert events[1] == ("chart_history_complete", 123, True)
+    assert 123 not in provider.client.chart_history_jobs
+
+
+def test_five_year_start_handles_leap_day():
+    assert five_year_start(date(2028, 2, 29)) == date(2023, 2, 28)
+
+
+def test_five_year_request_stops_when_ibkr_has_no_older_bars():
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17, account_id=ACCOUNT)
+    provider.connected = True
+    provider.client.isConnected = lambda: True
+    calls = []
+    provider.client.reqHistoricalData = lambda *args: calls.append(args)
+    position = {"con_id": 123, "ib_symbol": "ABC", "security_type": "STK"}
+    assert provider.request_price_history(position, (date.today() - timedelta(days=365)).isoformat())
+    provider.client.historicalDataEnd(calls[0][0], "", "")
+    assert len(calls) == 1
+    assert provider.events.get_nowait() == ("history", 123, [])
+    assert provider.events.get_nowait() == ("chart_history_complete", 123, False)
+    assert 123 not in provider.client.chart_history_jobs

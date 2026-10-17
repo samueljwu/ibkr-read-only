@@ -315,6 +315,7 @@ def test_completed_forward_split_reconciles_closed_position(tmp_path):
         assert ingestor.ingest_many([], "flex", events=events).corporate_inserted == 0
         rows = db.rows("trades", 1)
         assert sum(row["quantity"] * (1 if row["side"] == "BUY" else -1) for row in rows) == 0
+        assert sorted(row["price"] for row in rows) == [0, 60, 100]
         assert db.conn.execute("SELECT COUNT(*) FROM broker_source_records WHERE status='complete'").fetchone()[0] == 3
         MatchingService(db).rebuild_auto([pid])
         assert sum(row["matched_qty"] for row in db.rows("trade_matches", 1)) == 200

@@ -3,7 +3,7 @@ from datetime import date, timedelta
 import pytest
 
 from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
-                                   performance_window_rows)
+                                   flex_monthly_history, performance_window_rows)
 from app.storage.database import Database
 from app.market.market_data import IBKRMarketDataProvider
 
@@ -19,6 +19,37 @@ def test_cash_share_uses_valid_completed_cash_and_nav_observations():
     rows = cash_share_rows(snapshots, date(2026, 1, 2), date(2026, 1, 8))
     assert [row["percent"] for row in rows] == [0, -10]
     assert cash_share_rows(snapshots, date(2026, 1, 8), date(2026, 1, 8))[0]["percent"] == 50
+
+
+def test_flex_monthly_history_links_flows_and_includes_latest_partial_month():
+    snapshots = [
+        {"day": "2026-01-30", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
+        {"day": "2026-02-02", "nav_usd": 1515, "source": "flex", "flow_covered": 1},
+        {"day": "2026-02-03", "nav_usd": 1545, "source": "flex", "flow_covered": 1},
+        {"day": "2026-03-02", "nav_usd": 1800, "source": "live", "flow_covered": 0},
+    ]
+    flows = [{"day": "2026-01-31", "amount_usd": 500}]
+    rows = flex_monthly_history(snapshots, flows)
+    assert [row["month"] for row in rows] == ["2026-01", "2026-02"]
+    assert rows[0]["return_pct"] is None
+    assert rows[1]["period_from"] == "2026-02-02"
+    assert rows[1]["period_to"] == "2026-02-03"
+    assert rows[1]["nav_usd"] == 1545
+    assert rows[1]["return_pct"] == pytest.approx(
+        ((1 + 15 / 1500) * (1 + 30 / 1515) - 1) * 100)
+
+
+def test_flex_monthly_history_leaves_gapped_return_blank_but_keeps_latest_nav():
+    snapshots = [
+        {"day": "2026-01-30", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
+        {"day": "2026-02-02", "nav_usd": 1010, "source": "flex", "flow_covered": 1},
+        {"day": "2026-02-10", "nav_usd": 1100, "source": "flex", "flow_covered": 1},
+        {"day": "2026-03-02", "nav_usd": 1200, "source": "flex", "flow_covered": 0},
+    ]
+    rows = flex_monthly_history(snapshots, [])
+    assert rows[1]["nav_usd"] == 1100
+    assert rows[1]["return_pct"] is None
+    assert rows[2]["return_pct"] is None
 
 
 def test_selected_period_uses_prior_close_and_removes_both_flow_directions():
@@ -216,6 +247,7 @@ def test_spx_overlay_rebases_pnl_comparison_without_changing_capital_charts(tmp_
         tab = window.analytics_tab
         tab._set_dates(date(2026, 1, 5), date(2026, 1, 6))
         tab.range_combo.setCurrentText("Custom")
+        tab.sections.setCurrentWidget(tab.capital_page)
         tab.refresh()
         for view in ("Net deployed", "Buy / sell activity", "Cash / portfolio"):
             tab.capital_combo.setCurrentText(view)
@@ -261,8 +293,9 @@ def test_spx_overlay_rebases_pnl_comparison_without_changing_capital_charts(tmp_
         assert "2026" in tab.capital_navigator._selection_label()
         assert "2026" in tab.pnl_navigator.toolTip()
         tab.benchmark_toggle.setChecked(False)
-        assert len(tab.capital_chart.chart().axes(Qt.Vertical)) == 1
         assert len(tab.pnl_chart.chart().axes(Qt.Vertical)) == 1
+        tab.sections.setCurrentWidget(tab.capital_page)
+        assert len(tab.capital_chart.chart().axes(Qt.Vertical)) == 1
         assert [point.y() for point in tab.pnl_chart.chart().series()[0].points()] == pytest.approx(
             [10, 21])
         assert all(series.name() != "S&P 500 price change"
@@ -339,8 +372,10 @@ def test_analytics_tab_uses_ibkr_observations_without_csv(tmp_path, monkeypatch)
         window.tabs.setCurrentWidget(window.analytics_tab)
         window.analytics_tab.refresh()
         assert not hasattr(window.analytics_tab, "import_button")
-        assert [window.analytics_tab.sections.tabText(i) for i in range(4)] == [
-            "P&L", "Returns", "Capital deployment", "Exposure"]
+        assert [window.analytics_tab.sections.tabText(i) for i in range(5)] == [
+            "P&&L", "Returns", "Capital deployment", "Exposure", "Monthly P&&L"]
+        assert window.analytics_tab.benchmark_toggle.text() == "S&&P 500"
+        assert window.analytics_tab.benchmark_toggle.accessibleName() == "S&P 500"
         assert window.analytics_tab.pnl_table.rowCount() == 1
         assert window.analytics_tab.stats["NAV change"].text() == "$0.00"
         assert window.analytics_tab.stats["Adjusted performance"].text() == "—"
@@ -352,6 +387,7 @@ def test_analytics_tab_uses_ibkr_observations_without_csv(tmp_path, monkeypatch)
             {"trade_date": "2026-01-06", "security_type": "STK", "side": "SELL",
              "gross_usd": 900, "remaining_qty": 0},
         ])
+        window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.capital_page)
         window.analytics_tab.refresh()
         assert window.analytics_tab.capital_stats["Bought"].text() == "$1,000.00"
         assert window.analytics_tab.capital_stats["Sold"].text() == "$900.00"

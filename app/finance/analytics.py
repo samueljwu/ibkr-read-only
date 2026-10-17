@@ -14,6 +14,47 @@ def return_base(prior_nav, period_flow):
     return float(prior_nav) + float(period_flow)
 
 
+def flex_monthly_history(snapshots, flows):
+    """Summarize completed daily closes without bridging missing NAV or flow coverage."""
+    completed = sorted((row for row in snapshots if row["source"] != "live"),
+                       key=lambda row: row["day"])
+    dated_flows = sorted((row["day"], float(row["amount_usd"])) for row in flows)
+    rows = []
+    previous = None
+    flow_index = 0
+    growth = 1.0
+    covered = False
+    for snapshot in completed:
+        day = snapshot["day"]
+        month = day[:7]
+        if not rows or rows[-1]["month"] != month:
+            rows.append({"month": month, "period_from": day, "period_to": day,
+                         "nav_usd": snapshot["nav_usd"], "return_pct": None})
+            growth = 1.0
+            covered = bool(previous and previous["flow_covered"] and
+                           snapshot["flow_covered"] and previous["nav_usd"] > 0)
+        daily_flow = 0.0
+        while flow_index < len(dated_flows) and dated_flows[flow_index][0] <= day:
+            flow_day, amount = dated_flows[flow_index]
+            if previous and flow_day > previous["day"]:
+                daily_flow += amount
+            flow_index += 1
+        if previous:
+            gap = (date.fromisoformat(day) - date.fromisoformat(previous["day"])).days
+            capital = return_base(previous["nav_usd"], daily_flow)
+            if gap > 4 or not previous["flow_covered"] or not snapshot["flow_covered"] or capital <= 0:
+                covered = False
+            elif covered:
+                growth *= 1 + (float(snapshot["nav_usd"]) -
+                               float(previous["nav_usd"]) - daily_flow) / capital
+        row = rows[-1]
+        row["period_to"] = day
+        row["nav_usd"] = snapshot["nav_usd"]
+        row["return_pct"] = (growth - 1) * 100 if covered else None
+        previous = snapshot
+    return rows
+
+
 def performance_window_rows(snapshots, flows, first, last):
     """Rebase account changes to the selected range using the preceding close."""
     observations = sorted((row for row in snapshots if row["day"] <= last.isoformat()),
@@ -42,6 +83,8 @@ def performance_window_rows(snapshots, flows, first, last):
             visible_flow_by_day[flow["day"]] += float(flow["amount_usd"])
         if baseline["day"] < flow["day"] <= last.isoformat():
             flow_by_day[flow["day"]] += float(flow["amount_usd"])
+    dated_flows = sorted(flow_by_day.items())
+    flow_index = 0
 
     rows = []
     previous = baseline
@@ -60,8 +103,10 @@ def performance_window_rows(snapshots, flows, first, last):
                          "external_flow": visible_flow_by_day[day], "source": "live"})
             continue
         completed_count += 1
-        daily_flow = sum(amount for flow_day, amount in flow_by_day.items()
-                         if previous["day"] < flow_day <= day)
+        daily_flow = 0.0
+        while flow_index < len(dated_flows) and dated_flows[flow_index][0] <= day:
+            daily_flow += dated_flows[flow_index][1]
+            flow_index += 1
         cumulative_flow += daily_flow
         nav = float(snapshot["nav_usd"])
         daily_pnl = daily_return = None

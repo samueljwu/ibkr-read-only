@@ -3,10 +3,12 @@
 import json
 from decimal import Decimal
 
-from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QTimer, Qt
+from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QObject, QTimer, Qt
 from PySide6.QtGui import QActionGroup, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox,
-                               QInputDialog, QLineEdit, QMenu, QTableWidget, QTableWidgetItem)
+from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlider,
+                               QAbstractSpinBox, QApplication, QComboBox, QInputDialog,
+                               QLineEdit, QMenu, QMenuBar, QPlainTextEdit, QTabBar,
+                               QTableView, QTableWidget, QTableWidgetItem, QTextEdit, QWidget)
 
 
 def display_number(value):
@@ -135,6 +137,38 @@ def copy_table_selection(view):
     QApplication.clipboard().setText("\n".join(lines))
 
 
+class TableClickAwayFilter(QObject):
+    """Clear visible table selections when blank space in their window is clicked."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.root = root
+
+    def eventFilter(self, watched, event):
+        if (event.type() != QEvent.MouseButtonPress or event.button() != Qt.LeftButton
+                or not isinstance(watched, QWidget)):
+            return False
+        window = watched.window()
+        owner = window
+        while owner is not None and owner is not self.root:
+            owner = owner.parent()
+        if owner is None:
+            return False
+        widget = watched
+        while widget is not None and widget is not window:
+            if isinstance(widget, QTableView):
+                return False
+            widget = widget.parentWidget()
+        if isinstance(watched, (QAbstractButton, QAbstractSlider, QAbstractSpinBox,
+                                QComboBox, QLineEdit, QMenu, QMenuBar, QPlainTextEdit,
+                                QTabBar, QTextEdit)):
+            return False
+        for table in window.findChildren(QTableView):
+            if table.window() is window and table.isVisible() and table.selectionModel().hasSelection():
+                table.selectionModel().clear()
+        return False
+
+
 class SortItem(QTableWidgetItem):
     """Sort a displayed value by its underlying number or date when available."""
 
@@ -208,7 +242,7 @@ class ReportTable(QTableWidget):
         """Enable numeric sorting and the common decimal menu for selected columns.
 
         formats maps column numbers to (default decimal places, unit), where unit is
-        plain, usd, or percent. Existing rows can be updated using numeric_item().
+        plain, usd, percent, or ratio_percent. Existing rows can be updated using numeric_item().
         """
         self._settings_db, self._settings_key = db, setting_key
         self._number_formats = dict(formats)
@@ -239,6 +273,8 @@ class ReportTable(QTableWidget):
         number = Decimal(str(value))
         if unit == "percent":
             return f"{number:+,.{places}f}%"
+        if unit == "ratio_percent":
+            return f"{number:+,.{places}%}"
         prefix = "$" if unit == "usd" else ""
         return f"{prefix}{number:,.{places}f}"
 

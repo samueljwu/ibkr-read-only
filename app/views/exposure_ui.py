@@ -291,11 +291,11 @@ class ExposurePanel(QWidget):
             self.positions.sortItems(column, Qt.DescendingOrder if state.get("sort_order") == "desc"
                                      else Qt.AscendingOrder)
 
-    def refresh(self):
+    def refresh(self, portfolio_rows=None):
         group = self.group_combo.currentText()
         custom_set = self._selected_custom_set() if group == "Custom" else ""
         self.snapshot = exposure_snapshot(self.db, self.service, self.portfolio_id,
-                                          custom_set=custom_set)
+                                          custom_set=custom_set, portfolio_rows=portfolio_rows)
         issue_count = len(self.snapshot["issues"])
         notes = []
         if issue_count:

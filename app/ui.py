@@ -36,7 +36,7 @@ from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, M
 from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today
 from app.sync.sync_service import trade_sync_paused
-from app.views.table_ui import (ReportTable, SortItem,
+from app.views.table_ui import (ReportTable, SortItem, TableClickAwayFilter,
                                 copy_table_selection, display_number, handle_table_shortcut)
 from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           stylesheet, style_toolbar_dropdown)
@@ -89,6 +89,9 @@ LOTS = [
     col("sell_accrued_interest", "Sell accrued interest", "money"),
     col("duration", "Days held", "number"),
     col("match_origin", "Match"),
+    # Append logical columns to preserve saved sort indices and header layouts.
+    col("realized_pct", "Realized P&L %", "pct"),
+    col("unrealized_pct", "Open P&L %", "pct"),
 ]
 COLUMNS = {"Portfolio": PORTFOLIO, "Trades": TRADES, "Lots": LOTS}
 PRICE_MOVES = ("one_day", "mtd", "ytd")
@@ -120,6 +123,7 @@ class GridModel(QAbstractTableModel):
         self.theme = "light"
         self.columns = COLUMNS[name]
         self.rows = []
+        self.source_rows = []
         self.bar_scales = {key: 0.0 for key in BAR_COLUMNS[name]}
         self.column_decimals = {}
         self.filter_text = ""
@@ -154,8 +158,9 @@ class GridModel(QAbstractTableModel):
             all_rows = (self.service.portfolio_rows() if self.name == "Portfolio" else
                         self.service.trade_rows() if self.name == "Trades" else
                         self.service.lots_rows())
+        self.source_rows = list(all_rows)
         needle = self.filter_text.casefold()
-        self.rows = [row for row in all_rows if not needle or needle in str(
+        self.rows = [row for row in self.source_rows if not needle or needle in str(
             row.get("display_ticker") or row.get("ticker") or "").casefold()]
         if self.name == "Trades" and self.side_filter != "All":
             self.rows = [row for row in self.rows if row.get("side") == self.side_filter]
@@ -177,22 +182,22 @@ class GridModel(QAbstractTableModel):
 
     def set_filter(self, value):
         self.filter_text = value.strip()
-        self.refresh()
+        self.refresh(self.source_rows)
 
     def set_side_filter(self, value):
         if self.name == "Trades":
             self.side_filter = value if value in ("All", "BUY", "SELL") else "All"
-            self.refresh()
+            self.refresh(self.source_rows)
 
     def set_hide_closed(self, checked):
         if self.name == "Portfolio":
             self.hide_closed = bool(checked)
             self.db.set_setting("hide_closed_positions", "1" if checked else "0")
-            self.refresh()
+            self.refresh(self.source_rows)
 
     def set_lot_filter(self, value):
         self.lot_filter = value
-        self.refresh()
+        self.refresh(self.source_rows)
 
     def decimals_for(self, column):
         return self.column_decimals.get(self.columns[column][0], DEFAULT_DECIMALS)
@@ -229,6 +234,9 @@ class GridModel(QAbstractTableModel):
             return
         updated = {row["id"]: row for row in
                    (rows if rows is not None else self.service.portfolio_rows())}
+        for number, row in enumerate(self.source_rows):
+            if row["id"] in ids and row["id"] in updated:
+                self.source_rows[number] = updated[row["id"]]
         changed_rows = []
         for number, row in enumerate(self.rows):
             if row["id"] in ids and row["id"] in updated:
@@ -468,6 +476,7 @@ class MainWindow(QMainWindow):
         self.log.info("Portfolio Monitor opened; database=%s", self.db.path)
         self.portfolio_id = 1
         self._show_account_summary = self.db.setting("show_account_summary") != "0"
+        self._compact_geometry = None
         self._history_attempt_day = None
         self._last_flex_sync_stamp = self.db.metadata("ibkr_flex_sync_completed")
         self._last_analytics_sync_stamp = self.db.metadata("ibkr_analytics_sync_completed")
@@ -493,6 +502,10 @@ class MainWindow(QMainWindow):
         self._live_sync_started_at = 0.0
         self._last_gateway_sync_request = None
         self._last_quote_cache_at = 0.0
+        self._quote_issue_statuses = {}
+        self._last_ui_status_at = 0.0
+        self._last_history_status = None
+        self._last_history_status_path = None
         self._stream_rows = None
         self._last_connection_attempt = 0.0
         self._disconnected_since = None
@@ -601,7 +614,9 @@ class MainWindow(QMainWindow):
             self._make_grid_tab(name)
         self.cash_tab = CashMovementsTab(self.db, self.portfolio_id)
         self.tabs.addTab(self.cash_tab, "Cash")
-        self.analytics_tab = AnalyticsTab(self.db, self.service, self.portfolio_id)
+        self.analytics_tab = AnalyticsTab(
+            self.db, self.service, self.portfolio_id,
+            request_price_history=self._request_levels_history)
         self.tabs.addTab(self.analytics_tab, "Analytics")
         self.calcs_tab = CalcsTab(self.db, self.service, self.portfolio_id)
         self.calcs_tab.remove_row_shortcut.setEnabled(False)
@@ -609,9 +624,14 @@ class MainWindow(QMainWindow):
         widgets.persist_tab_order(self.tabs, self.db, self.TAB_LAYOUT_KEY,
                                   ids=list(self.DEFAULT_TAB_ORDER), remember_active=True)
         self.tabs.currentChanged.connect(self._refresh_special_tab)
+        self.tabs.currentChanged.connect(self._expand_for_tab_selection)
+        self.tabs.tabBarClicked.connect(self._expand_for_tab_selection)
         self._make_settings_tab()
         self._make_help_dialog()
         self._make_menu()
+        self._update_match_lots_availability()
+        self._table_click_away_filter = TableClickAwayFilter(self)
+        QApplication.instance().installEventFilter(self._table_click_away_filter)
         enable_label_copy(self)
         self.next_tab_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
         self.next_tab_shortcut.setContext(Qt.WindowShortcut)
@@ -633,14 +653,10 @@ class MainWindow(QMainWindow):
             self._watch_live_sync()
         self.lots_refresh_timer = QTimer(self)
         self.lots_refresh_timer.setSingleShot(True)
-        self.lots_refresh_timer.timeout.connect(
-            lambda: self._refresh_model("Lots", self.service.lots_rows(self._stream_rows)))
+        self.lots_refresh_timer.timeout.connect(self._refresh_lots_and_summary)
         self.calcs_refresh_timer = QTimer(self)
         self.calcs_refresh_timer.setSingleShot(True)
         self.calcs_refresh_timer.timeout.connect(self._refresh_calcs_live)
-        self.summary_refresh_timer = QTimer(self)
-        self.summary_refresh_timer.setSingleShot(True)
-        self.summary_refresh_timer.timeout.connect(self._refresh_summary)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll)
         self.timer.start(250)
@@ -665,8 +681,48 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex((self.tabs.currentIndex() + direction) % count)
 
     def _update_summary_visibility(self):
-        self.summary.setVisible(self._show_account_summary and
+        self.summary.setVisible((self._show_account_summary or self._compact_geometry is not None) and
                                 self.tabs.currentWidget() is not self.calcs_tab)
+
+    def _expand_for_tab_selection(self, _index):
+        if self._compact_geometry is not None:
+            self.compact_summary_action.setChecked(False)
+
+    def _fit_compact_summary(self):
+        self.tabs.setFixedHeight(self.tabs.tabBar().sizeHint().height() + 2)
+        self.centralWidget().layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
+
+    def _set_compact_summary(self, compact):
+        self.expand_full_view_action.setEnabled(compact)
+        if compact:
+            if self._compact_geometry is not None:
+                return
+            self.tabs.setCurrentIndex(self._tab_index("Portfolio"))
+            self._compact_geometry = self.normalGeometry() if self.isMaximized() else self.geometry()
+            self._compact_was_maximized = self.isMaximized()
+            self._compact_status_visible = self.statusBar().isVisible()
+            self._compact_tab_heights = (self.tabs.minimumHeight(), self.tabs.maximumHeight())
+            if self._compact_was_maximized:
+                self.showNormal()
+            self._update_summary_visibility()
+            self.statusBar().hide()
+            self.tabs.currentWidget().hide()
+            self._fit_compact_summary()
+            self.resize(min(1040, self._compact_geometry.width()), self.height())
+            self._fit_compact_summary()
+        elif self._compact_geometry is not None:
+            geometry = self._compact_geometry
+            was_maximized = self._compact_was_maximized
+            self._compact_geometry = None
+            self.tabs.setMinimumHeight(self._compact_tab_heights[0])
+            self.tabs.setMaximumHeight(self._compact_tab_heights[1])
+            self.tabs.currentWidget().show()
+            self.statusBar().setVisible(self._compact_status_visible)
+            self._update_summary_visibility()
+            self.setGeometry(geometry)
+            if was_maximized:
+                self.showMaximized()
 
     def _set_account_summary_visible(self, visible):
         self._show_account_summary = bool(visible)
@@ -732,6 +788,8 @@ class MainWindow(QMainWindow):
         self.zoom_in_action.setEnabled(self.zoom_percent < self.MAX_ZOOM)
         self.zoom_reset_action.setEnabled(self.zoom_percent != 100)
         self._apply_theme(self.theme)
+        if self._compact_geometry is not None:
+            self._fit_compact_summary()
 
     def set_zoom(self, percent):
         percent = max(self.MIN_ZOOM, min(self.MAX_ZOOM, percent))
@@ -1178,8 +1236,12 @@ class MainWindow(QMainWindow):
                       if status.get("action") == "remove" else
                       "History import finished; open File → Import Data to review results.")
             self.statusBar().showMessage(notice, 15000)
-        self._refresh_history_import_coverage()
-        self.history_import_dialog.show_status(status)
+        if (code is not None or status != self._last_history_status or
+                self._history_status_path != self._last_history_status_path):
+            self._last_history_status = status.copy()
+            self._last_history_status_path = self._history_status_path
+            self._refresh_history_import_coverage()
+            self.history_import_dialog.show_status(status)
 
     def _launch_flex_sync(self, *, manual=False, retry=False):
         if self._sync_paused or self._history_process is not None:
@@ -1374,7 +1436,8 @@ class MainWindow(QMainWindow):
         columns_button.setMenu(column_menu)
         toolbar.addLayout(column_controls)
         if name == "Lots":
-            toolbar.addWidget(widgets.button("Match lots…", self.match_lots, variant="secondary"))
+            self.match_lots_button = widgets.button("Match lots…", self.match_lots, variant="secondary")
+            toolbar.addWidget(self.match_lots_button)
         if name == "Portfolio":
             self.hide_closed_checkbox = ThemedCheckBox("Hide closed")
             self.hide_closed_checkbox.setToolTip("Hide positions with zero trade-derived quantity")
@@ -1420,6 +1483,9 @@ class MainWindow(QMainWindow):
         self.selection_info[name] = info
         layout.addWidget(info)
         view.selectionModel().selectionChanged.connect(lambda *_args, table=name: self._update_selection_info(table))
+        if name == "Lots":
+            view.selectionModel().selectionChanged.connect(self._update_match_lots_availability)
+            self.models[name].modelReset.connect(self._update_match_lots_availability)
         if name == "Portfolio":
             view.doubleClicked.connect(lambda _: self.show_position_details())
         elif name == "Lots":
@@ -1603,10 +1669,7 @@ class MainWindow(QMainWindow):
             self.help_navigation.addItem(title)
             return content
 
-        def add_text(content, title, body):
-            heading = QLabel(title)
-            heading.setObjectName("helpSection")
-            content.addWidget(heading)
+        def add_note(content, body):
             label = QLabel(body)
             label.setObjectName("helpBody")
             label.setWordWrap(True)
@@ -1618,83 +1681,48 @@ class MainWindow(QMainWindow):
             content.addWidget(visual)
 
         start_content = add_section("Start")
-        introduction = QLabel(
-            "Portfolio Monitor shows your holdings, trades, cash and performance. "
-            "Rebalance is a planning worksheet; the app does not place orders.")
-        introduction.setObjectName("helpBody")
-        introduction.setWordWrap(True)
-        start_content.insertWidget(1, introduction)
         add_visual(start_content, "start")
-        add_text(start_content, "Start and refresh",
-                 "1. Sign in to TWS or IB Gateway with its read-only API enabled.\n"
-                 "2. In Settings, choose Use IBKR, confirm the host, port and account, then Apply Settings.\n"
-                 "3. Press Sync IBKR to refresh. For historical trades, performance and cash, "
-                 "enter and apply the account and Flex query IDs in Settings, then paste and save the Flex token there. "
-                 "Use File → Import Data for a dated history import and review its progress and coverage gaps. "
-                 "Hover over Sync IBKR to see each source's status.")
+        add_note(start_content, "Set host, port and account in Settings. Hover Sync IBKR for each source's status.")
+        add_visual(start_content, "start_import")
+        add_note(start_content, "For trade, performance and Cash history: set Flex query IDs, save the "
+                 "token in Settings, then import a date range and check coverage gaps.")
 
         portfolio_content = add_section("Portfolio")
-        add_text(portfolio_content, "Overview",
-                 "Review account totals, holdings, P&L and differences from broker positions. "
-                 "Search or select Hide closed to narrow the list. Double-click a holding for its trades and lots.")
         add_visual(portfolio_content, "portfolio")
-        add_text(portfolio_content, "Trades and Lots",
-                 "Trades lists synced buys and sells; filter by instrument or BUY/SELL. "
-                 "Realized P&L appears on both trades in a match for inspection; summing it across "
-                 "Trades rows double counts matched lots. Open P&L appears on buys with shares still held, "
-                 "so a partially sold buy can show both. "
-                 "Lots shows shares still held and matched sales; filter by instrument or Open/Closed. "
-                 "Use Match lots from the Lots tab (toolbar button, double-click, right-click, or the "
-                 "Matches menu) to drag a sale onto a buy and pin a manual match for that instrument; "
-                 "automatic matching recalculates around your manual choices.")
-        add_text(portfolio_content, "Cash",
-                 "Choose a range to review deposits, dividends, interest, tax, fees and transactions. "
-                  "Cash activity is imported from the configured Cash Flex query.")
+        add_note(portfolio_content, "Overview shows totals and broker differences. Trades can filter BUY/SELL; "
+                 "realized P&L appears on both trades in a match. Lots can filter Open/Closed.")
+        add_visual(portfolio_content, "cash")
+        add_note(portfolio_content, "Cash Flex supplies deposits, dividends, interest, tax and fees.")
+
+        matched_content = add_section("Matched lots")
+        add_visual(matched_content, "matched")
+        add_note(matched_content, "Open = held · Closed = sold · Closed short = covered. Drag only to an "
+                 "earlier compatible buy with free quantity. Preview P&L needs fees, FX and multiplier.")
+        add_visual(matched_content, "matching_actions")
+        add_note(matched_content, "Rebuild keeps manual choices. FIFO uses oldest buys; LIFO newest. "
+                 "Max realized gain favors net gain; Max unrealized gain sells highest USD cost first. "
+                 "Clear frees that match. Cancel discards the preview; short covers are read only.")
 
         analytics_content = add_section("Analytics")
-        add_text(analytics_content, "P&L and Capital deployment",
-                 "Choose Range or Custom dates; drag across a chart to select dates. "
-                 "Hover over the chart for values. Use Chart and table to place them side by side or top and bottom. "
-                 "P&L charts NAV and returns. Capital deployment charts net invested, buy/sell activity "
-                 "or cash as a share of NAV. S&P 500 adds an index comparison; in P&L, "
-                 "both lines start at 0% at their first available points in the range.")
         add_visual(analytics_content, "analytics")
-        add_text(analytics_content, "Returns",
-                 "Review cumulative USD results for every recorded instrument, including closed positions. "
-                 "Select a row to inspect matched lots, dividends, bond interest and attributable withholding tax. "
-                 "Return on cash cost divides the cumulative result by all purchase cash outflows, "
-                 "including commissions and bond accrued interest paid. "
-                 "Missing Cash windows, unmatched trades, unattributed income, or income FX "
-                 "make displayed totals partial; hover over a total for its limitations. "
-                 "Open bonds also need current accrued interest for a full total. "
-                 "Add Conid, Symbol and FX Rate to Base to the Cash Flex query, then reimport Cash history "
-                 "to link older income rows.")
-        add_text(analytics_content, "Exposure",
-                 "See the latest portfolio mix by sector or a custom group. Choose Market value or "
-                 "Adjusted for the pie, category list and position percentages. Click a pie slice "
-                 "to filter positions; use Manage categories to edit custom groups.")
-        add_text(analytics_content, "Monthly history",
-                 "Reported monthly NAV and returns from older PortfolioAnalyst reports, for periods "
-                 "with no daily data. Use File → Import Data → Import older CSV history to add these.")
+        add_note(analytics_content, "P&L shows NAV and returns; Capital deployment shows invested cash "
+                 "and trading. Hover for values, drag for dates. S&P 500 starts at 0% at its first point.")
+        add_visual(analytics_content, "analytics_more")
+        add_note(analytics_content, "Returns includes matched lots and income. ≈ partial flags missing Cash, "
+                 "matches, FX or attribution; hover for details. Open bonds need accrued interest.")
+        add_note(analytics_content, "Buy / sell levels compares trades with daily closes. Load older prices "
+                 "for up to five years; markers hide if split history cannot be verified.")
 
         rebalance_content = add_section("Rebalance")
-        add_text(rebalance_content, "Plan targets and scenarios",
-                 "Enter target weights or a Cash target to see estimated buys and sells. "
-                 "Use Add idea for a stock you do not hold, and enter upside/downside cases to compare outcomes. "
-                 "Show changes the visible columns. Use the pause button in the top toolbar to pause "
-                 "or resume syncing across the app.")
         add_visual(rebalance_content, "rebalance")
+        add_note(rebalance_content, "Enter target weights or a Cash target; add an idea for a new stock. "
+                 "Upside/downside cases compare outcomes. Show changes columns. This worksheet does not place orders.")
 
         views_content = add_section("Views & data")
-        add_text(views_content, "Tables and saved views",
-                 "Click a column heading to sort; right-click it for column and decimal options. "
-                 "Use View → Save current tab view to remember that tab's filters and layout. "
-                 "Drag tabs to reorder them; the new order is remembered automatically, and "
-                 "View → Reset tab order restores the default order. "
-                 "Use File → Export Workbook or Create SQLite Backup to keep a copy of your data.")
-        add_text(views_content, "Data status",
-                 "Live account values can be provisional, and saved data can be older while offline. "
-                 "Check status labels and hover over missing values for details.")
+        add_visual(views_content, "views")
+        add_note(views_content, "Sort with a column heading; right-click for columns and decimals. "
+                 "Saved views remember filters and layout. Live values may be provisional; "
+                 "hover over missing values for details.")
 
         shortcuts_content = add_section("Shortcuts")
         grid = QGridLayout()
@@ -1702,9 +1730,11 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(5)
         for number, (keys, action) in enumerate((
             ("Ctrl+Tab / Ctrl+Shift+Tab", "Move to the next or previous tab"),
-            ("Ctrl+Shift+H", "Show or hide the account summary"),
+            ("Ctrl+M", "Toggle the compact account summary"),
+            ("Ctrl+L", "Return to the full view from the compact summary"),
+            ("Ctrl+H", "Show or hide the account summary"),
             ("Ctrl++ / Ctrl+=", "Zoom in"),
-            ("Ctrl+-", "With the Rebalance table focused and one or more full rows selected, remove those ideas or set those holdings' targets to 0%. With only cells or partial rows selected, zoom out."),
+            ("Ctrl+-", "Rebalance full rows: remove ideas or set targets to 0%. Otherwise zoom out."),
             ("Ctrl+Shift+-", "Always zoom out"),
             ("Ctrl+0", "Reset zoom to 100%"),
             ("Enter / F2", "Open a selected input; Enter saves and moves down"),
@@ -1716,14 +1746,14 @@ class MainWindow(QMainWindow):
             ("F1", "Open this guide"),
         )):
             key_label = QLabel(keys)
-            key_label.setObjectName("helpKey")
+            key_label.setObjectName("helpShortcutKey")
             description = QLabel(action)
             description.setWordWrap(True)
             grid.addWidget(key_label, number, 0)
             grid.addWidget(description, number, 1)
         grid.setColumnStretch(1, 1)
         shortcuts_content.addLayout(grid)
-        for content in (start_content, portfolio_content, analytics_content,
+        for content in (start_content, portfolio_content, matched_content, analytics_content,
                         rebalance_content, views_content, shortcuts_content):
             content.addStretch()
         self.help_navigation.setCurrentRow(0)
@@ -1734,7 +1764,8 @@ class MainWindow(QMainWindow):
     def open_help(self):
         current = self.tabs.currentWidget()
         section = ("Analytics" if current is self.analytics_tab else
-                   "Rebalance" if current is self.calcs_tab else "Portfolio")
+                   "Rebalance" if current is self.calcs_tab else
+                   "Matched lots" if current is self.views["Lots"].parentWidget() else "Portfolio")
         self.help_navigation.setCurrentRow(self.help_section_indices[section])
         self.help_dialog.show()
         self.help_dialog.raise_()
@@ -1754,8 +1785,16 @@ class MainWindow(QMainWindow):
         self.show_summary_action = view_menu.addAction("Show account summary")
         self.show_summary_action.setCheckable(True)
         self.show_summary_action.setChecked(self._show_account_summary)
-        self.show_summary_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.show_summary_action.setShortcut(QKeySequence("Ctrl+H"))
         self.show_summary_action.toggled.connect(self._set_account_summary_visible)
+        self.compact_summary_action = view_menu.addAction("Compact summary view")
+        self.compact_summary_action.setCheckable(True)
+        self.compact_summary_action.setShortcut(QKeySequence("Ctrl+M"))
+        self.compact_summary_action.toggled.connect(self._set_compact_summary)
+        self.expand_full_view_action = view_menu.addAction(
+            "Expand full view", lambda: self.compact_summary_action.setChecked(False))
+        self.expand_full_view_action.setShortcut(QKeySequence("Ctrl+L"))
+        self.expand_full_view_action.setEnabled(False)
         view_menu.addSeparator()
         self.zoom_in_action = view_menu.addAction("Zoom in", self.zoom_in)
         self.zoom_in_action.setShortcuts([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
@@ -1781,7 +1820,7 @@ class MainWindow(QMainWindow):
             self.restore_view_action.setEnabled(self._current_table_name() is not None and
                 self._saved_default_view(self._current_table_name()) is not None)))
         self.matches_menu = self.menuBar().addMenu("Matches")
-        self.matches_menu.addAction("Match lots…", self.match_lots)
+        self.match_lots_action = self.matches_menu.addAction("Match lots…", self.match_lots)
         self.matches_menu.addAction("Rebuild automatic matches", self.auto_match)
         self.auto_match_menu = QMenu("Auto-match remaining", self.matches_menu)
         self.auto_match_menu.setToolTipsVisible(True)
@@ -1822,6 +1861,10 @@ class MainWindow(QMainWindow):
                         view.setColumnWidth(column, width)
                     for column in (10, 11, 12):
                         view.hideColumn(column)
+            if name == "Lots" and (not use_saved or not state or
+                                   self.db.setting("lots_pnl_percentages_version") != "1"):
+                self._place_lot_pnl_percentages()
+                self.db.set_setting("lots_pnl_percentages_version", "1")
             if name == "Portfolio" and self.db.setting("price_move_bars_intro_applied") != "1":
                 for column in (9, 10, 11):
                     view.showColumn(column)
@@ -1830,6 +1873,19 @@ class MainWindow(QMainWindow):
             self.db.set_setting("header_layout_version", "3")
         if not portfolio_saved:
             self.db.set_setting("portfolio_columns_version", "4")
+
+    def _place_lot_pnl_percentages(self):
+        view = self.views["Lots"]
+        header = view.horizontalHeader()
+        columns = {key: index for index, (key, _, _) in enumerate(LOTS)}
+        for amount, percent in (("realized_net", "realized_pct"),
+                                ("net_unrealized", "unrealized_pct")):
+            column = columns[percent]
+            source = header.visualIndex(column)
+            target = header.visualIndex(columns[amount])
+            header.moveSection(source, target + (source > target))
+            view.setColumnWidth(column, 125)
+            view.showColumn(column)
 
     def _current_table_name(self):
         name = self.tabs.tabBar().tabData(self.tabs.currentIndex())
@@ -1937,6 +1993,8 @@ class MainWindow(QMainWindow):
         header = self.views[name].horizontalHeader()
         if state["header"] is not None:
             header.restoreState(QByteArray.fromBase64(state["header"].encode("ascii")))
+        if name == "Lots" and "realized_pct" not in state.get("columns", []):
+            self._place_lot_pnl_percentages()
         self.search_fields[name].setText(state["search"])
         if name == "Portfolio":
             self.hide_closed_checkbox.setChecked(state.get("hide_closed") is True)
@@ -2032,11 +2090,29 @@ class MainWindow(QMainWindow):
         for table in self.findChildren(ReportTable):
             table.finish_layout_persistence()
         self.db.conn.close()
+        QApplication.instance().removeEventFilter(self._table_click_away_filter)
         super().closeEvent(event)
 
     def selected_row(self, name):
         index = self.views[name].currentIndex()
         return self.models[name].rows[index.row()] if index.isValid() else None
+
+    def _selected_match_lot(self):
+        view = self.views["Lots"]
+        indexes = view.selectedIndexes()
+        if not indexes:
+            return None
+        index = view.currentIndex()
+        if not index.isValid() or not view.selectionModel().isSelected(index):
+            index = indexes[0]
+        lot = self.models["Lots"].rows[index.row()]
+        return lot if lot.get("position_id") is not None else None
+
+    def _update_match_lots_availability(self, *_):
+        enabled = self._selected_match_lot() is not None
+        self.match_lots_button.setEnabled(enabled)
+        if hasattr(self, "match_lots_action"):
+            self.match_lots_action.setEnabled(enabled)
 
     def _populate_columns_menu(self, name, menu):
         menu.clear()
@@ -2150,7 +2226,7 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
                 menu.addAction("Position details", lambda checked=False: self.show_position_details())
         elif name == "Lots":
-            row = self.selected_row("Lots")
+            row = self._selected_match_lot()
             if row:
                 menu.addSeparator()
                 menu.addAction("Match lots…", lambda checked=False: self.match_lots())
@@ -2204,6 +2280,8 @@ class MainWindow(QMainWindow):
         view.verticalScrollBar().setValue(vertical_position)
         view.horizontalScrollBar().setValue(horizontal_position)
         self._update_selection_info(name)
+        if name == "Lots":
+            self._update_match_lots_availability()
 
     def show_position_details(self):
         position = self.selected_row("Portfolio")
@@ -2264,10 +2342,13 @@ class MainWindow(QMainWindow):
             self.views[name].showColumn(column)
 
     def _refresh_models(self):
-        portfolio = self.service.portfolio_rows()
+        if hasattr(self, "lots_refresh_timer"):
+            self.lots_refresh_timer.stop()
+        with self.service.shared_rows():
+            portfolio = self.service.portfolio_rows()
+            lots = self.service.lots_rows(portfolio)
+            trades = self.service.trade_rows(lots)
         self._stream_rows = portfolio
-        lots = self.service.lots_rows(portfolio)
-        trades = self.service.trade_rows(lots)
         for name in self.models:
             self._refresh_model(name, portfolio if name == "Portfolio" else
                                 lots if name == "Lots" else trades)
@@ -2276,8 +2357,14 @@ class MainWindow(QMainWindow):
         if self.tabs.currentWidget() is self.cash_tab:
             self.cash_tab.refresh()
         if self.tabs.currentWidget() is self.analytics_tab:
-            self.analytics_tab.refresh(portfolio_rows=portfolio, lots=lots)
+            self.analytics_tab.refresh(portfolio_rows=portfolio, lots=lots, trade_rows=trades)
         self._refresh_summary(portfolio, lots)
+
+    def _refresh_lots_and_summary(self):
+        rows = self._stream_rows if self._stream_rows is not None else self.service.portfolio_rows()
+        lots = self.service.lots_rows(rows)
+        self._refresh_model("Lots", lots)
+        self._refresh_summary(rows, lots)
 
     def _refresh_summary(self, rows=None, lots=None):
         self._update_account_heading()
@@ -2362,13 +2449,16 @@ class MainWindow(QMainWindow):
         self.data_notice.setText(" · ".join(issues) + " — review reconciliation and source data" if issues else "")
         self.data_notice.setVisible(bool(issues))
         self._update_status()
+        if self._compact_geometry is not None:
+            self._fit_compact_summary()
 
     def match_lots(self):
-        lot = self.selected_row("Lots")
-        if not lot or lot.get("position_id") is None:
+        lot = self._selected_match_lot()
+        if lot is None:
             self.statusBar().showMessage("Select a lot in the Lots tab to match it", 8000)
             return
-        dialog = LotMatchDialog(self.service, lot["position_id"], lot["ticker"], self, theme=self.theme)
+        dialog = LotMatchDialog(self.service, lot["position_id"], lot["ticker"], self,
+                                theme=self.theme, sale_id=lot.get("sell_trade_id"))
         if dialog.exec() == QDialog.Accepted:
             self._refresh_models()
 
@@ -2446,7 +2536,7 @@ class MainWindow(QMainWindow):
             if isinstance(self.market, IBKRMarketDataProvider):
                 self.market.stop()
             for timer in (self.timer, self.refresh_timer, self.lots_refresh_timer,
-                          self.calcs_refresh_timer, self.summary_refresh_timer):
+                          self.calcs_refresh_timer):
                 timer.stop()
             self.db.conn.close()
             args = ["--database", str(self.db.path), "--status-file", str(self._encryption_status_path)]
@@ -2562,6 +2652,11 @@ class MainWindow(QMainWindow):
                 (current is None or p["con_id"] in current) and
                 (force or self.db.metadata(f"history_refresh_{p['con_id']}") != today)}
 
+    def _request_levels_history(self, position, first_saved_day=None):
+        if not isinstance(self.market, IBKRMarketDataProvider):
+            raise RuntimeError("Connect to IBKR in Settings before loading older prices.")
+        return self.market.request_price_history(position, first_saved_day)
+
     def _start_provider(self, force_history=False):
         if self._sync_paused:
             return
@@ -2631,15 +2726,18 @@ class MainWindow(QMainWindow):
         if stamp and stamp != self._last_flex_sync_stamp:
             self._last_flex_sync_stamp = stamp
             self._refresh_models()
+        analytics_updated = False
         if self._analytics_process is not None and self._analytics_process.poll() is not None:
             self._analytics_process = None
-            self.analytics_tab.refresh()
+            analytics_updated = True
         if self._cash_process is not None and self._cash_process.poll() is not None:
             self._cash_process = None
             self.cash_tab.refresh()
         analytics_stamp = self.db.metadata("ibkr_analytics_sync_completed")
         if analytics_stamp and analytics_stamp != self._last_analytics_sync_stamp:
             self._last_analytics_sync_stamp = analytics_stamp
+            analytics_updated = True
+        if analytics_updated:
             self.analytics_tab.refresh()
         cash_stamp = self.db.metadata("ibkr_cash_sync_completed")
         self._advance_sync_queue()
@@ -2702,11 +2800,22 @@ class MainWindow(QMainWindow):
         self._poll_history_import()
         if self._sync_paused:
             self._advance_sync_queue()
-            self._update_sync_button()
-            self._update_status()
+            self._update_sync_progress()
+            if time.monotonic() - self._last_ui_status_at >= 1:
+                self._update_sync_button()
+                self._update_status()
             return
         was_connected = self.market.connected
+        was_sync_pending = self._live_sync_pending
         ids = self.market.drain()
+        quote_issue_changed = False
+        for position_id in (key for key in ids if isinstance(key, int)):
+            status = str(self.market.quote(position_id).get("status") or "")
+            issue = status if status not in ("", "OK", "DELAYED", "CACHED QUOTE",
+                                             "MOCK", "WAITING FOR PRICE") else ""
+            if issue != self._quote_issue_statuses.get(position_id, ""):
+                self._quote_issue_statuses[position_id] = issue
+                quote_issue_changed = True
         if was_connected and not self.market.connected:
             self._disconnected_since = time.monotonic()
             # Persist the last known prices once, then resume the normal throttle.
@@ -2725,21 +2834,28 @@ class MainWindow(QMainWindow):
         if ids:
             if any(str(position_id).startswith("idea:") for position_id in ids):
                 self.calcs_tab.cache_idea_quotes(ids)
-            # One portfolio pass for this tick, shared with the throttled views.
-            self._stream_rows = self.service.portfolio_rows()
-            self.models["Portfolio"].update_positions(ids, self._stream_rows)
-            if not self.summary_refresh_timer.isActive():
-                self.summary_refresh_timer.start(1000)
+            position_ids = {key for key in ids if isinstance(key, int)}
+            if position_ids:
+                # Quotes change valuations only for their own instruments.
+                changed = self.service.portfolio_rows(position_ids)
+                known_ids = {row["id"] for row in self._stream_rows or ()}
+                if self._stream_rows is None or any(
+                        row["id"] not in known_ids for row in changed):
+                    self._refresh_models()
+                else:
+                    by_id = {row["id"]: row for row in changed}
+                    self._stream_rows = [by_id.get(row["id"], row) for row in self._stream_rows]
+                    self.models["Portfolio"].update_positions(position_ids, changed)
+                    if not self.lots_refresh_timer.isActive():
+                        self.lots_refresh_timer.start(1000)
             if (self.tabs.currentWidget() is self.analytics_tab and
                     self.analytics_tab.sections.currentWidget() is self.analytics_tab.exposure_page and
                     time.monotonic() - getattr(self, "_last_exposure_refresh", 0) >= 2):
-                self.analytics_tab.refresh_exposure()
+                self.analytics_tab.refresh_exposure(self._stream_rows)
                 self._last_exposure_refresh = time.monotonic()
             if (self.tabs.currentWidget() is self.calcs_tab and
                     not self.calcs_refresh_timer.isActive()):
                 self.calcs_refresh_timer.start(1000)
-            if not self.lots_refresh_timer.isActive():
-                self.lots_refresh_timer.start(1000)
             if (isinstance(self.market, IBKRMarketDataProvider) and
                     time.monotonic() - self._last_quote_cache_at >= 15):
                 account = self.db.setting("ib_account_id")
@@ -2778,7 +2894,7 @@ class MainWindow(QMainWindow):
                     except (TypeError, ValueError):
                         numeric_multiplier = None
                     self.db.cache_contract(position_id, con_id, tz, numeric_multiplier, details)
-                    self.models["Portfolio"].update_positions({position_id})
+                    needs_model_refresh = True
                 elif event[0] == "exposure_calculation_error":
                     self.analytics_tab.exposure_page.calculation_errors[event[1]] = event[2]
                     exposure_updated = True
@@ -2899,16 +3015,29 @@ class MainWindow(QMainWindow):
                     completed = [bar for bar in bars if bar["day"] < today.isoformat()]
                     if completed:
                         self.db.save_history(con_id, completed)
-                        self.models["Portfolio"].update_positions(
-                            {p["id"] for p in self.db.rows("positions", self.portfolio_id)
-                             if p.get("con_id") == con_id})
-                        self._refresh_model("Lots")
-                        if not self.summary_refresh_timer.isActive():
-                            self.summary_refresh_timer.start(1000)
+                        if (self.tabs.currentWidget() is self.analytics_tab and
+                                self.analytics_tab.sections.currentWidget() is self.analytics_tab.levels_page):
+                            self.analytics_tab.levels_page.refresh()
+                            self.analytics_tab.levels_page.set_history_message(
+                                con_id, "IBKR returned daily prices; earlier dates may still be unavailable.")
+                        needs_model_refresh = True
+                    elif (self.tabs.currentWidget() is self.analytics_tab and
+                          self.analytics_tab.sections.currentWidget() is self.analytics_tab.levels_page):
+                        self.analytics_tab.levels_page.set_history_message(
+                            con_id, "IBKR returned no completed daily prices for this request.")
+                elif event[0] == "history_error":
+                    _, con_id, message = event
+                    if (self.tabs.currentWidget() is self.analytics_tab and
+                            self.analytics_tab.sections.currentWidget() is self.analytics_tab.levels_page):
+                        self.analytics_tab.levels_page.set_history_message(con_id, message)
+                elif event[0] == "chart_history_complete":
+                    _, con_id, reached_five_years = event
+                    self.analytics_tab.levels_page.set_history_complete(
+                        con_id, reached_five_years)
             if (exposure_updated and self.tabs.currentWidget() is self.analytics_tab and
                     self.analytics_tab.sections.currentWidget() is self.analytics_tab.exposure_page and
                     time.monotonic() - getattr(self, "_last_exposure_refresh", 0) >= 2):
-                self.analytics_tab.refresh_exposure()
+                self.analytics_tab.refresh_exposure(self._stream_rows)
                 self._last_exposure_refresh = time.monotonic()
             if execution_records:
                 try:
@@ -2929,20 +3058,21 @@ class MainWindow(QMainWindow):
                                            if p["id"] in new_instruments])
             if needs_model_refresh:
                 self._refresh_models()
-            else:
-                # Refresh the shared snapshot after handlers that wrote to the
-                # database, so the throttled views read current data.
-                self._stream_rows = self.service.portfolio_rows()
         required_live_events = {"broker_positions", "account_summary_end"}
         if self.db.setting("ib_account_id"):
             required_live_events.add("executions_end")
         if self._live_sync_pending and required_live_events <= self._live_sync_events:
             self._live_sync_pending = False
         self._advance_sync_queue()
-        self._update_sync_button()
-        self._update_status()
+        self._update_sync_progress()
+        if (was_connected != self.market.connected or quote_issue_changed or
+                was_sync_pending != self._live_sync_pending or
+                time.monotonic() - self._last_ui_status_at >= 1):
+            self._update_sync_button()
+            self._update_status()
 
     def _update_status(self):
+        self._last_ui_status_at = time.monotonic()
         connected = "Connected" if self.market.connected else "Disconnected"
         if isinstance(self.market, MockMarketDataProvider):
             connected = "Mock"

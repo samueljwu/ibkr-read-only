@@ -569,15 +569,40 @@ def test_older_csv_launch_and_monthly_daily_boundary(window, monkeypatch):
                (portfolio_id,account_id,period_from,period_to,cumulative_return_pct,
                 ending_nav_usd,measure,source_hash)
                VALUES (1,'SYNTHETIC','2021-04-13','2026-10-14','10.0','120','TWR','synthetic')""")
+    window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.monthly_page)
     window.analytics_tab.refresh()
     monthly = window.analytics_tab.monthly_table
     assert monthly.rowCount() == 1
     assert monthly.item(0, 0).text() == "2021-04"
     assert "since-inception TWR return" in window.analytics_tab.reported_performance_monthly.text()
+    window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.pnl_page)
     window.analytics_tab.range_combo.setCurrentText("All")
     assert "Daily analysis unavailable for 2021" in window.analytics_tab.pnl_hint.text()
     assert window.analytics_tab.stats["Adjusted performance"].text() == "—"
     assert not window.analytics_tab.reported_performance_pnl.isHidden()
+
+
+def test_monthly_tab_extends_older_history_with_latest_flex_close(window):
+    configure(window)
+    with window.db.conn:
+        window.db.conn.execute(
+            """INSERT INTO account_monthly_history
+               (portfolio_id,account_id,month,period_from,period_to,nav_usd,return_pct,source_hash)
+               VALUES (1,'SYNTHETIC','2026-01','2026-01-01','2026-01-30','1000','1.5','synthetic')""")
+    window.db.save_account_history(1, "2026-01-30", 1000, source="flex", flow_covered=True)
+    window.db.save_account_history(1, "2026-02-02", 1010, source="flex", flow_covered=True)
+    window.db.save_account_history(1, "2026-02-03", 1020, source="flex", flow_covered=True)
+    window.db.set_account_value(1, "NetLiquidation", 1100, "USD", "2026-03-02T12:00:00")
+    window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.monthly_page)
+    window.analytics_tab.refresh()
+    monthly = window.analytics_tab.monthly_table
+    assert monthly.rowCount() == 2
+    assert monthly.item(0, 0).text() == "2026-02"
+    assert monthly.item(0, 1).text() == "2026-02-02 to 2026-02-03"
+    assert monthly.item(0, 3).raw_value == pytest.approx(2.0)
+    assert monthly.item(0, 4).text() == "Flex"
+    assert monthly.item(1, 0).text() == "2026-01"
+    assert monthly.item(1, 4).text() == "PortfolioAnalyst"
 
 
 def test_older_csv_picker_requires_both_reports(window, monkeypatch):

@@ -7,11 +7,13 @@ rules in ui_theme.py.
 
 import json
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialogButtonBox, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QHBoxLayout, QLabel,
+                               QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
 from app.views.ui_theme import (CARD_MARGINS, DIALOG_MARGINS, DIALOG_SPACING,
-                                 PAGE_MARGINS, PAGE_SPACING, SUBPAGE_MARGINS)
+                                 PAGE_MARGINS, PAGE_SPACING, SUBPAGE_MARGINS,
+                                 style_toolbar_dropdown)
 
 
 def apply_layout(layout, kind):
@@ -138,6 +140,73 @@ def remember_splitter(splitter, db, key):
 
     splitter.splitterMoved.connect(_save)
     return _save
+
+
+def _chart_table_state_key(key, horizontal):
+    return f"{key}_horizontal" if horizontal else key
+
+
+def save_chart_table_split_state(db, splitter, key):
+    state_key = _chart_table_state_key(key, splitter.orientation() == Qt.Horizontal)
+    db.set_setting(state_key, bytes(splitter.saveState().toBase64()).decode("ascii"))
+
+
+def set_chart_table_layout(db, splitter, key, horizontal):
+    if (splitter.orientation() == Qt.Horizontal) == horizontal:
+        return
+    save_chart_table_split_state(db, splitter, key)
+    splitter.blockSignals(True)
+    try:
+        splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
+        saved = db.setting(_chart_table_state_key(key, horizontal))
+        if not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
+            splitter.setSizes((600, 400))
+    finally:
+        splitter.blockSignals(False)
+    db.set_setting(f"{key}_orientation", "horizontal" if horizontal else "vertical")
+
+
+def chart_table_layout(layout, db, key, chart, table, *, info_label=None, navigator=None):
+    """Add the shared chart/table orientation control and persistent splitter."""
+    horizontal = db.setting(f"{key}_orientation") == "horizontal"
+    controls = QHBoxLayout()
+    controls.setSpacing(8)
+    if info_label is not None:
+        controls.addWidget(info_label, 1)
+    controls.addStretch()
+    controls.addWidget(QLabel("Chart and table"))
+    layout_combo = style_toolbar_dropdown(QComboBox())
+    layout_combo.addItems(("Top and bottom", "Side by side"))
+    layout_combo.setCurrentIndex(1 if horizontal else 0)
+    controls.addWidget(layout_combo)
+    layout.addLayout(controls)
+
+    splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
+    splitter.setChildrenCollapsible(False)
+    splitter.setHandleWidth(11)
+    splitter.setMinimumWidth(0)
+    splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+    chart_panel = QWidget()
+    chart_panel.setMinimumWidth(0)
+    chart_layout = QVBoxLayout(chart_panel)
+    chart_layout.setContentsMargins(0, 0, 0, 0)
+    chart_layout.setSpacing(2)
+    chart_layout.addWidget(chart, 1)
+    if navigator is not None:
+        chart_layout.addWidget(navigator)
+    splitter.addWidget(chart_panel)
+    splitter.addWidget(table)
+    splitter.setStretchFactor(0, 3)
+    splitter.setStretchFactor(1, 2)
+    saved = db.setting(_chart_table_state_key(key, horizontal))
+    if not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
+        splitter.setSizes((600, 400))
+    splitter.splitterMoved.connect(lambda *_: save_chart_table_split_state(db, splitter, key))
+    layout_combo.currentIndexChanged.connect(
+        lambda index: set_chart_table_layout(db, splitter, key, index == 1))
+    layout.addWidget(splitter, 1)
+    splitter.handle(1).setToolTip("Drag to resize chart and table")
+    return splitter, layout_combo
 
 
 def persist_tab_order(tab_widget, db, key, ids, remember_active=False):

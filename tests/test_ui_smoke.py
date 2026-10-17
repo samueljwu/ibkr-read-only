@@ -353,18 +353,97 @@ def test_tab_and_summary_keyboard_shortcuts_follow_visible_layout(tmp_path, monk
         assert window.summary.isVisible()
         window.views["Portfolio"].setFocus()
         QTest.keyClick(window.views["Portfolio"], Qt.Key_H,
-                       Qt.ControlModifier | Qt.ShiftModifier)
+                       Qt.ControlModifier)
         assert not window.show_summary_action.isChecked()
         assert not window.summary.isVisible()
         assert window.db.setting("show_account_summary") == "0"
-        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier | Qt.ShiftModifier)
+        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier)
         assert window.show_summary_action.isChecked()
         assert window.summary.isVisible()
         assert window.db.setting("show_account_summary") == "1"
         window.tabs.setCurrentWidget(window.calcs_tab)
-        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier | Qt.ShiftModifier)
+        QTest.keyClick(window.tabs, Qt.Key_H, Qt.ControlModifier)
         assert not window.show_summary_action.isChecked()
         assert not window.summary.isVisible()
+    finally:
+        window.close()
+
+
+def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "compact-summary.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        window.resize(1200, 700)
+        window.show()
+        app.processEvents()
+        original = window.geometry()
+        window.show_summary_action.setChecked(False)
+        window.tabs.setCurrentWidget(window.cash_tab)
+
+        QTest.keyClick(window.tabs, Qt.Key_M, Qt.ControlModifier)
+        app.processEvents()
+        assert window.compact_summary_action.isChecked()
+        assert window.tabs.currentIndex() == window._tab_index("Portfolio")
+        assert window.summary.isVisible()
+        assert window.tabs.tabBar().isVisible()
+        assert not window.tabs.currentWidget().isVisible()
+        assert window.height() < original.height()
+        assert window.width() < original.width()
+        assert window.height() <= window.sizeHint().height() + 2
+        assert not window.statusBar().isVisible()
+
+        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
+                         pos=window.tabs.tabBar().tabRect(window._tab_index("Portfolio")).center())
+        app.processEvents()
+        assert not window.compact_summary_action.isChecked()
+        assert window.geometry() == original
+        assert window.tabs.currentWidget().isVisible()
+        assert window.statusBar().isVisible()
+        assert not window.summary.isVisible()
+        assert window.db.setting("show_account_summary") == "0"
+
+        window.compact_summary_action.trigger()
+        app.processEvents()
+        QTest.keyClick(window.tabs, Qt.Key_M, Qt.ControlModifier)
+        app.processEvents()
+        assert not window.compact_summary_action.isChecked()
+        assert window.geometry() == original
+
+        window.compact_summary_action.trigger()
+        app.processEvents()
+        assert window.expand_full_view_action.isEnabled()
+        QTest.keyClick(window.tabs, Qt.Key_L, Qt.ControlModifier)
+        app.processEvents()
+        assert not window.compact_summary_action.isChecked()
+        assert not window.expand_full_view_action.isEnabled()
+        assert window.geometry() == original
+
+        window.compact_summary_action.trigger()
+        app.processEvents()
+        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
+                         pos=window.tabs.tabBar().tabRect(window._tab_index("Trades")).center())
+        app.processEvents()
+        assert not window.compact_summary_action.isChecked()
+        assert window.tabs.currentIndex() == window._tab_index("Trades")
+        assert window.geometry() == original
+
+        window.compact_summary_action.trigger()
+        QTest.keyClick(window.tabs, Qt.Key_Tab, Qt.ControlModifier)
+        app.processEvents()
+        assert not window.compact_summary_action.isChecked()
+        assert window.tabs.currentIndex() == window._tab_index("Trades")
+        assert window.geometry() == original
+
+        window.showMaximized()
+        app.processEvents()
+        window.compact_summary_action.trigger()
+        app.processEvents()
+        assert not window.isMaximized()
+        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
+                         pos=window.tabs.tabBar().tabRect(window._tab_index("Portfolio")).center())
+        app.processEvents()
+        assert window.isMaximized()
     finally:
         window.close()
 
@@ -1293,6 +1372,9 @@ def test_unused_header_area_follows_theme(tmp_path, monkeypatch):
         window.show()
         app.processEvents()
         header = window.views["Lots"].horizontalHeader()
+        window.resize(window.width() + header.length() - header.viewport().width() + 100,
+                      window.height())
+        app.processEvents()
         assert header.viewport().width() > header.length()
         for theme in ("light", "dark"):
             window._apply_theme(theme)
@@ -1315,40 +1397,53 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             window._apply_theme(theme)
             app.processEvents()
             assert settings_page.palette().color(settings_page.backgroundRole()).name() == COLORS[theme]["canvas"]
-            assert len(window.help_visuals) == 4
-            assert window.help_visuals[2].chart.theme == theme
+            assert len(window.help_visuals) == 10
+            assert next(visual.chart for visual in window.help_visuals
+                        if visual.chart is not None).theme == theme
         window.settings_dialog.close()
         window.help_button.click()
         app.processEvents()
         assert window.help_dialog.isVisible()
         assert window.help_navigation.currentItem().text() == "Portfolio"
         assert [window.help_navigation.item(i).text() for i in range(window.help_navigation.count())] == [
-            "Start", "Portfolio", "Analytics", "Rebalance", "Views & data", "Shortcuts"]
+            "Start", "Portfolio", "Matched lots", "Analytics", "Rebalance", "Views & data", "Shortcuts"]
         guide = " ".join(label.text() for label in window.help_dialog.findChildren(QLabel))
         for term in ("Overview", "Trades", "P&L", "Shift+Space",
                      "Ctrl+Space", "Ctrl+C", "Ctrl+Tab", "Ctrl+Shift+Tab",
-                     "Ctrl+Shift+H", "F1", "read-only"):
+                     "Ctrl+H", "F1", "Read-only API"):
             assert term in guide
-        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0", "one or more full rows",
-                     "only cells or partial rows selected, zoom out"):
+        for term in ("Ctrl+-", "Ctrl+Shift+-", "Ctrl+0", "Rebalance full rows",
+                     "Otherwise zoom out"):
             assert term in guide
-        for visual, label in zip(window.help_visuals, (
-                "Sync IBKR", "Hide closed", "Adjusted NAV change", "Show")):
-            assert label in " ".join(child.text() for child in visual.findChildren(QLabel))
-        for title, phrase in (("Start", "Start and refresh"),
-                              ("Portfolio", "Trades and Lots"),
+        visual_labels = " ".join(child.text() for visual in window.help_visuals
+                                 for child in visual.findChildren(QLabel))
+        for label in ("Sync IBKR", "Hide closed", "Match lots…", "Adjusted NAV change",
+                      "Target weight", "Save current tab view"):
+            assert label in visual_labels
+        for title, phrase in (("Start", "Source status"),
+                              ("Portfolio", "Hide closed"),
+                              ("Matched lots", "Reset sale to automatic"),
                               ("Analytics", "Exposure"),
-                              ("Rebalance", "Plan targets and scenarios"),
-                              ("Views & data", "Data status"),
+                              ("Rebalance", "Target weight"),
+                              ("Views & data", "Save current tab view"),
                               ("Shortcuts", "Ctrl+Tab / Ctrl+Shift+Tab")):
             window.help_navigation.setCurrentRow(window.help_section_indices[title])
             app.processEvents()
             assert window.help_sections.currentWidget().isVisible()
-            if title in ("Start", "Portfolio", "Analytics", "Rebalance"):
+            if title in ("Start", "Portfolio", "Matched lots", "Analytics", "Rebalance"):
                 assert not window.help_sections.currentWidget().horizontalScrollBar().isVisible()
             section_text = " ".join(label.text() for label in
                                     window.help_sections.currentWidget().findChildren(QLabel))
             assert phrase in section_text
+            if title == "Matched lots":
+                for action in ("Remove split", "Rebuild automatic matches", "FIFO", "LIFO",
+                               "Max realized gain", "Max unrealized gain",
+                               "Clear match for selected lot", "Save changes"):
+                    assert action in section_text
+        window.help_dialog.close()
+        window.tabs.setCurrentWidget(window.views["Lots"].parentWidget())
+        window.open_help()
+        assert window.help_navigation.currentItem().text() == "Matched lots"
         window.help_dialog.close()
         window.tabs.setCurrentWidget(window.analytics_tab)
         window.open_help()

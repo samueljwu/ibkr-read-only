@@ -6,12 +6,13 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QFontInfo, QPalette
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog, QHeaderView,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog,
+                               QDialogButtonBox, QHeaderView,
                                QDoubleSpinBox, QLabel, QLineEdit, QPushButton,
-                               QTableWidgetItem, QWidget)
+                               QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 import app.ui as ui
 from app.views.calcs_ui import CalcsTab, CalcsTable
@@ -381,13 +382,87 @@ def test_shared_cards_and_buttons_follow_theme(window, theme):
     secondary = [button for button in window.findChildren(QPushButton)
                  if button.objectName() == "secondary"]
     assert secondary
-    assert all(button.palette().color(QPalette.Button).name() == COLORS[theme]["surface"]
+    assert all(button.palette().color(QPalette.Button).name() ==
+               COLORS[theme]["surface" if button.isEnabled() else "disabled_surface"]
                for button in secondary)
     for name in window.views:
         toolbar = window.findChild(QWidget, f"{name}Toolbar")
         columns = next(button for button in toolbar.findChildren(QPushButton)
                        if button.text() == "Columns")
         assert columns.palette().color(QPalette.Button).name() == COLORS[theme]["surface"]
+
+
+def test_match_lots_availability_follows_selection_and_click_away(window):
+    button = window.match_lots_button
+    assert not button.isEnabled()
+    assert not window.match_lots_action.isEnabled()
+    position = window.db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
+    window.db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                         "side": "BUY", "quantity": 10, "price": 10})
+    window._refresh_models()
+    assert not button.isEnabled()
+
+    view = window.views["Lots"]
+    window.tabs.setCurrentWidget(view.parentWidget())
+    view.setCurrentIndex(view.model().index(0, 0))
+    assert button.isEnabled()
+    assert window.match_lots_action.isEnabled()
+    QTest.mouseClick(window.selection_info["Lots"], Qt.LeftButton)
+    assert not view.selectedIndexes()
+    assert not view.currentIndex().isValid()
+    assert not button.isEnabled()
+    assert not window.match_lots_action.isEnabled()
+
+    view.setCurrentIndex(view.model().index(0, 0))
+    assert button.isEnabled()
+    window.search_fields["Lots"].setText("no matching instrument")
+    assert not button.isEnabled()
+
+
+def test_click_away_clears_report_table_in_dialog(window):
+    dialog = QDialog(window)
+    layout = QVBoxLayout(dialog)
+    empty_space = QLabel("Details")
+    layout.addWidget(empty_space)
+    table = ReportTable(1, 1)
+    table.setItem(0, 0, QTableWidgetItem("Synthetic"))
+    layout.addWidget(table)
+    other_table = ReportTable(1, 1)
+    other_table.setItem(0, 0, QTableWidgetItem("Another row"))
+    layout.addWidget(other_table)
+    dialog.show()
+    QApplication.instance().processEvents()
+    try:
+        table.setCurrentCell(0, 0)
+        other_table.setCurrentCell(0, 0)
+        assert table.selectedIndexes() and other_table.selectedIndexes()
+        QTest.mouseClick(empty_space, Qt.LeftButton)
+        for view in (table, other_table):
+            assert not view.selectedIndexes()
+            assert not view.currentIndex().isValid()
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize("theme", ("light", "dark"))
+def test_disabled_buttons_are_grey_across_shared_variants(window, theme):
+    window._apply_theme(theme)
+    for name in ("", "secondary", "themeToggle", "danger", "toolbarDropdown"):
+        button = QPushButton("Action", window)
+        button.setObjectName(name)
+        button.setEnabled(False)
+        button.ensurePolished()
+        assert button.palette().color(QPalette.Button).name() == COLORS[theme]["disabled_surface"]
+        assert button.palette().color(QPalette.ButtonText).name() == COLORS[theme]["disabled_text"]
+        button.deleteLater()
+
+    for name in ("link", "historyCalendarButton", "historyHelpButton", "returnNotesButton"):
+        button = QToolButton(window)
+        button.setObjectName(name)
+        button.setEnabled(False)
+        button.ensurePolished()
+        assert button.palette().color(QPalette.ButtonText).name() == COLORS[theme]["disabled_text"]
+        button.deleteLater()
 
 
 @pytest.mark.parametrize("theme", ("light", "dark"))
@@ -559,7 +634,21 @@ def test_rebalance_registers_every_table_input_with_shared_navigation(tmp_path):
         db.conn.close()
 
 
-def test_lot_match_dialog_drag_equivalents_update_tree_and_apply(tmp_path):
+def _drop_sale(dialog, sale_row, buy_row):
+    mime = dialog.sale_table.mimeData([dialog.sale_table.item(sale_row, 0)])
+    if mime is None:
+        return False
+    point = dialog.table.visualItemRect(dialog.table.item(buy_row, 0)).center()
+    enter = QDragEnterEvent(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    dialog.table.dragEnterEvent(enter)
+    move = QDragMoveEvent(point, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    dialog.table.dragMoveEvent(move)
+    event = QDropEvent(QPointF(point), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+    dialog.table.dropEvent(event)
+    return event.isAccepted()
+
+
+def test_lot_match_dialog_drag_preview_reset_and_save(tmp_path):
     from app.finance.services import PortfolioService
     from app.market.market_data import MockMarketDataProvider
     from app.views.lot_matching_ui import LotMatchDialog
@@ -568,48 +657,66 @@ def test_lot_match_dialog_drag_equivalents_update_tree_and_apply(tmp_path):
     db = Database(tmp_path / "lot-match.sqlite3")
     try:
         position = db.add_position({"display_ticker": "ABC US Equity", "ib_symbol": "ABC"})
-        early = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "BUY",
+        early = db.add_trade({"position_id": position, "trade_id": "IBKR:BUY-EARLY",
+                              "trade_date": "2026-01-01", "side": "BUY",
                               "quantity": 50, "price": 10, "commission_usd": 0})
-        late = db.add_trade({"position_id": position, "trade_date": "2026-01-02", "side": "BUY",
+        late = db.add_trade({"position_id": position, "trade_id": "IBKR:BUY-LATE",
+                             "trade_date": "2026-01-02", "side": "BUY",
                              "quantity": 50, "price": 9, "commission_usd": 0})
-        sell = db.add_trade({"position_id": position, "trade_date": "2026-01-10", "side": "SELL",
+        sell = db.add_trade({"position_id": position, "trade_id": "IBKR:SALE",
+                             "trade_date": "2026-01-10", "side": "SELL",
                             "quantity": 50, "price": 12, "commission_usd": 0})
         service = PortfolioService(db, MockMarketDataProvider())
         service.matching.rebuild_auto([position])
 
-        dialog = LotMatchDialog(service, position, "ABC US Equity")
+        dialog = LotMatchDialog(service, position, "ABC US Equity", sale_id=sell)
         try:
-            # Cheaper buy ("late") auto-matched first; its row appears as an
-            # italic, non-draggable Auto child under that buy in the tree.
+            dialog.show()
+            QApplication.instance().processEvents()
+            # The sale is available even though automatic matching filled it.
             assert any(m[0] == late and m[3] == "auto" for m in dialog.preview)
-            assert dialog.sale_list.count() == 0
+            assert dialog.sale_table.rowCount() == 1
+            assert dialog._selected_sale_id() == sell
+            assert dialog.sale_table.item(0, 0).text() == "2026-01-10 · SELL"
+            assert dialog.sale_table.item(0, 1).text() == "12.00"
+            assert dialog.sale_table.item(0, 2).text() == "50"
+            assert "2026-01-02 @ 9.00 · 50 auto" in dialog.sale_table.item(0, 3).text()
+            assert dialog.sale_table.item(0, 4).text() == "+$150.00"
+            assert "0 chosen by you" in dialog.summary.text()
+            assert not dialog.save_button.isEnabled()
+            assert all("IBKR" not in dialog.sale_table.item(0, column).text()
+                       for column in range(dialog.sale_table.columnCount()))
+            assert "IBKR" not in dialog.table.item(0, 0).text()
+            assert "IBKR" not in dialog.sale_detail.text()
+            assert dialog.table.item(0, 6).text() == "+$100.00"
+            assert dialog.table.item(0, 7).text() == "+20.00%"
+            assert dialog.table.item(dialog.table.row_for_key((late, 0)), 3).text() == "50"
+            assert "+$150.00" in dialog.pnl_summary.text()
 
-            # Drag-equivalent: assign the sale onto the other buy, pinning a manual match.
-            assert dialog.assign_match(early, sell) is True
-            assert dialog.manual_matches == [[early, sell, 50]]
-            assert [m for m in dialog.preview if m[3] == "manual"] == [(early, sell, 50, "manual")]
+            # Drop the fully auto-matched sale on another purchase.
+            assert _drop_sale(dialog, 0, 0)
+            assert dialog.manual_matches == [(early, sell, 50)]
+            assert (early, sell, 50, "manual") in dialog.preview
             assert not any(m[0] == late for m in dialog.preview)
+            assert dialog.sale_table.item(0, 0).text() == "2026-01-10 · SELL"
+            assert "2026-01-01 @ 10.00 · 50 chosen" in dialog.sale_table.item(0, 3).text()
+            assert dialog.table.item(dialog.table.row_for_key((early, 0)), 2).text() == "50"
+            assert dialog.table.item(dialog.table.row_for_key((late, 0)), 3).text() == "0"
+            assert "50 chosen by you" in dialog.summary.text()
+            assert "+$100.00" in dialog.pnl_summary.text()
+            assert dialog.save_button.isEnabled()
+            assert dialog._selected_sale_id() == sell
+            assert db.rows("trade_matches")[0]["origin"] == "auto"
 
-            # Tree reflects the manual match under the early buy, marked Manual.
-            top_items = [dialog.tree.topLevelItem(i) for i in range(dialog.tree.topLevelItemCount())]
-            early_item = next(item for item in top_items
-                              if item.data(0, Qt.UserRole)["buy_id"] == early)
-            assert early_item.childCount() == 1
-            child = early_item.child(0)
-            assert child.data(0, Qt.UserRole)["origin"] == "manual"
-            assert child.text(4) == "Manual"
-
-            # Drag-equivalent: move the manual match to the other buy.
-            assert dialog.move_match(sell, late, source_buy_id=early) is True
-            assert dialog.manual_matches == [[late, sell, 50]]
-
-            # Drag-equivalent: unmatch, then revert fully to automatic.
-            assert dialog.unmatch(late, sell) is True
+            dialog.reset_button.click()
             assert dialog.manual_matches == []
-            assert any(m[3] == "auto" for m in dialog.preview)
+            assert not dialog.save_button.isEnabled()
+            assert "50 automatic" in dialog.summary.text()
 
-            assert dialog.assign_match(early, sell) is True
-            assert dialog.apply() is True
+            assert _drop_sale(dialog, 0, 0)
+            QTest.mouseClick(dialog.save_button, Qt.LeftButton)
+            assert dialog.manual_matches == [(early, sell, 50)]
+            assert dialog.result() == QDialog.Accepted
         finally:
             dialog.close()
 
@@ -618,6 +725,301 @@ def test_lot_match_dialog_drag_equivalents_update_tree_and_apply(tmp_path):
         assert matches[0]["buy_trade_id"] == early
         assert matches[0]["origin"] == "manual"
         assert service.matching.remaining()[late] == 50
+    finally:
+        db.conn.close()
+
+
+def test_lot_match_dialog_keeps_sale_selection_and_reset_is_scoped(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match-sales.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "XYZ"})
+        buy = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "BUY",
+                            "quantity": 100, "price": 10, "commission_usd": 0})
+        first = db.add_trade({"position_id": position, "trade_date": "2026-01-03", "side": "SELL",
+                              "quantity": 30, "price": 12, "commission_usd": 0})
+        second = db.add_trade({"position_id": position, "trade_date": "2026-01-04", "side": "SELL",
+                               "quantity": 20, "price": 13, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+        dialog = LotMatchDialog(service, position, "XYZ", sale_id=first)
+        try:
+            dialog.show()
+            QApplication.instance().processEvents()
+            assert dialog.sale_table.rowCount() == 2
+            assert all("2026-01-01 @ 10.00" in dialog.sale_table.item(row, 3).text()
+                       for row in range(2))
+            dialog.sale_table.sortItems(1, Qt.DescendingOrder)
+            assert dialog.sale_table.item(0, 0).data(Qt.UserRole) == second
+            dialog.sale_table.sortItems(0, Qt.AscendingOrder)
+            assert dialog.table.item(0, 4).text() == "50/100"
+            assert len(dialog.table.item(0, 5).text().splitlines()) == 2
+            assert "2026-01-03" in dialog.table.item(0, 5).text()
+            assert "2026-01-04" in dialog.table.item(0, 5).text()
+            assert dialog.table.rowHeight(0) > dialog.table.verticalHeader().defaultSectionSize()
+            assert _drop_sale(dialog, 0, 0)
+            dialog.sale_table.setCurrentCell(1, 0)
+            QApplication.instance().processEvents()
+            assert dialog.manual_matches == [(buy, first, 30)]
+            assert dialog._selected_sale_id() == second
+            assert "0 chosen by you" in dialog.summary.text()
+            assert dialog.table.item(0, 2).text() == "0"
+            assert dialog.table.item(0, 3).text() == "20"
+            assert dialog.table.item(0, 4).text() == "50/70"
+            assert "30 chosen" in dialog.table.item(0, 5).text()
+            assert "20 auto" in dialog.table.item(0, 5).text()
+
+            assert _drop_sale(dialog, 1, 0)
+            assert sorted(dialog.manual_matches) == [(buy, first, 30), (buy, second, 20)]
+            assert dialog.table.item(0, 4).text() == "50/70"
+            assert "30 chosen" in dialog.table.item(0, 5).text()
+            assert "20 chosen" in dialog.table.item(0, 5).text()
+            dialog.reset_button.click()
+            assert dialog.manual_matches == [(buy, first, 30)]
+            dialog.reject()
+            assert all(m["origin"] == "auto" for m in db.rows("trade_matches"))
+        finally:
+            dialog.close()
+    finally:
+        db.conn.close()
+
+
+def test_lot_match_dialog_drop_uses_capacity_and_auto_fills_remainder(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match-capacity.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "XYZ"})
+        small = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "BUY",
+                              "quantity": 20, "price": 10, "commission_usd": 0})
+        large = db.add_trade({"position_id": position, "trade_date": "2026-01-02", "side": "BUY",
+                              "quantity": 50, "price": 9, "commission_usd": 0})
+        sale = db.add_trade({"position_id": position, "trade_date": "2026-01-03", "side": "SELL",
+                             "quantity": 50, "price": 12, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+        dialog = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            dialog.show()
+            QApplication.instance().processEvents()
+            assert dialog.table.item(0, 6).text() == "+$40.00"
+            assert _drop_sale(dialog, 0, 0)
+            assert dialog.manual_matches == [(small, sale, 20)]
+            assert (large, sale, 30, "auto") in dialog.preview
+            assert dialog.sale_table.rowCount() == 1
+            purchases = dialog.sale_table.item(0, 3).text()
+            assert "2026-01-01 @ 10.00 · 20 chosen" in purchases
+            assert "2026-01-02 @ 9.00 · 30 auto" in purchases
+            assert len(purchases.splitlines()) == 2
+            assert dialog.sale_table.rowHeight(0) > dialog.sale_table.verticalHeader().defaultSectionSize()
+            assert dialog.sale_table.item(0, 4).text() == "+$130.00"
+            assert dialog.table.item(dialog.table.row_for_key((small, 0)), 2).text() == "20"
+            assert dialog.table.item(dialog.table.row_for_key((large, 0)), 3).text() == "30"
+            assert "20 chosen by you" in dialog.summary.text()
+            assert "30 automatic" in dialog.summary.text()
+            dialog.sale_table.sortItems(4, Qt.DescendingOrder)
+            assert dialog.sale_table.item(0, 0).text() == "2026-01-03 · SELL"
+            dialog.sale_table.sortItems(1, Qt.DescendingOrder)
+            assert dialog.sale_table.item(0, 0).text() == "2026-01-03 · SELL"
+        finally:
+            dialog.close()
+    finally:
+        db.conn.close()
+
+
+def test_lot_match_purchase_sort_and_pnl_colors(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
+    from app.views.ui_theme import COLORS
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match-sort.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "XYZ"})
+        winning_buy = db.add_trade({"position_id": position, "trade_date": "2026-01-01",
+                                    "side": "BUY", "quantity": 10, "price": 8, "commission_usd": 0})
+        losing_buy = db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                                   "side": "BUY", "quantity": 10, "price": 12, "commission_usd": 0})
+        sale = db.add_trade({"position_id": position, "trade_date": "2026-01-03",
+                             "side": "SELL", "quantity": 10, "price": 10, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+        dialog = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            dialog.show()
+            QApplication.instance().processEvents()
+            assert dialog.sale_table.horizontalHeaderItem(0).text() == "Sale"
+            assert dialog.sale_table.horizontalHeaderItem(1).text() == "Sale price"
+            assert dialog.sale_table.horizontalHeaderItem(2).text() == "Quantity"
+            assert dialog.sale_table.horizontalHeaderItem(3).text() == "Matched purchases"
+            assert dialog.sale_table.isSortingEnabled()
+            assert dialog.table.isSortingEnabled()
+            assert dialog.table.horizontalHeader().sectionsMovable()
+            assert dialog.table.horizontalHeaderItem(0).text() == "Purchase"
+            assert dialog.table.horizontalHeaderItem(1).text() == "Purchase price"
+            assert dialog.table.horizontalHeaderItem(2).text() == "This sale chosen"
+            assert dialog.table.horizontalHeaderItem(3).text() == "This sale auto"
+            assert dialog.table.horizontalHeaderItem(4).text() == "All matched / can reserve"
+            assert dialog.table.horizontalHeaderItem(5).text() == "Matched sales"
+            assert dialog.table.item(dialog.table.row_for_key((winning_buy, 0)), 1).text() == "8.00"
+            assert dialog.table.item(dialog.table.row_for_key((winning_buy, 0)), 0).text() == "2026-01-01 · BUY"
+            dialog.table.sortItems(1, Qt.AscendingOrder)
+            assert dialog.table.item(0, 0).data(Qt.UserRole)[0] == winning_buy
+            assert sum(dialog.table.item(row, 3).raw_value for row in range(2)) == 10
+            dialog.table.sortItems(3, Qt.DescendingOrder)
+            assert dialog.table.item(0, 3).raw_value == 10
+            assert dialog.table.item(0, 3).foreground().color().name() == COLORS["light"]["accent"]
+
+            dialog.table.sortItems(6, Qt.AscendingOrder)
+            assert [dialog.table.item(row, 0).data(Qt.UserRole)[0] for row in range(2)] == [
+                losing_buy, winning_buy]
+            assert dialog.table.item(0, 6).foreground().color().name() == COLORS["light"]["negative"]
+            assert dialog.table.item(1, 6).foreground().color().name() == COLORS["light"]["positive"]
+            assert dialog.table.item(0, 7).foreground().color().name() == COLORS["light"]["negative"]
+            dialog._render_sale()
+            assert dialog.table.item(0, 0).data(Qt.UserRole)[0] == losing_buy
+            dialog.set_theme("dark")
+            assert dialog.table.item(0, 6).foreground().color().name() == COLORS["dark"]["negative"]
+            assert dialog.table.item(1, 6).foreground().color().name() == COLORS["dark"]["positive"]
+            assert _drop_sale(dialog, 0, 0)
+            assert dialog.manual_matches == [(losing_buy, sale, 10)]
+            assert dialog.pnl_summary.property("pnlTrend") == "negative"
+            assert _drop_sale(dialog, 0, 1)
+            assert dialog.manual_matches == [(winning_buy, sale, 10)]
+            assert dialog.pnl_summary.property("pnlTrend") == "positive"
+            sale_header = dialog.sale_table.horizontalHeader()
+            purchase_header = dialog.table.horizontalHeader()
+            assert all(sale_header.sectionResizeMode(column) == QHeaderView.Interactive
+                       for column in range(dialog.sale_table.columnCount()))
+            assert all(purchase_header.sectionResizeMode(column) == QHeaderView.Interactive
+                       for column in range(dialog.table.columnCount()))
+            sale_header.resizeSection(0, 180)
+            purchase_header.resizeSection(1, 135)
+            dialog.reject()
+        finally:
+            dialog.close()
+        reopened = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            assert reopened.sale_table.columnWidth(0) == 180
+            assert reopened.table.columnWidth(1) == 135
+        finally:
+            reopened.close()
+    finally:
+        db.conn.close()
+
+
+def test_lot_match_dialog_split_lines_persist_and_limit_drops(tmp_path, monkeypatch):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match-split.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "XYZ"})
+        buy = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "BUY",
+                            "quantity": 100, "price": 10, "commission_usd": 0})
+        sale = db.add_trade({"position_id": position, "trade_date": "2026-01-03", "side": "SELL",
+                             "quantity": 50, "price": 12, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+        dialog = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            dialog.show()
+            QApplication.instance().processEvents()
+            dialog.table.selectRow(0)
+
+            def configure_split(split_dialog):
+                count = split_dialog.findChild(QComboBox)
+                assert count.objectName() == "toolbarDropdown"
+                count.setCurrentText("3")
+                fields = split_dialog.findChildren(QDoubleSpinBox)
+                assert len(fields) == 3
+                assert all(field.buttonSymbols() == QAbstractSpinBox.NoButtons for field in fields)
+                for field, quantity in zip(fields, (20, 30, 40)):
+                    field.setValue(quantity)
+                confirm = split_dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
+                assert not confirm.isEnabled()
+                assert "10 remaining" in split_dialog.findChildren(QLabel)[-1].text()
+                fields[2].setValue(50)
+                assert confirm.isEnabled()
+                return QDialog.Accepted
+
+            monkeypatch.setattr(QDialog, "exec", configure_split)
+            dialog.split_button.click()
+            assert dialog.buy_splits[buy] == (20, 30, 50)
+            assert dialog.table.rowCount() == 3
+            assert dialog.table.item(0, 0).text().endswith("1/3 · 20")
+            assert not db.setting(dialog._split_key)
+
+            assert _drop_sale(dialog, 0, 0)
+            assert _drop_sale(dialog, 0, 1)
+            assert dialog.line_pins == {(buy, sale, 0): 20, (buy, sale, 1): 30}
+            assert dialog.manual_matches == [(buy, sale, 50)]
+            assert "0 automatic" in dialog.summary.text()
+            assert dialog.apply()
+        finally:
+            dialog.close()
+
+        reopened = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            assert reopened.table.rowCount() == 3
+            assert reopened.line_pins == {(buy, sale, 0): 20, (buy, sale, 1): 30}
+            assert [reopened.table.item(row, 2).text() for row in range(3)] == ["20", "30", "0"]
+            assert [reopened.table.item(row, 3).text() for row in range(3)] == ["0", "0", "0"]
+            assert _drop_sale(reopened, 0, 2)
+            assert reopened.line_pins == {(buy, sale, 2): 50}
+            assert reopened.manual_matches == [(buy, sale, 50)]
+            reopened.table.selectRow(1)
+            reopened.unsplit_button.click()
+            assert reopened.table.rowCount() == 1
+            assert reopened.manual_matches == [(buy, sale, 50)]
+            assert reopened.apply()
+        finally:
+            reopened.close()
+
+        assert LotMatchDialog(service, position, "XYZ", sale_id=sale).table.rowCount() == 1
+    finally:
+        db.conn.close()
+
+
+def test_lot_match_dialog_shows_short_cover_read_only(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+    from app.views.lot_matching_ui import LotMatchDialog
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "lot-match-short.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "XYZ"})
+        sale = db.add_trade({"position_id": position, "trade_date": "2026-01-01", "side": "SELL",
+                             "quantity": 10, "price": 12, "commission_usd": 0})
+        db.add_trade({"position_id": position, "trade_date": "2026-01-03", "side": "BUY",
+                      "quantity": 10, "price": 10, "commission_usd": 0})
+        service = PortfolioService(db, MockMarketDataProvider())
+        service.matching.rebuild_auto([position])
+        dialog = LotMatchDialog(service, position, "XYZ", sale_id=sale)
+        try:
+            dialog.show()
+            QApplication.instance().processEvents()
+            assert "10 short cover" in dialog.summary.text()
+            assert dialog.table.item(0, 2).text() == "0"
+            assert dialog.table.item(0, 3).text() == "10"
+            assert dialog.table.item(0, 6).text() == "+$20.00"
+            assert dialog.table.item(0, 7).text() == "+20.00%"
+            assert not dialog._can_match(sale, dialog.table.item(0, 0).data(Qt.UserRole))
+            assert not _drop_sale(dialog, 0, 0)
+            assert not dialog.reset_button.isEnabled()
+        finally:
+            dialog.close()
     finally:
         db.conn.close()
 

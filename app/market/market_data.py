@@ -10,6 +10,15 @@ import pandas as pd
 from app.finance.calculations import choose_price, looks_like_option_ticker, valid_price
 from app.broker.broker_sync import record_from_tws
 
+
+def five_year_start(today=None):
+    """Earliest chart date, using calendar years (including leap days)."""
+    today = today or date.today()
+    try:
+        return today.replace(year=today.year - 5)
+    except ValueError:  # February 29
+        return today.replace(year=today.year - 5, day=28)
+
 try:
     from ibapi.client import EClient
     from ibapi.contract import Contract
@@ -130,6 +139,8 @@ if EWrapper is not None:
             self.found_details = {}
             self.ticker_ids = {}
             self.history_ids = {}
+            self.chart_history_ids = {}
+            self.chart_history_jobs = {}
             self.bars = {}
             self.contracts = {}
             self.mode_by_request = {}
@@ -499,7 +510,29 @@ if EWrapper is not None:
                 return
             if reqId in self.history_ids:
                 con_id = self.history_ids.pop(reqId)
-                self.owner.events.put(("history", con_id, self.bars.pop(reqId, [])))
+                bars = self.bars.pop(reqId, [])
+                if self.chart_history_ids.pop(reqId, None) is not None:
+                    job = self.chart_history_jobs.get(con_id)
+                    if job is None:
+                        return
+                    job["bars"].extend(bar for bar in bars if bar["day"] >= job["target"])
+                    oldest = min((bar["day"] for bar in bars), default=None)
+                    reached = bool(oldest and oldest <= (
+                        date.fromisoformat(job["target"]) + timedelta(days=7)).isoformat())
+                    if oldest and not reached and oldest < job["end"]:
+                        job["end"] = oldest
+                        try:
+                            self.owner._request_chart_history_page(con_id)
+                        except Exception as exc:
+                            self.chart_history_jobs.pop(con_id, None)
+                            self.owner.events.put(("history", con_id, job["bars"]))
+                            self.owner.events.put(("history_error", con_id, str(exc)))
+                        return
+                    self.chart_history_jobs.pop(con_id, None)
+                    self.owner.events.put(("history", con_id, job["bars"]))
+                    self.owner.events.put(("chart_history_complete", con_id, reached))
+                else:
+                    self.owner.events.put(("history", con_id, bars))
 
         def error(self, reqId, *parts):
             # ibapi releases differ on whether an error timestamp precedes the code.
@@ -539,6 +572,16 @@ if EWrapper is not None:
                 self.benchmark_history_id = None
                 self.bars.pop(reqId, None)
                 self.owner.events.put(("benchmark_error", f"IBKR ERROR {errorCode}: {errorString}"))
+                return
+            if reqId in self.history_ids:
+                con_id = self.history_ids.pop(reqId)
+                if self.chart_history_ids.pop(reqId, None) is not None:
+                    job = self.chart_history_jobs.pop(con_id, None)
+                    if job and job["bars"]:
+                        self.owner.events.put(("history", con_id, job["bars"]))
+                self.bars.pop(reqId, None)
+                self.owner.events.put(("history_error", con_id,
+                                       f"IBKR ERROR {errorCode}: {errorString}"))
                 return
             if errorCode in (354, 10167) and self.owner.allow_delayed and not self.owner.delayed_requested:
                 self.owner.delayed_requested = True
@@ -656,6 +699,56 @@ class IBKRMarketDataProvider(MarketDataProvider):
         self.client.contract_searches.add(request_id)
         self.client.reqContractDetails(request_id, contract)
         return request_id
+
+    def request_price_history(self, position, first_saved_day=None):
+        """Fill the chart back to five years in one asynchronous paged request."""
+        if not self.connected or not self.client.isConnected():
+            raise RuntimeError("Connect to TWS or IB Gateway before loading older prices.")
+        if position.get("security_type") != "STK" or not position.get("con_id"):
+            raise RuntimeError("This stock needs an IBKR contract ID before prices can be requested.")
+        con_id = int(position["con_id"])
+        if con_id in self.client.chart_history_jobs:
+            return False
+        try:
+            saved = date.fromisoformat(first_saved_day)
+        except (TypeError, ValueError):
+            saved = None
+        target = five_year_start()
+        if saved and saved <= target:
+            return False
+        end = saved or date.today() + timedelta(days=1)
+        contract = Contract()
+        contract.conId = con_id
+        contract.symbol = position["ib_symbol"]
+        contract.secType = "STK"
+        contract.exchange = position.get("exchange") or "SMART"
+        contract.currency = position.get("currency") or "USD"
+        if position.get("primary_exchange"):
+            contract.primaryExchange = position["primary_exchange"]
+        self.client.chart_history_jobs[con_id] = {
+            "contract": contract, "target": target.isoformat(), "end": end.isoformat(),
+            "bars": []}
+        try:
+            self._request_chart_history_page(con_id)
+        except Exception:
+            self.client.chart_history_jobs.pop(con_id, None)
+            raise
+        return True
+
+    def _request_chart_history_page(self, con_id):
+        job = self.client.chart_history_jobs[con_id]
+        end = date.fromisoformat(job["end"]) - timedelta(days=1)
+        request_id = self._new_id()
+        self.client.history_ids[request_id] = con_id
+        self.client.chart_history_ids[request_id] = con_id
+        try:
+            self.client.reqHistoricalData(
+                request_id, job["contract"], f"{end:%Y%m%d} 23:59:59", "1 Y",
+                "1 day", "TRADES", 1, 1, False, [])
+        except Exception:
+            self.client.history_ids.pop(request_id, None)
+            self.client.chart_history_ids.pop(request_id, None)
+            raise
 
     def _request_all(self, position_ids=None):
         pending_by_key = {}

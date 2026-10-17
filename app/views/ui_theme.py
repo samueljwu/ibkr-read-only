@@ -19,6 +19,8 @@ COLORS = {
         "bar_positive": "#137333", "bar_negative": "#b3261e",
         "grid_neutral_text": "#30343b", "grid_default_text": "#1d2b3a",
         "grid_warning_text": "#9b4917",
+        "disabled_surface": "#e8ecef", "disabled_text": "#87939d",
+        "disabled_border": "#cfd7dd",
     },
     "dark": {
         "canvas": "#0b0b0d", "surface": "#171719", "surface_alt": "#222225",
@@ -34,6 +36,8 @@ COLORS = {
         "bar_positive": "#52c7a6", "bar_negative": "#ff8b91",
         "grid_neutral_text": "#f0f0f2", "grid_default_text": "#f0f0f2",
         "grid_warning_text": "#ffb871",
+        "disabled_surface": "#303034", "disabled_text": "#85858d",
+        "disabled_border": "#4a4a50",
     },
 }
 
@@ -71,6 +75,8 @@ QLabel#settingsInfo { color: ${muted}; font-size: 12px; }
 QLabel#helpHeading { color: ${text}; font-size: 18px; font-weight: 600; }
 QLabel#helpSection { color: ${text}; font-size: 14px; font-weight: 600; }
 QLabel#helpKey { color: ${accent}; font-weight: 600; }
+QLabel#helpShortcutKey { color: ${text}; background: ${surface_alt}; border: 1px solid ${line};
+    border-radius: 4px; padding: 3px 6px; font-weight: 600; }
 QFrame#helpMockup { background: ${surface}; border: 1px solid ${line}; border-radius: 5px; }
 QLabel#helpMockTitle { color: ${text}; font-size: 12px; font-weight: 600; }
 QLabel#helpMockButton, QLabel#helpMockControl {
@@ -84,6 +90,8 @@ QLabel#helpMockTabSelected { color: ${text}; border-bottom: 2px solid ${accent};
 QLabel#helpMockStatus, QLabel#helpMockCell { color: ${text}; font-size: 11px; }
 QLabel#helpMockHeader { color: ${muted}; font-size: 11px; font-weight: 600; }
 QLabel#helpMockCaption { color: ${muted}; font-size: 11px; }
+QLabel#helpMockStep, QLabel#helpMockArrow { color: ${accent}; font-weight: 700; }
+QLabel#helpMockStep { background: ${accent_soft}; border-radius: 8px; padding: 1px 5px; }
 QListWidget#helpNavigation {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 6px; outline: 0;
@@ -129,6 +137,8 @@ QLabel#metricLabel[analyticsSelected="true"] { color: ${accent}; }
 QLabel#metricValue[analyticsSelected="true"] { color: ${accent}; font-size: 21px; }
 QLabel#metricValue[pnlTrend="positive"] { color: ${positive}; }
 QLabel#metricValue[pnlTrend="negative"] { color: ${negative}; }
+QLabel#lotMatchPnl[pnlTrend="positive"] { color: ${positive}; }
+QLabel#lotMatchPnl[pnlTrend="negative"] { color: ${negative}; }
 QLabel#notice { color: ${warning}; font-size: 12px; }
 QLabel#syncProgressLabel, QLabel#tradeSyncStatus { color: ${text}; }
 QProgressBar#syncProgressBar {
@@ -169,6 +179,17 @@ QComboBox#toolbarDropdown:hover, QPushButton#toolbarDropdown:hover {
 }
 QComboBox#toolbarDropdown:focus, QPushButton#toolbarDropdown:focus {
     border-color: ${accent};
+}
+QPushButton:disabled, QPushButton#secondary:disabled, QPushButton#themeToggle:disabled,
+QPushButton#danger:disabled, QPushButton#toolbarDropdown:disabled,
+QToolButton:disabled, QToolButton#historyCalendarButton:disabled {
+    background: ${disabled_surface}; color: ${disabled_text};
+    border: 1px solid ${disabled_border};
+}
+QPushButton#link:disabled, QToolButton#link:disabled,
+QToolButton#historyHelpButton:disabled, QToolButton#historyTextAction:disabled,
+QToolButton#returnNotesButton:disabled {
+    background: transparent; color: ${disabled_text}; border: 0;
 }
 QWidget#cashSummaryPanel { background: ${canvas}; }
 QScrollArea#cashBreakdownScroll {

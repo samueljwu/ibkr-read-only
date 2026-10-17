@@ -4,19 +4,20 @@ import math
 from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal
 
 from PySide6.QtCharts import QChart, QChartView, QDateTimeAxis, QLineSeries, QValueAxis
 from PySide6.QtCore import QByteArray, QDate, QDateTime, QLocale, QMargins, QPointF, QRect, QRectF, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLayout,
                                QHeaderView, QLabel, QPushButton, QRubberBand, QScrollArea, QSizePolicy,
-                               QSplitter, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
+                               QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
-                                   performance_window_rows)
+                                   flex_monthly_history, performance_window_rows)
 from app.views import widgets
+from app.views.buy_sell_levels_ui import BuySellLevelsPanel
+from app.views.chart_ui import nice_scale as _nice_scale
 from app.views.exposure_ui import ExposurePanel
 from app.views.returns_ui import ReturnPanel
 from app.views.table_ui import ReportTable, SortItem
@@ -27,27 +28,6 @@ from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPAC
 
 def _timestamp(day):
     return QDateTime(QDate.fromString(day, "yyyy-MM-dd"), QTime(0, 0)).toMSecsSinceEpoch()
-
-
-def _nice_scale(values, *, zero_based=True):
-    """Round a value scale to readable 1/2/2.5/5 intervals."""
-    low, high = min(values), max(values)
-    if zero_based:
-        low, high = min(0, low), max(0, high)
-    elif low == high:
-        padding = max(1.0, abs(low) * .01)
-        low, high = low - padding, high + padding
-    if low == high:
-        return -1.0, 1.0, 3, 0
-    target = (high - low) / 5
-    magnitude = 10 ** math.floor(math.log10(target))
-    step = next(part * magnitude for part in (1, 2, 2.5, 5, 10)
-                if part * magnitude >= target)
-    bottom = math.floor(low / step) * step
-    top = math.ceil(high / step) * step
-    count = round((top - bottom) / step) + 1
-    decimals = min(8, max(0, -Decimal(str(step)).normalize().as_tuple().exponent))
-    return bottom, top, count, decimals
 
 
 def _capital_activity_buckets(rows, first, last):
@@ -416,7 +396,7 @@ class TimeRangeNavigator(QWidget):
 
 
 class AnalyticsTab(QWidget):
-    SECTION_IDS = ("pnl", "return", "capital", "exposure", "monthly")
+    SECTION_IDS = ("pnl", "return", "capital", "exposure", "monthly", "levels")
     METRICS = (
         ("NAV", "nav", "USD"),
         ("NAV change", "nav_change", "USD"),
@@ -428,7 +408,7 @@ class AnalyticsTab(QWidget):
                       ("Max % gain", "max_pct_gain"),
                       ("Max % loss", "max_pct_loss"))
 
-    def __init__(self, db, service, portfolio_id, parent=None):
+    def __init__(self, db, service, portfolio_id, parent=None, request_price_history=None):
         super().__init__(parent)
         self.setObjectName("analyticsPage")
         self.db, self.service, self.portfolio_id = db, service, portfolio_id
@@ -468,7 +448,8 @@ class AnalyticsTab(QWidget):
         self.capital_combo.setFixedWidth(280)
         self.capital_combo.currentIndexChanged.connect(self._capital_chart_changed)
         main_controls.addWidget(self.capital_combo)
-        self.benchmark_toggle = ThemedCheckBox("S&P 500")
+        self.benchmark_toggle = ThemedCheckBox("S&&P 500")
+        self.benchmark_toggle.setAccessibleName("S&P 500")
         self.benchmark_toggle.setChecked(True)
         self.benchmark_toggle.setToolTip("Show S&P 500 price change on the right percent axis")
         self.benchmark_toggle.toggled.connect(self._benchmark_toggled)
@@ -523,18 +504,23 @@ class AnalyticsTab(QWidget):
         self.pnl_page = QWidget()
         self.return_page = ReturnPanel(db, service, portfolio_id)
         self.capital_page = QWidget()
+        self.levels_page = BuySellLevelsPanel(
+            db, portfolio_id, request_price_history=request_price_history,
+            portfolio_rows_provider=service.portfolio_rows,
+            trade_rows_provider=getattr(service, "trade_rows", None))
         self.exposure_page = ExposurePanel(db, service, portfolio_id)
         self.monthly_page = QWidget()
-        for page in (self.pnl_page, self.return_page, self.capital_page,
+        for page in (self.pnl_page, self.return_page, self.capital_page, self.levels_page,
                      self.exposure_page, self.monthly_page):
             page.setObjectName("analyticsSection")
             page.setMinimumWidth(0)
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        self.sections.addTab(self.pnl_page, "P&L")
+        self.sections.addTab(self.pnl_page, "P&&L")
         self.sections.addTab(self.return_page, "Returns")
         self.sections.addTab(self.capital_page, "Capital deployment")
         self.sections.addTab(self.exposure_page, "Exposure")
-        self.sections.addTab(self.monthly_page, "Monthly history")
+        self.sections.addTab(self.monthly_page, "Monthly P&&L")
+        self.sections.addTab(self.levels_page, "Buy / sell levels")
         widgets.persist_tab_order(self.sections, db, f"analytics_section_layout_{portfolio_id}",
                                   ids=list(self.SECTION_IDS))
         scroller = QScrollArea()
@@ -553,6 +539,7 @@ class AnalyticsTab(QWidget):
         self._update_section_controls()
         self.range_combo.currentTextChanged.connect(self._preset_changed)
         self._preset_changed("3 months")
+        self._initialized = True
 
     def _metric_summary(self, layout, labels, *, show_close=False):
         summary = QWidget()
@@ -638,15 +625,12 @@ class AnalyticsTab(QWidget):
         self.range_combo.setVisible(dated)
         if dated:
             self._update_range_controls()
-            self._benchmark_for_range(rebased=pnl_visible)
         else:
             for widget in (self.start_label, self.start_date, self.end_label, self.end_date,
                            self.reset_button, self.date_summary):
                 widget.hide()
-            if self.sections.currentWidget() is self.exposure_page:
-                self.refresh_exposure()
-            elif self.sections.currentWidget() is self.return_page:
-                self.return_page.refresh()
+        if getattr(self, "_initialized", False):
+            self.refresh()
 
     def _update_range_controls(self):
         if self.sections.currentWidget() in (self.exposure_page, self.return_page):
@@ -673,71 +657,13 @@ class AnalyticsTab(QWidget):
         return table
 
     def _split_view(self, layout, chart, table, navigator, setting_key, info_label):
-        orientation_key = f"{setting_key}_orientation"
-        horizontal = self.db.setting(orientation_key) == "horizontal"
-        controls = QHBoxLayout()
-        controls.setSpacing(8)
-        controls.addWidget(info_label, 1)
-        controls.addStretch()
-        controls.addWidget(QLabel("Chart and table"))
-        layout_combo = QComboBox()
-        style_toolbar_dropdown(layout_combo)
-        layout_combo.addItems(("Top and bottom", "Side by side"))
-        layout_combo.setCurrentIndex(1 if horizontal else 0)
-        controls.addWidget(layout_combo)
-        layout.addLayout(controls)
-
-        splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(11)
-        splitter.setMinimumWidth(0)
-        splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        chart_panel = QWidget()
-        chart_panel.setMinimumWidth(0)
-        chart_layout = QVBoxLayout(chart_panel)
-        chart_layout.setContentsMargins(0, 0, 0, 0)
-        chart_layout.setSpacing(2)
-        chart_layout.addWidget(chart, 1)
-        chart_layout.addWidget(navigator)
-        splitter.addWidget(chart_panel)
-        splitter.addWidget(table)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        saved = self.db.setting(self._split_state_key(setting_key, horizontal))
-        if saved:
-            splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii")))
-        splitter.splitterMoved.connect(
-            lambda *_: self._save_split_state(splitter, setting_key))
-        layout_combo.currentIndexChanged.connect(
-            lambda index: self._set_split_layout(splitter, setting_key, index == 1))
-        layout.addWidget(splitter, 1)
+        splitter, layout_combo = widgets.chart_table_layout(
+            layout, self.db, setting_key, chart, table,
+            info_label=info_label, navigator=navigator)
         chart.selectionRequested.connect(self._select_chart_range)
         chart.panRequested.connect(self._pan_chart_range)
         navigator.selectionRequested.connect(self._select_chart_range)
         return splitter, layout_combo
-
-    @staticmethod
-    def _split_state_key(setting_key, horizontal):
-        return f"{setting_key}_horizontal" if horizontal else setting_key
-
-    def _save_split_state(self, splitter, setting_key):
-        key = self._split_state_key(setting_key, splitter.orientation() == Qt.Horizontal)
-        self.db.set_setting(key, splitter.saveState().toBase64().data().decode("ascii"))
-
-    def _set_split_layout(self, splitter, setting_key, horizontal):
-        if (splitter.orientation() == Qt.Horizontal) == horizontal:
-            return
-        self._save_split_state(splitter, setting_key)
-        splitter.blockSignals(True)
-        try:
-            splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
-            saved = self.db.setting(self._split_state_key(setting_key, horizontal))
-            if not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
-                splitter.setSizes((3, 2))
-        finally:
-            splitter.blockSignals(False)
-        self.db.set_setting(f"{setting_key}_orientation",
-                            "horizontal" if horizontal else "vertical")
 
     @staticmethod
     def _table_view_state(table):
@@ -793,6 +719,7 @@ class AnalyticsTab(QWidget):
                         "cash_table": self._table_view_state(self.cash_share_table)},
             "exposure": self.exposure_page.view_state(),
             "return": self.return_page.view_state(),
+            "levels": self.levels_page.view_state(),
         }
 
     def apply_view_state(self, state):
@@ -827,12 +754,13 @@ class AnalyticsTab(QWidget):
             saved = pane.get("splitter")
             if isinstance(saved, str) and splitter.restoreState(
                     QByteArray.fromBase64(saved.encode("ascii", "ignore"))):
-                self._save_split_state(splitter, setting_key)
+                widgets.save_chart_table_split_state(self.db, splitter, setting_key)
             self._apply_table_view_state(table, pane.get("table"))
             if name == "capital":
                 self._apply_table_view_state(self.cash_share_table, pane.get("cash_table"))
         self.exposure_page.apply_view_state(state.get("exposure"))
         self.return_page.apply_view_state(state.get("return"))
+        self.levels_page.apply_view_state(state.get("levels"))
         section = state.get("section")
         if isinstance(section, int) and not isinstance(section, bool) and 0 <= section < self.sections.count():
             if state["version"] == 1 and section >= 1:
@@ -876,7 +804,6 @@ class AnalyticsTab(QWidget):
         self.pnl_splitter, self.pnl_layout_combo = self._split_view(
             layout, self.pnl_chart, self.pnl_table, self.pnl_navigator,
             "analytics_pnl_splitter", self.pnl_hint)
-        self.pnl_splitter.handle(1).setToolTip("Drag to resize chart and table")
         for column in (2, 5, 6):
             self.pnl_table.hideColumn(column)
         self.pnl_table.horizontalHeader().setToolTip(
@@ -919,7 +846,6 @@ class AnalyticsTab(QWidget):
         self.capital_splitter, self.capital_layout_combo = self._split_view(
             layout, self.capital_chart, self.capital_tables, self.capital_navigator,
             "analytics_capital_splitter", self.capital_caption)
-        self.capital_splitter.handle(1).setToolTip("Drag to resize chart and table")
         self._capital_rows = []
         self._cash_share_rows = []
         self._capital_valid = True
@@ -929,8 +855,10 @@ class AnalyticsTab(QWidget):
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
         self.monthly_note = QLabel(
-            "Older PortfolioAnalyst reports provide monthly NAV and reported returns. "
-            "Daily analysis is unavailable for 2021. April 2021 starts at account inception.")
+            "Older PortfolioAnalyst rows show reported returns. Flex rows use completed "
+            "daily NAV and flows from the prior close through the date shown; a month "
+            "may be partial. "
+            "A missing baseline or gap leaves the calculated return blank.")
         self.monthly_note.setObjectName("hint")
         self.monthly_note.setWordWrap(True)
         layout.addWidget(self.monthly_note)
@@ -939,7 +867,7 @@ class AnalyticsTab(QWidget):
         self.reported_performance_monthly.setWordWrap(True)
         layout.addWidget(self.reported_performance_monthly)
         self.monthly_table = self._table(
-            ("Month", "Period", "NAV USD", "Reported monthly return"),
+            ("Month", "Period", "NAV USD", "Monthly return", "Source"),
             "analytics_monthly_decimals", {2: (2, "usd"), 3: (2, "percent")})
         layout.addWidget(self.monthly_table, 1)
 
@@ -995,8 +923,10 @@ class AnalyticsTab(QWidget):
         if first > last:
             return
         self._set_dates(first, last)
-        self.range_combo.setCurrentText("Custom")
-        self.refresh()
+        if self.range_combo.currentText() == "Custom":
+            self.refresh()
+        else:
+            self.range_combo.setCurrentText("Custom")
 
     def _pan_chart_range(self, days):
         first = self.start_date.date().toPython() + timedelta(days=days)
@@ -1067,10 +997,17 @@ class AnalyticsTab(QWidget):
                 table.setSortingEnabled(True)
                 table.sortItems(sort_column, sort_order)
 
-    def refresh(self, *_, portfolio_rows=None, lots=None):
-        self.refresh_exposure()
+    def refresh(self, *_, portfolio_rows=None, lots=None, trade_rows=None):
+        selected = self.sections.currentWidget()
+        if selected is self.exposure_page:
+            self.refresh_exposure(portfolio_rows)
+            return
+        if self.sections.currentWidget() is self.levels_page:
+            self.levels_page.refresh(portfolio_rows=portfolio_rows, trade_rows=trade_rows)
+            return
         if self.sections.currentWidget() is self.return_page:
             self.return_page.refresh(portfolio_rows, lots)
+            return
         query = self.db.setting("analytics_flex_query_id")
         status = self.db.metadata("ibkr_analytics_sync_status") or "not synced"
         completed = self.db.metadata("ibkr_analytics_sync_completed")
@@ -1083,6 +1020,10 @@ class AnalyticsTab(QWidget):
                                     "Completed NAV and capital flows come from IBKR Flex.")
         snapshots, flows = self.db.analytics_history(self.portfolio_id)
         monthly = self.db.monthly_history(self.portfolio_id)
+        saved_months = {row["month"] for row in monthly}
+        flex_monthly = ([row for row in flex_monthly_history(snapshots, flows)
+                         if row["month"] not in saved_months]
+                        if selected is self.monthly_page else [])
         reported = self.db.reported_account_performance(self.portfolio_id)
         reported_text = (
             f"PortfolioAnalyst reported since-inception {reported['measure']} return: "
@@ -1093,10 +1034,16 @@ class AnalyticsTab(QWidget):
         self.reported_performance_pnl.setText(reported_text)
         self.reported_performance_pnl.setVisible(bool(reported) and
                                                  self.range_combo.currentText() == "All")
-        self._fill_table(self.monthly_table, [
-            (row["month"], f'{row["period_from"]} to {row["period_to"]}',
-             row["nav_usd"], row["return_pct"]) for row in monthly])
-        trades = self.service.matching.trade_rows()
+        if selected is self.monthly_page:
+            self._fill_table(self.monthly_table, [
+                (row["month"], f'{row["period_from"]} to {row["period_to"]}',
+                 row["nav_usd"], row["return_pct"], source)
+                for row, source in sorted(
+                    [(row, "PortfolioAnalyst") for row in monthly] +
+                    [(row, "Flex") for row in flex_monthly],
+                    key=lambda item: item[0]["month"])])
+            return
+        trades = trade_rows if trade_rows is not None else self.service.matching.trade_rows()
         available = [date.fromisoformat(row["day"]) for row in snapshots]
         available += [date.fromisoformat(row["trade_date"]) for row in trades if row.get("trade_date")]
         available += [date.fromisoformat(row["period_from"]) for row in monthly]
@@ -1104,27 +1051,51 @@ class AnalyticsTab(QWidget):
         if self.range_combo.currentText() == "All":
             self._set_dates(*self._preset_bounds("All"))
         first, last = self.start_date.date().toPython(), self.end_date.date().toPython()
-        self._cash_share_rows = cash_share_rows(snapshots, first, last)
         self.date_summary.setText(f"{first:%d %b %Y} – {last:%d %b %Y}")
         self._update_range_controls()
         for navigator in (self.pnl_navigator, self.capital_navigator):
             navigator.set_range(self._earliest_day, max(date.today(), self._earliest_day),
                                 first, last, self.palette_name)
+        monthly_overlap = (first <= last and any(
+            row["period_from"] <= last.isoformat() and row["period_to"] >= first.isoformat()
+            for row in monthly))
+        if selected is self.capital_page:
+            self._cash_share_rows = cash_share_rows(snapshots, first, last)
+            capital_rows, capital_totals = (capital_flow_rows(trades, first, last)
+                                           if first <= last else ([], None))
+            if monthly_overlap:
+                capital_totals = None
+            for label, key in (("Bought", "bought"), ("Sold", "sold"), ("Net deployed", "net")):
+                self.capital_stats[label].setText(
+                    self._money(capital_totals[key] if capital_totals else None))
+            self.capital_note.setText(
+                "Choose a start date on or before the end date." if first > last else
+                "2021 statement activity is retained as evidence; daily trade and capital "
+                "analysis is unavailable for this range." if monthly_overlap else
+                "Some trades have no USD value; totals are unavailable." if capital_totals is None else "")
+            self.capital_note.setVisible(capital_totals is None)
+            self._capital_rows = capital_rows if capital_totals is not None else []
+            self._capital_valid = capital_totals is not None
+            self._render_capital_chart()
+            self._fill_table(self.capital_table, [
+                (row["day"], row["bought"], row["sold"],
+                 row["net"], row["cumulative_net"] if capital_totals else None)
+                for row in capital_rows])
+            self._fill_table(self.cash_share_table, [
+                (row["day"] + (" · provisional" if row["source"] == "live" else ""),
+                 row["cash"], row["nav"], row["percent"])
+                for row in self._cash_share_rows])
+            return
         if first > last:
             self.pnl_hint.setText("Choose a start date on or before the end date.")
             self.pnl_hint.show()
             self._pnl_rows = []
             self._flow_events = []
             pnl_rows, complete = [], False
-            capital_rows, capital_totals = [], None
         else:
             pnl_rows, complete = performance_window_rows(snapshots, flows, first, last)
-            capital_rows, capital_totals = capital_flow_rows(trades, first, last)
-            monthly_overlap = any(row["period_from"] <= last.isoformat() and
-                                  row["period_to"] >= first.isoformat() for row in monthly)
             if monthly_overlap:
                 complete = False
-                capital_totals = None
             self._pnl_rows = pnl_rows
             self._flow_events = [flow for flow in flows if first.isoformat() <= flow["day"] <= last.isoformat()]
             adjusted_dates = [row["day"] for row in pnl_rows if row["performance"] is not None]
@@ -1132,7 +1103,7 @@ class AnalyticsTab(QWidget):
                                 pnl_rows[-1]["day"] > adjusted_dates[-1])
             self.pnl_hint.setText(
                 "Daily analysis unavailable for 2021: these reports provide monthly NAV, "
-                "not daily NAV. See Monthly history." if monthly_overlap else
+                "not daily NAV. See Monthly P&L." if monthly_overlap else
                 "Later live NAV is provisional." if pending_live else
                 "Adjusted measures need a prior close and consecutive NAV/flow coverage."
                 if not complete else "")
@@ -1151,22 +1122,7 @@ class AnalyticsTab(QWidget):
             self.stats[label].setText(self._percent(value) if unit == "%" else self._money(value))
         self._daily_summary = daily_pnl_summary(pnl_rows, complete)
         self._update_daily_summary()
-        for label, key in (("Bought", "bought"), ("Sold", "sold"), ("Net deployed", "net")):
-            self.capital_stats[label].setText(
-                self._money(capital_totals[key] if capital_totals else None))
-        self.capital_note.setText(
-            "Choose a start date on or before the end date." if first > last else
-            "2021 statement activity is retained as evidence; daily trade and capital "
-            "analysis is unavailable for this range." if any(
-                row["period_from"] <= last.isoformat() and row["period_to"] >= first.isoformat()
-                for row in monthly) else
-            "Some trades have no USD value; totals are unavailable." if capital_totals is None else "")
-        self.capital_note.setVisible(capital_totals is None)
-        self._capital_rows = capital_rows if capital_totals is not None else []
-        self._capital_valid = capital_totals is not None
         self._render_pnl_chart()
-        self._render_capital_chart()
-        self._benchmark_for_range(rebased=self.sections.currentWidget() is self.pnl_page)
         self._fill_table(self.pnl_table, [
             (row["day"] + (" · provisional" if row["source"] == "live" else ""),
              row["nav"], row["nav_change"],
@@ -1174,17 +1130,9 @@ class AnalyticsTab(QWidget):
              row["performance"] if complete else None,
              row["external_flow"],
              row["daily_pnl"] if complete else None) for row in pnl_rows])
-        self._fill_table(self.capital_table, [
-            (row["day"], row["bought"], row["sold"],
-             row["net"], row["cumulative_net"] if capital_totals else None)
-            for row in capital_rows])
-        self._fill_table(self.cash_share_table, [
-            (row["day"] + (" · provisional" if row["source"] == "live" else ""),
-             row["cash"], row["nav"], row["percent"])
-            for row in self._cash_share_rows])
 
-    def refresh_exposure(self):
-        self.exposure_page.refresh()
+    def refresh_exposure(self, portfolio_rows=None):
+        self.exposure_page.refresh(portfolio_rows)
 
     def _base_chart(self, show_legend=False):
         chart = QChart()
@@ -1539,6 +1487,7 @@ class AnalyticsTab(QWidget):
 
     def set_theme(self, theme):
         self.palette_name = theme
+        self.levels_page.set_theme(theme)
         self.exposure_page.set_theme(theme)
         self.return_page.set_theme(theme)
         self.refresh()

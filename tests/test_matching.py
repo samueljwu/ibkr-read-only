@@ -1,5 +1,6 @@
 import pytest
 from datetime import date, datetime
+from sqlcipher3 import dbapi2 as sqlite3
 
 import app.finance.services as services_module
 from app.storage.database import Database
@@ -386,6 +387,25 @@ def test_clearing_manual_restores_auto_matching(db):
     assert len(matches) == 1
     assert matches[0]["origin"] == "auto"
     assert matches[0]["buy_trade_id"] == buy2  # Cheaper buy wins on gain once unlocked.
+
+
+def test_match_and_view_state_save_atomically(db):
+    pid = db.add_position({"display_ticker": "XYZ"})
+    buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-01", "side": "BUY",
+                        "quantity": 10, "price": 10, "commission_usd": 0})
+    sale = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "SELL",
+                         "quantity": 10, "price": 12, "commission_usd": 0})
+    matcher = MatchingService(db)
+    matcher.rebuild_auto([pid])
+    db.conn.execute("""CREATE TRIGGER reject_split_setting BEFORE INSERT ON settings
+                       WHEN NEW.key='blocked'
+                       BEGIN SELECT RAISE(FAIL, 'blocked'); END""")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        matcher.apply_position_matches(pid, [(buy, sale, 10)],
+                                       settings={"blocked": "{}"})
+    assert db.setting("blocked") == ""
+    assert [(m["origin"], m["matched_qty"]) for m in db.rows("trade_matches")] == [("auto", 10)]
 
 
 def test_validate_manual_rejects_buy_after_sell(db):

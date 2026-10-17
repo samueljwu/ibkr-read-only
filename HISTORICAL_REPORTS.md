@@ -38,8 +38,14 @@ account; it also removes estimated CSV opening lots, while leaving Flex history,
 later trades, and the original CSV files in
 place. Import the intended pair again afterward.
 
-The **Analytics → Monthly history** tab shows monthly NAV and the monthly return
-reported by PortfolioAnalyst. An inception month is a partial month. The
+The **Analytics → Monthly P&L** tab shows monthly NAV and the monthly return
+reported by PortfolioAnalyst for older CSV months, then extends through the
+latest completed Flex daily NAV close. Flex monthly returns are calculated from
+the daily NAV and external flows using the same linked return formula as the
+P&L tab. The period column shows the actual first and last close in each month;
+the latest month may be incomplete. A missing prior close, NAV gap, or uncovered
+flow leaves the calculated return blank. Live intraday NAV is excluded. An
+inception month is a partial month. The
 Activity Statement's dated trades, transfers, cash events, and closing positions
 are retained as local source evidence. The statement's reconciled closing stock
 quantities anchor the position ledger; later trades change those quantities.

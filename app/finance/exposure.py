@@ -112,7 +112,7 @@ def set_custom_label(db, portfolio_id, set_name, con_id, label):
                             (portfolio_id, set_name, con_id))
 
 
-def exposure_snapshot(db, service, portfolio_id, *, custom_set=""):
+def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_rows=None):
     facts = {row["con_id"]: dict(row) for row in db.conn.execute(
         "SELECT * FROM exposure_facts WHERE portfolio_id=?", (portfolio_id,))}
     labels = {(row["set_name"], row["con_id"]): row["label"] for row in db.conn.execute(
@@ -120,7 +120,7 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set=""):
     nav = db.effective_nav(portfolio_id)
     positions = []
     issues = []
-    source_rows = list(service.portfolio_rows())
+    source_rows = list(portfolio_rows if portfolio_rows is not None else service.portfolio_rows())
     stock_marks = {row.get("con_id"): row for row in source_rows
                    if row.get("security_type") == "STK" and row.get("con_id")}
     for row in source_rows:
