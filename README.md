@@ -10,8 +10,9 @@ cash, and performance using live IBKR data and historical Flex reports.
 
 ## Install
 
-Download an installer from a completed [Desktop bundles workflow run](https://github.com/samueljwu/ibkr-read-only/actions/workflows/bundles.yml).
-Extract the downloaded artifact, then:
+Download an installer from the [latest release](https://github.com/samueljwu/ibkr-read-only/releases/latest).
+The [Desktop bundles workflow](https://github.com/samueljwu/ibkr-read-only/actions/workflows/bundles.yml)
+also provides ZIP artifacts from individual build runs. To install:
 
 - **Windows x64:** run `IBKRDashboard-<version>-windows-x64-setup.exe`.
 - **macOS (Apple silicon):** open `IBKRDashboard-<version>-macos-arm64.dmg` and drag the app to Applications.
