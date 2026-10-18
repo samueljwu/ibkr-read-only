@@ -44,17 +44,14 @@ and Activity Statement CSVs. See the in-app guide for import limits.
 
 ## Your data
 
-- Portfolios, backups, and logs stay local. Use **Settings → Advanced settings → Move database…**
-  to choose a parent folder. The app verifies and opens a copy there, then offers a restart;
-  the original database remains in place. Change the backup folder separately in **Settings**.
+- Portfolios, backups, and logs stay local. 
 - Packaged data: `%LOCALAPPDATA%\IBKRDashboard\prod\data` on Windows;
   `~/Library/Application Support/IBKRDashboard/prod/data` on macOS.
 - Source runs use `dev/data` instead of `prod/data`.
-- The renamed app does not automatically select the previous `CustomIBMonitor` folder.
-  To continue an existing portfolio, launch with `--database PATH` pointing to its
-  `portfolio.sqlite3`, then set the new data directory in **Settings**.
+- To choose a parent folder, use **Settings → Advanced settings → Move database…**. The app verifies and opens a copy there, then offers a restart;
+  the original database remains in place. Change the backup folder separately in **Settings**.
 - Flex tokens and database keys stay in the OS credential store.
-- New databases and backups are encrypted; older copies and exports may not be.
+- New databases and backups are encrypted.
 - Save your first-launch recovery code outside the data and backup folders.
 
 ## Run from source
@@ -89,18 +86,53 @@ python main.py
 
 <table>
   <tr>
-    <td align="center" valign="top" width="50%"><strong>P&amp;L</strong><br><a href="docs/images/demo-analytics.png"><img src="docs/images/demo-analytics.png" alt="Analytics P and L section with synthetic NAV history" width="100%"></a></td>
-    <td align="center" valign="top" width="50%"><strong>Returns</strong><br><a href="docs/images/demo-analytics-returns.png"><img src="docs/images/demo-analytics-returns.png" alt="Analytics Returns section with synthetic position returns" width="100%"></a></td>
+    <td align="center" valign="top" width="50%">
+      <strong>P&amp;L</strong><br>
+      <a href="docs/images/demo-analytics.png">
+        <img src="docs/images/demo-analytics.png" width="100%">
+      </a>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <strong>P&amp;L calendar</strong><br>
+      <a href="docs/images/demo-analytics-calendar.png">
+        <img src="docs/images/demo-analytics-calendar.png" width="100%">
+      </a>
+    </td>
   </tr>
   <tr>
-    <td align="center" valign="top" colspan="2"><strong>P&amp;L calendar</strong><br><a href="docs/images/demo-analytics-calendar.png"><img src="docs/images/demo-analytics-calendar.png" alt="Analytics P and L calendar with synthetic daily gains, losses, and percentage returns" width="100%"></a></td>
+    <td align="center" valign="top" width="50%">
+      <strong>Returns</strong><br>
+      <a href="docs/images/demo-analytics-returns.png">
+        <img src="docs/images/demo-analytics-returns.png" width="100%">
+      </a>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <strong>Capital deployment</strong><br>
+      <a href="docs/images/demo-analytics-capital.png">
+        <img src="docs/images/demo-analytics-capital.png" width="100%">
+      </a>
+    </td>
   </tr>
   <tr>
-    <td align="center" valign="top" width="50%"><strong>Capital deployment</strong><br><a href="docs/images/demo-analytics-capital.png"><img src="docs/images/demo-analytics-capital.png" alt="Analytics Capital deployment section with synthetic trades" width="100%"></a></td>
-    <td align="center" valign="top" width="50%"><strong>Exposure</strong><br><a href="docs/images/demo-analytics-exposure.png"><img src="docs/images/demo-analytics-exposure.png" alt="Analytics Exposure section with synthetic sectors" width="100%"></a></td>
+    <td align="center" valign="top" width="50%">
+      <strong>Exposure</strong><br>
+      <a href="docs/images/demo-analytics-exposure.png">
+        <img src="docs/images/demo-analytics-exposure.png" width="100%">
+      </a>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <strong>Monthly P&amp;L</strong><br>
+      <a href="docs/images/demo-analytics-monthly.png">
+        <img src="docs/images/demo-analytics-monthly.png" width="100%">
+      </a>
+    </td>
   </tr>
   <tr>
-    <td align="center" valign="top" width="50%"><strong>Monthly P&amp;L</strong><br><a href="docs/images/demo-analytics-monthly.png"><img src="docs/images/demo-analytics-monthly.png" alt="Analytics Monthly P and L section with synthetic monthly returns" width="100%"></a></td>
-    <td align="center" valign="top" width="50%"><strong>Buy / sell levels</strong><br><a href="docs/images/demo-analytics-levels.png"><img src="docs/images/demo-analytics-levels.png" alt="Analytics Buy and sell levels section with synthetic prices and executions" width="100%"></a></td>
+    <td align="center" valign="top" colspan="2">
+      <strong>Buy / sell levels</strong><br>
+      <a href="docs/images/demo-analytics-levels.png">
+        <img src="docs/images/demo-analytics-levels.png" width="50%">
+      </a>
+    </td>
   </tr>
 </table>
