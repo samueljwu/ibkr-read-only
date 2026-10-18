@@ -163,7 +163,7 @@ def fetch_flex(query_id, token, timeout=20, from_day=None, to_day=None):
     if not query_id or not token:
         raise ValueError("Flex query ID and token are required")
     base = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/"
-    headers = {"User-Agent": "Python/PortfolioMonitor"}
+    headers = {"User-Agent": "Python/IBKRDashboard"}
     params = {"t": token, "q": query_id, "v": 3}
     if (from_day is None) != (to_day is None):
         raise ValueError("Both Flex date bounds are required")

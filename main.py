@@ -72,8 +72,8 @@ def main(argv=None):
         if index + 1 < len(args):
             database_path = Path(args[index + 1])
     app = QApplication(sys.argv)
-    app.setApplicationName("Portfolio Monitor")
-    app.setApplicationDisplayName("Portfolio Monitor")
+    app.setApplicationName("IBKR Dashboard")
+    app.setApplicationDisplayName("IBKR Dashboard")
     app.setApplicationVersion(VERSION)
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "app" / "assets" / "app_icon.png")))
     try:

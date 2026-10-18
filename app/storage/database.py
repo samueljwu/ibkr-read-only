@@ -10,8 +10,7 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from app.platform.paths import (default_data_dir, legacy_source_dir, local_config_path,
-                                new_portfolio_dir, user_data_dir)
+from app.platform.paths import default_data_dir, local_config_path, new_portfolio_dir
 from app.platform import secret_store
 from app.storage.encryption import encrypted_copy, is_plaintext, open_database
 from app.finance.option_labels import option_label
@@ -54,14 +53,6 @@ class Database:
             raise
 
     @staticmethod
-    def _require_plain_sqlite(path):
-        with Path(path).open("rb") as source:
-            header = source.read(16)
-        if header and header != b"SQLite format 3\x00":
-            raise ValueError(f"Portfolio database is encrypted or unsupported: {path}. "
-                             "The current app needs a readable SQLite export.")
-
-    @staticmethod
     def _configured_database(config_path):
         config = json.loads(config_path.read_text(encoding="utf-8"))
         directory = config.get("data_directory")
@@ -73,24 +64,6 @@ class Database:
         return database
 
     @classmethod
-    def _legacy_database(cls):
-        base = user_data_dir()
-        profile = default_data_dir().parent.name
-        config_paths = ([base / "stable" / "data" / "local_config.json"] if profile == "prod" else [])
-        config_paths += [base / "local_config.json", legacy_source_dir() / "local_config.json"]
-        for config in config_paths:
-            if config.is_file():
-                try:
-                    return cls._configured_database(config)
-                except FileNotFoundError:
-                    # A moved or deleted legacy selection must not block other
-                    # existing sources from being considered for migration.
-                    continue
-        candidates = ([base / "stable" / "data" / "portfolio.sqlite3"] if profile == "prod" else [])
-        candidates += [base / "portfolio.sqlite3", legacy_source_dir() / "data" / "portfolio.sqlite3"]
-        return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-    @classmethod
     def _default_path(cls):
         config_path = local_config_path()
         if config_path.is_file():
@@ -99,28 +72,8 @@ class Database:
         folder = new_portfolio_dir(root)
         target = folder / "portfolio.sqlite3"
         try:
-            source = cls._legacy_database()
-            if source is not None:
-                if is_plaintext(source):
-                    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as original:
-                        with closing(sqlite3.connect(target)) as copied:
-                            original.backup(copied)
-                            if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                                raise RuntimeError("Copied portfolio database failed integrity check")
-                            with copied:
-                                copied.execute("UPDATE settings SET value='' WHERE key='data_directory'")
-                else:
-                    key = secret_store.load_database_key(source)
-                    if key is None:
-                        cls._require_plain_sqlite(source)
-                    encrypted_copy(source, target, key)
-                    secret_store.save_database_key(target, key)
-                    with closing(open_database(target, key=key)) as copied:
-                        with copied:
-                            copied.execute("UPDATE settings SET value='' WHERE key='data_directory'")
-            else:
-                with closing(open_database(target)):
-                    pass
+            with closing(open_database(target)):
+                pass
             config_path.parent.mkdir(parents=True, exist_ok=True)
             with config_path.open("x", encoding="utf-8") as config:
                 json.dump({"data_directory": str(folder)}, config)

@@ -1,6 +1,6 @@
 # Third-party components
 
-Portfolio Monitor is distributed under GNU GPL version 3. The complete license
+IBKR Dashboard is distributed under GNU GPL version 3. The complete license
 is in `LICENSE`, alongside the application source.
 
 Each desktop bundle contains a `licenses` directory with `inventory.json`, the

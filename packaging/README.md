@@ -1,56 +1,47 @@
 # Desktop installers
 
-Use Python 3.12 on a Windows x64 machine or an Apple silicon Mac. From the
-repository root, create a build environment:
+Run the [Desktop bundles workflow](../.github/workflows/bundles.yml) to build
+both installers and a matching source archive.
 
-```text
-python -m venv .venv-release
-```
+For a local build, use Python 3.12 from the repository root.
 
-Then run these commands in PowerShell on Windows:
+**Windows x64:** Install [Inno Setup 6](https://jrsoftware.org/isinfo.php).
+Use its default location, put `ISCC.exe` on `PATH`, or set `ISCC_PATH`.
 
 ```powershell
+python -m venv .venv-release
 .\.venv-release\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv-release\Scripts\python.exe packaging/check_release.py
 .\.venv-release\Scripts\python.exe packaging/collect_licenses.py
 .\.venv-release\Scripts\python.exe -m pytest -q
-.\.venv-release\Scripts\python.exe -m PyInstaller --noconfirm packaging/portfolio_monitor.spec
+.\.venv-release\Scripts\python.exe -m PyInstaller --noconfirm packaging/ibkr_dashboard.spec
 ./packaging/windows/build_installer.ps1
 ```
 
-Or run these commands on macOS:
+**Apple silicon macOS:**
 
 ```sh
+python3 -m venv .venv-release
 .venv-release/bin/python -m pip install -r requirements-dev.txt
 .venv-release/bin/python packaging/check_release.py
 .venv-release/bin/python packaging/collect_licenses.py
 .venv-release/bin/python -m pytest -q
-.venv-release/bin/python -m PyInstaller --noconfirm packaging/portfolio_monitor.spec
+.venv-release/bin/python -m PyInstaller --noconfirm packaging/ibkr_dashboard.spec
 version=$(.venv-release/bin/python -c 'from app.version import VERSION; print(VERSION)')
-sh packaging/macos/build_dmg.sh dist/PortfolioMonitor.app "dist/installers/PortfolioMonitor-${version}-macos-arm64.dmg"
+sh packaging/macos/build_dmg.sh dist/IBKRDashboard.app "dist/installers/IBKRDashboard-${version}-macos-arm64.dmg"
 ```
 
-Windows additionally requires [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-(`ISCC.exe`) on `PATH`, at its default installation path, or specified by
-`ISCC_PATH`. The Windows output is
-`dist/installers/PortfolioMonitor-<version>-windows-x64-setup.exe`; it installs
-per user and adds a Start menu entry. The macOS output is
-`dist/installers/PortfolioMonitor-<version>-macos-arm64.dmg`; drag the app to
-Applications. Each app bundle is also available at `dist/PortfolioMonitor/`
-or `dist/PortfolioMonitor.app` before installer creation. Run its executable with
-`--bundle-check` and `QT_QPA_PLATFORM=offscreen` to verify bundled Qt images,
-SQLCipher, and worker imports without creating a portfolio or accessing a
-credential store. Then launch the app normally and exercise a synthetic
-portfolio, including the guide, exports, and background sync.
+## Release checklist
 
-The GitHub Actions **Desktop bundles** workflow builds both native targets on
-demand and uploads the installer files and a matching application source archive.
-Installer creation uses the version in
-`app/version.py`. Install, upgrade, and uninstall leave portfolio data in the
-per-user data directory. These builds are unsigned and the macOS app is not
-notarized, so the operating system may require a manual security override to
-open them. Keep the matching source tree and `LICENSE` available with any
-distributed installer. The `licenses` folder inside each app includes an exact
-runtime dependency inventory and the license files available from the installed
-packages. Review that inventory and the upstream source links in
-`THIRD_PARTY_NOTICES.md` before publishing a release.
+- Windows: `dist/installers/IBKRDashboard-<version>-windows-x64-setup.exe`.
+- macOS: `dist/installers/IBKRDashboard-<version>-macos-arm64.dmg`.
+- Run the bundled executable with `--bundle-check` and `QT_QPA_PLATFORM=offscreen`.
+- Test a synthetic portfolio, including exports and background sync.
+- Review bundled `licenses` and [third-party notices](../THIRD_PARTY_NOTICES.md).
+- Distribute the matching source tree and [LICENSE](../LICENSE).
+
+Versions come from `app/version.py`. Install, upgrade, and uninstall leave
+portfolio files untouched. The renamed app uses `IBKRDashboard` for new data;
+existing `CustomIBMonitor` portfolios are opened explicitly as described in
+the [data section](../README.md#your-data). Builds are unsigned; macOS is not
+notarized and may need a security override to open.

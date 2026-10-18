@@ -10,6 +10,8 @@ from urllib.parse import quote, urlencode
 from PySide6.QtCore import QObject, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
+from app.version import VERSION
+
 
 _SYMBOL = re.compile(r"[A-Za-z0-9.\-^=]{1,32}\Z")
 _CLASS_SYMBOL = re.compile(r"([A-Za-z]{1,12})[. /-]([A-Za-z])\Z")
@@ -145,7 +147,7 @@ class SplitHistoryClient(QObject):
         symbol = candidates[0]
         url = QUrl(f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol)}?{query}")
         request = QNetworkRequest(url)
-        request.setRawHeader(b"User-Agent", b"CustomIBMonitor/1.0")
+        request.setRawHeader(b"User-Agent", f"IBKRDashboard/{VERSION}".encode("ascii"))
         request.setTransferTimeout(10000)
         reply = self.network.get(request)
         self._pending[self._key(position)] = reply

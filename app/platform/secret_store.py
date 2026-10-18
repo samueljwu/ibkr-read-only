@@ -10,8 +10,10 @@ import re
 import sys
 
 
-_TARGET_PREFIX = "custom-ib-monitor:ibkr-flex:"
-_DATABASE_PREFIX = "custom-ib-monitor:database:"
+_TARGET_PREFIX = "ibkr-dashboard:ibkr-flex:"
+_DATABASE_PREFIX = "ibkr-dashboard:database:"
+_OLD_TARGET_PREFIX = "custom-ib-monitor:ibkr-flex:"
+_OLD_DATABASE_PREFIX = "custom-ib-monitor:database:"
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
 
@@ -91,13 +93,14 @@ def save_flex_token(account_id: str, token: str):
 
 
 def load_flex_token(account_id: str) -> str | None:
-    return _load(_TARGET_PREFIX + account_id, account_id)
+    return (_load(_TARGET_PREFIX + account_id, account_id)
+            or _load(_OLD_TARGET_PREFIX + account_id, account_id))
 
 
-def _database_target(path) -> str:
+def _database_target(path, prefix=_DATABASE_PREFIX) -> str:
     # A path is only a local lookup name. The encryption key is never derived from it.
     location = str(Path(path).expanduser().resolve()).casefold()
-    return _DATABASE_PREFIX + sha256(location.encode("utf-8")).hexdigest()
+    return prefix + sha256(location.encode("utf-8")).hexdigest()
 
 
 def save_database_key(path, key: str):
@@ -109,4 +112,6 @@ def save_database_key(path, key: str):
 
 def load_database_key(path) -> str | None:
     target = _database_target(path)
-    return _load(target, target)
+    return _load(target, target) or _load(
+        _database_target(path, _OLD_DATABASE_PREFIX),
+        _database_target(path, _OLD_DATABASE_PREFIX))

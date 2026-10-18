@@ -460,7 +460,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, database_path=None, *, recovery_key=None):
         super().__init__()
-        self.setWindowTitle("Portfolio Monitor")
+        self.setWindowTitle("IBKR Dashboard")
         available = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1450, max(640, available.width() - 40)),
                     min(850, max(480, available.height() - 40)))
@@ -475,7 +475,7 @@ class MainWindow(QMainWindow):
         self.zoom_percent = zoom if self.MIN_ZOOM <= zoom <= self.MAX_ZOOM and zoom % self.ZOOM_STEP == 0 else 100
         self._pending_data_directory = None
         self.log = configure_diagnostics(self.db.path, "monitor")
-        self.log.info("Portfolio Monitor opened; database=%s", self.db.path)
+        self.log.info("IBKR Dashboard opened; database=%s", self.db.path)
         self.portfolio_id = 1
         self._show_account_summary = self.db.setting("show_account_summary") != "0"
         self._compact_geometry = None
@@ -1649,7 +1649,7 @@ class MainWindow(QMainWindow):
 
     def _make_help_dialog(self):
         self.help_dialog = QDialog(self)
-        self.help_dialog.setWindowTitle("Help · Portfolio Monitor")
+        self.help_dialog.setWindowTitle("Help · IBKR Dashboard")
         self.help_dialog.resize(760, 600)
         dialog_layout = QVBoxLayout(self.help_dialog)
         guide_layout = QHBoxLayout()

@@ -72,7 +72,7 @@ exe = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="PortfolioMonitor",
+    name="IBKRDashboard",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -86,13 +86,13 @@ bundle = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="PortfolioMonitor",
+    name="IBKRDashboard",
 )
 if sys.platform == "darwin":
     app = BUNDLE(
         bundle,
-        name="PortfolioMonitor.app",
-        bundle_identifier="com.customibmonitor.portfoliomonitor",
+        name="IBKRDashboard.app",
+        bundle_identifier="com.ibkrdashboard.app",
         version=VERSION,
-        info_plist={"CFBundleName": "Portfolio Monitor", "NSHighResolutionCapable": True},
+        info_plist={"CFBundleName": "IBKR Dashboard", "NSHighResolutionCapable": True},
     )

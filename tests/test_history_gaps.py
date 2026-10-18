@@ -52,7 +52,7 @@ def unavailable():
 
 def test_import_uses_365_day_windows_for_every_source(tmp_path, monkeypatch):
     monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
-    last = date.today() - timedelta(days=1)
+    last = flex_import.flex_today() - timedelta(days=1)
     last -= timedelta(days=(last.weekday() - 1) % 7)  # Tuesday keeps both window ends on weekdays.
     first = last - timedelta(days=369)
     boundary = first + timedelta(days=364)
@@ -127,7 +127,7 @@ def test_cash_import_splits_saved_periods_without_exceeding_365_days(tmp_path):
 
 def test_pause_finishes_current_window_and_resume_skips_it(tmp_path, monkeypatch):
     monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
-    last = date.today() - timedelta(days=1)
+    last = flex_import.flex_today() - timedelta(days=1)
     last -= timedelta(days=(last.weekday() - 1) % 7)
     first = last - timedelta(days=369)
     db = Database(tmp_path / "portfolio.sqlite3")
@@ -269,7 +269,7 @@ def test_1025_stops_immediately_and_explains_next_step(tmp_path, monkeypatch):
 
 
 def test_dates_outside_standard_flex_history_are_not_requested(tmp_path, monkeypatch):
-    year = date.today().year - 5
+    year = flex_import.flex_today().year - 5
     first, last = f"{year}-01-01", f"{year}-12-31"
     calls = []
     path = tmp_path / "portfolio.sqlite3"
@@ -290,8 +290,8 @@ def test_dates_outside_standard_flex_history_are_not_requested(tmp_path, monkeyp
 
 def test_multiyear_import_stops_before_repeated_unavailable_requests(tmp_path, monkeypatch):
     monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
-    year = date.today().year
-    first, last = f"{year - 5}-01-01", (date.today() - timedelta(days=1)).isoformat()
+    year = flex_import.flex_today().year
+    first, last = f"{year - 5}-01-01", (flex_import.flex_today() - timedelta(days=1)).isoformat()
     opening = f"{year - 3}-07-01"
     requested = []
     failures = []

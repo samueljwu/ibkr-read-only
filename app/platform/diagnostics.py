@@ -13,7 +13,7 @@ def diagnostic_log_path(database_path: Path, component: str) -> Path:
 
 def configure_diagnostics(database_path: Path, component: str) -> logging.Logger:
     path = diagnostic_log_path(database_path, component)
-    logger = logging.getLogger(f"portfolio_monitor.{component}")
+    logger = logging.getLogger(f"ibkr_dashboard.{component}")
     if getattr(logger, "_diagnostic_path", None) == path:
         return logger
     path.parent.mkdir(parents=True, exist_ok=True)

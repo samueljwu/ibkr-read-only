@@ -12,7 +12,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCalendarWidget, QLineEdit
 
 import app.ui as ui
-from app.flex.flex_import import oldest_flex_date
+from app.flex.flex_import import flex_today, oldest_flex_date
 from app.platform.history_status import pause_request_path, read_status, write_status
 
 
@@ -57,7 +57,8 @@ def configure(window):
 def test_import_defaults_to_recent_30_completed_days(window):
     window.open_history_import()
     dialog = window.history_import_dialog
-    assert dialog.to_date.date() == QDate.currentDate().addDays(-1)
+    today = flex_today()
+    assert dialog.to_date.date() == QDate(today.year, today.month, today.day).addDays(-1)
     assert dialog.from_date.date().daysTo(dialog.to_date.date()) == 29
 
 
@@ -126,7 +127,8 @@ def test_calendar_picker_keeps_yesterday_limit(window):
     QApplication.instance().processEvents()
     calendar = dialog.from_date.findChild(QCalendarWidget)
     assert calendar is not None
-    assert calendar.maximumDate() == QDate.currentDate().addDays(-1)
+    today = flex_today()
+    assert calendar.maximumDate() == QDate(today.year, today.month, today.day).addDays(-1)
     selected = QDate.currentDate().addDays(-8)
     calendar.clicked.emit(selected)
     QApplication.instance().processEvents()

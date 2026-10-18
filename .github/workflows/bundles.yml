@@ -24,9 +24,9 @@ jobs:
       - run: python packaging/check_release.py
       - run: python packaging/collect_licenses.py
       - run: python -m pytest -q
-      - run: python -m PyInstaller --noconfirm packaging/portfolio_monitor.spec
+      - run: python -m PyInstaller --noconfirm packaging/ibkr_dashboard.spec
       - run: |
-          $process = Start-Process -FilePath (Resolve-Path .\dist\PortfolioMonitor\PortfolioMonitor.exe) -ArgumentList '--bundle-check' -Wait -PassThru -WindowStyle Hidden
+          $process = Start-Process -FilePath (Resolve-Path .\dist\IBKRDashboard\IBKRDashboard.exe) -ArgumentList '--bundle-check' -Wait -PassThru -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "Bundle check failed: $($process.ExitCode)" }
       - run: choco install innosetup --no-progress -y
       - run: ./packaging/windows/build_installer.ps1
@@ -34,31 +34,31 @@ jobs:
         shell: pwsh
         run: |
           $installer = (Get-ChildItem dist/installers/*-windows-x64-setup.exe).FullName
-          $appDir = Join-Path $env:RUNNER_TEMP 'PortfolioMonitorInstalled'
-          $marker = Join-Path $env:LOCALAPPDATA 'CustomIBMonitor/prod/data/installer-smoke-marker.txt'
+          $appDir = Join-Path $env:RUNNER_TEMP 'IBKRDashboardInstalled'
+          $marker = Join-Path $env:LOCALAPPDATA 'IBKRDashboard/prod/data/installer-smoke-marker.txt'
           New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
           Set-Content -LiteralPath $marker -Value 'synthetic installer check'
           foreach ($attempt in 1..2) {
             $setup = Start-Process -FilePath $installer -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=$appDir" -Wait -PassThru -WindowStyle Hidden
             if ($setup.ExitCode -ne 0) { throw "Install failed: $($setup.ExitCode)" }
-            $check = Start-Process -FilePath (Join-Path $appDir 'PortfolioMonitor.exe') -ArgumentList '--bundle-check' -Wait -PassThru -WindowStyle Hidden
+            $check = Start-Process -FilePath (Join-Path $appDir 'IBKRDashboard.exe') -ArgumentList '--bundle-check' -Wait -PassThru -WindowStyle Hidden
             if ($check.ExitCode -ne 0) { throw "Installed app check failed: $($check.ExitCode)" }
             if (!(Test-Path -LiteralPath $marker)) { throw 'User data disappeared during install.' }
           }
           $uninstall = Start-Process -FilePath (Join-Path $appDir 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru -WindowStyle Hidden
           if ($uninstall.ExitCode -ne 0) { throw "Uninstall failed: $($uninstall.ExitCode)" }
           if (!(Test-Path -LiteralPath $marker)) { throw 'Uninstall removed user data.' }
-          if (Test-Path -LiteralPath (Join-Path $appDir 'PortfolioMonitor.exe')) { throw 'Uninstall left the executable.' }
+          if (Test-Path -LiteralPath (Join-Path $appDir 'IBKRDashboard.exe')) { throw 'Uninstall left the executable.' }
       - uses: actions/upload-artifact@v4
         with:
-          name: PortfolioMonitor-windows-x64-setup
+          name: IBKRDashboard-windows-x64-setup
           path: dist/installers/*-windows-x64-setup.exe
       - run: |
           $version = python -c 'from app.version import VERSION; print(VERSION)'
-          git archive --format=zip --output="dist/installers/PortfolioMonitor-$version-source.zip" HEAD
+          git archive --format=zip --output="dist/installers/IBKRDashboard-$version-source.zip" HEAD
       - uses: actions/upload-artifact@v4
         with:
-          name: PortfolioMonitor-source
+          name: IBKRDashboard-source
           path: dist/installers/*-source.zip
 
   macos:
@@ -76,14 +76,14 @@ jobs:
       - run: python packaging/check_release.py
       - run: python packaging/collect_licenses.py
       - run: python -m pytest -q
-      - run: python -m PyInstaller --noconfirm packaging/portfolio_monitor.spec
-      - run: dist/PortfolioMonitor.app/Contents/MacOS/PortfolioMonitor --bundle-check
-      - run: file dist/PortfolioMonitor.app/Contents/MacOS/PortfolioMonitor | grep arm64
+      - run: python -m PyInstaller --noconfirm packaging/ibkr_dashboard.spec
+      - run: dist/IBKRDashboard.app/Contents/MacOS/IBKRDashboard --bundle-check
+      - run: file dist/IBKRDashboard.app/Contents/MacOS/IBKRDashboard | grep arm64
       - run: |
           version=$(python -c 'from app.version import VERSION; print(VERSION)')
-          sh packaging/macos/build_dmg.sh dist/PortfolioMonitor.app "dist/installers/PortfolioMonitor-${version}-macos-arm64.dmg"
-          hdiutil verify "dist/installers/PortfolioMonitor-${version}-macos-arm64.dmg"
+          sh packaging/macos/build_dmg.sh dist/IBKRDashboard.app "dist/installers/IBKRDashboard-${version}-macos-arm64.dmg"
+          hdiutil verify "dist/installers/IBKRDashboard-${version}-macos-arm64.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: PortfolioMonitor-macos-arm64-dmg
+          name: IBKRDashboard-macos-arm64-dmg
           path: dist/installers/*-macos-arm64.dmg

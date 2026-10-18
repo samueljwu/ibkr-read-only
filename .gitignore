@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 *.sqlite3*
+!demo/portfolio.sqlite3
 *.db*
 *.xlsx
 *.xls

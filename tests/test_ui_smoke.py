@@ -1022,7 +1022,7 @@ def test_column_decimal_menu_and_toolbar_default_view_menu(tmp_path, monkeypatch
         window.show()
         app.processEvents()
         model = window.models["Trades"]
-        assert window.windowTitle() == "Portfolio Monitor"
+        assert window.windowTitle() == "IBKR Dashboard"
         assert model.data(model.index(0, 3), Qt.DisplayRole) == "1,234.57"
         menu = window._build_header_menu("Trades", 3)
         decimals = next(action.menu() for action in menu.actions() if action.text() == "Decimal places")

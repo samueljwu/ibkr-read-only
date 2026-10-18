@@ -9,7 +9,7 @@ from pathlib import Path
 from secrets import token_hex
 
 
-APP_DATA_NAME = "CustomIBMonitor"
+APP_DATA_NAME = "IBKRDashboard"
 
 
 def user_data_dir() -> Path:
@@ -21,10 +21,6 @@ def user_data_dir() -> Path:
     if sys.platform == "win32":
         return Path.home() / "AppData" / "Local" / APP_DATA_NAME
     return Path.home() / ".local" / "share" / APP_DATA_NAME
-
-
-def legacy_source_dir() -> Path:
-    return Path(__file__).resolve().parent.parent
 
 
 def default_data_dir() -> Path:

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $version = (& python -c 'from app.version import VERSION; print(VERSION)').Trim()
 if ($LASTEXITCODE -ne 0 -or !$version) { throw 'Could not read the application version.' }
-$bundle = Join-Path (Get-Location) 'dist/PortfolioMonitor/PortfolioMonitor.exe'
+$bundle = Join-Path (Get-Location) 'dist/IBKRDashboard/IBKRDashboard.exe'
 if (!(Test-Path -LiteralPath $bundle)) { throw 'Build the PyInstaller bundle first.' }
 
 $compiler = if ($env:ISCC_PATH) { $env:ISCC_PATH } else {
@@ -15,10 +15,10 @@ $compiler = if ($env:ISCC_PATH) { $env:ISCC_PATH } else {
 }
 if (!$compiler -or !(Test-Path -LiteralPath $compiler)) { throw 'Inno Setup 6 ISCC.exe was not found. Set ISCC_PATH to its full path.' }
 
-$arguments = @("/DAppVersion=$version", 'packaging/windows/PortfolioMonitor.iss')
+$arguments = @("/DAppVersion=$version", 'packaging/windows/IBKRDashboard.iss')
 & $compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 
-$installer = "dist/installers/PortfolioMonitor-$version-windows-x64-setup.exe"
+$installer = "dist/installers/IBKRDashboard-$version-windows-x64-setup.exe"
 if (!(Test-Path -LiteralPath $installer)) { throw "Installer was not produced: $installer" }
 Write-Output (Resolve-Path -LiteralPath $installer)

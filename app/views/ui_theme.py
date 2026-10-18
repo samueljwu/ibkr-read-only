@@ -1,4 +1,4 @@
-"""Shared color and spacing rules for the portfolio monitor."""
+"""Shared color and spacing rules for the IBKR dashboard."""
 
 from string import Template
 import re

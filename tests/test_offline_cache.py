@@ -1,7 +1,7 @@
 """Offline quotes stay identifiable and never turn into current-session returns."""
 
 import os
-from datetime import date, timedelta
+from datetime import timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,6 +13,7 @@ from app.storage.database import Database
 from app.storage.encryption import open_database
 from app.market.market_data import MarketDataProvider
 from app.finance.services import PortfolioService
+from app.flex.flex_import import flex_today
 
 
 def test_quote_cache_survives_restart_and_is_scoped_to_account_and_contract(tmp_path):
@@ -187,9 +188,9 @@ def test_live_label_and_daily_summary_wait_for_actual_quote(tmp_path, monkeypatc
         window.db.cache_contract(position_id, 123)
         window.db.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
                              "side": "BUY", "quantity": 1, "price": 10, "commission_usd": 0})
-        window.db.save_history(123, [{"day": (date.today() - timedelta(days=1)).isoformat(),
+        window.db.save_history(123, [{"day": (flex_today() - timedelta(days=1)).isoformat(),
                                       "close": 12, "volume": 100}])
-        monkeypatch.setattr(window.service, "_as_of", lambda position: date.today())
+        monkeypatch.setattr(window.service, "_as_of", lambda position: flex_today())
         provider = MarketDataProvider()
         provider.connected = True
         provider.quotes[position_id] = {"ticks": {}, "mode": "Cached", "status": "CACHED QUOTE",
@@ -226,7 +227,7 @@ def test_historical_close_refreshes_daily_summary(tmp_path, monkeypatch):
         window.db.cache_contract(position_id, 123)
         window.db.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
                              "side": "BUY", "quantity": 1, "price": 10, "commission_usd": 0})
-        monkeypatch.setattr(window.service, "_as_of", lambda position: date.today())
+        monkeypatch.setattr(window.service, "_as_of", lambda position: flex_today())
         provider = MarketDataProvider()
         provider.connected = True
         provider.quotes[position_id] = {"ticks": {"last": 13}, "mode": "Live", "status": "OK"}
@@ -234,7 +235,7 @@ def test_historical_close_refreshes_daily_summary(tmp_path, monkeypatch):
         window._refresh_models()
         assert window.metric_values["daily"].text() == "—"
 
-        provider.events.put(("history", 123, [{"day": (date.today() - timedelta(days=1)).isoformat(),
+        provider.events.put(("history", 123, [{"day": (flex_today() - timedelta(days=1)).isoformat(),
                                                 "close": 12, "volume": 100}]))
         window._poll()
         window._refresh_summary()
