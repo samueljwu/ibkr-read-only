@@ -467,7 +467,7 @@ def test_disabled_buttons_are_grey_across_shared_variants(window, theme):
         assert button.palette().color(QPalette.ButtonText).name() == COLORS[theme]["disabled_text"]
         button.deleteLater()
 
-    for name in ("link", "historyCalendarButton", "historyHelpButton", "returnNotesButton"):
+    for name in ("link", "calendarDateButton", "historyHelpButton", "returnNotesButton"):
         button = QToolButton(window)
         button.setObjectName(name)
         button.setEnabled(False)

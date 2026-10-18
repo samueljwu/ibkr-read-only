@@ -907,14 +907,19 @@ class Database:
                         raise RuntimeError("Copied portfolio database failed integrity check")
             os.replace(temporary, target)
             created = True
+            with closing(open_database(target, key=self._key, readonly=True)) as verified:
+                if verified.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise RuntimeError("Copied portfolio database failed integrity check")
         except Exception:
             temporary.unlink(missing_ok=True)
+            if created:
+                target.unlink(missing_ok=True)
             target_dir.rmdir()
             raise
         config_path = local_config_path()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
         config_temp = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
         try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             if self.encrypted:
                 secret_store.save_database_key(target, self._key)
             config_temp.write_text(json.dumps({"data_directory": str(target_dir)}), encoding="utf-8")
@@ -925,3 +930,4 @@ class Database:
                 target.unlink(missing_ok=True)
                 target_dir.rmdir()
             raise
+        return target

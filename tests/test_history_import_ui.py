@@ -135,6 +135,38 @@ def test_calendar_picker_keeps_yesterday_limit(window):
     assert dialog.from_date.date() == selected
 
 
+def test_calendar_grid_shows_ordered_range_and_navigates_months(window):
+    window.open_history_import()
+    dialog = window.history_import_dialog
+    first = QDate(2026, 1, 10)
+    last = QDate(2026, 1, 14)
+    dialog.from_date.setDate(first)
+    dialog.to_date.setDate(last)
+    dialog.from_date.calendar_button.click()
+    QApplication.instance().processEvents()
+    calendar = dialog.from_date.findChild(QCalendarWidget)
+    assert calendar.firstDayOfWeek() == Qt.Monday
+    assert calendar.verticalHeaderFormat() == QCalendarWidget.NoVerticalHeader
+    assert not calendar.isGridVisible()
+    assert calendar.selectedDate() == first
+    assert calendar.range_start == first
+    assert calendar.range_end == last
+    calendar.setCurrentPage(2026, 2)
+    assert calendar.range_start == first
+    calendar.setCurrentPage(2026, 1)
+    assert calendar.range_end == last
+    calendar.clicked.emit(first)
+    QApplication.instance().processEvents()
+
+    dialog.from_date.setDate(QDate(2026, 1, 20))
+    dialog.from_date.calendar_button.click()
+    QApplication.instance().processEvents()
+    calendar = dialog.from_date.findChild(QCalendarWidget)
+    assert calendar.range_start is None
+    calendar.clicked.emit(QDate(2026, 1, 9))
+    assert dialog.from_date.date() == QDate(2026, 1, 9)
+
+
 def test_import_dialog_keeps_explanation_and_results_compact(window):
     window.open_history_import()
     dialog = window.history_import_dialog

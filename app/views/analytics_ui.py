@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLay
                                QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
+from app.finance.analytics import (capital_flow_rows, cash_share_rows, covered_daily_pnl_rows,
+                                   daily_pnl_summary,
                                    flex_monthly_history, performance_window_rows)
 from app.views import widgets
 from app.views.buy_sell_levels_ui import BuySellLevelsPanel
 from app.views.chart_ui import nice_scale as _nice_scale
 from app.views.exposure_ui import ExposurePanel
+from app.views.pnl_calendar import PnlCalendar
 from app.views.returns_ui import ReturnPanel
 from app.views.table_ui import ReportTable, SortItem
 from app.views.themed_checkbox import ThemedCheckBox
@@ -602,13 +604,14 @@ class AnalyticsTab(QWidget):
             sharpe.addStretch()
             row.addLayout(sharpe, 1)
         layout.addWidget(summary)
-        return values
+        return summary, values
 
     def _update_section_controls(self, *_):
         pnl_visible = self.sections.currentWidget() is self.pnl_page
         capital_visible = self.sections.currentWidget() is self.capital_page
-        dated = pnl_visible or capital_visible
-        if dated:
+        pnl_chart_visible = pnl_visible and self.pnl_view_combo.currentIndex() == 0
+        show_controls = pnl_chart_visible or capital_visible
+        if show_controls:
             page = self.pnl_page if pnl_visible else self.capital_page
             if self.controls_panel.parentWidget() is not page:
                 previous = self.controls_panel.parentWidget()
@@ -618,13 +621,14 @@ class AnalyticsTab(QWidget):
             self.controls_panel.show()
         else:
             self.controls_panel.hide()
-        self.metric_combo.setVisible(pnl_visible)
+        self.metric_combo.setVisible(pnl_chart_visible)
         self.capital_combo.setVisible(capital_visible)
-        self.benchmark_toggle.setVisible(dated)
-        self.chart_label.setVisible(dated)
-        self.range_label.setVisible(dated)
-        self.range_combo.setVisible(dated)
-        if dated:
+        self.benchmark_toggle.setVisible(pnl_chart_visible or capital_visible)
+        self.chart_label.setVisible(pnl_chart_visible or capital_visible)
+        self.range_label.setVisible(show_controls)
+        self.range_combo.setVisible(show_controls)
+        self.pnl_summary_panel.setVisible(pnl_chart_visible)
+        if show_controls:
             self._update_range_controls()
         else:
             for widget in (self.start_label, self.start_date, self.end_label, self.end_date,
@@ -633,8 +637,19 @@ class AnalyticsTab(QWidget):
         if getattr(self, "_initialized", False):
             self.refresh()
 
+    def _pnl_view_changed(self, index):
+        self.pnl_views.setCurrentIndex(index)
+        if self.sections.currentWidget() is self.pnl_page:
+            self._update_section_controls()
+
     def _update_range_controls(self):
         if self.sections.currentWidget() in (self.exposure_page, self.return_page):
+            return
+        if (self.sections.currentWidget() is self.pnl_page and
+                self.pnl_view_combo.currentIndex() == 1):
+            for widget in (self.start_label, self.start_date, self.end_label, self.end_date,
+                           self.reset_button, self.date_summary):
+                widget.hide()
             return
         custom = self.range_combo.currentText() == "Custom"
         for widget in (self.start_label, self.start_date, self.end_label, self.end_date,
@@ -713,6 +728,10 @@ class AnalyticsTab(QWidget):
             "end": self.end_date.date().toString("yyyy-MM-dd"),
             "metric": self.metric_combo.currentText(),
             "daily_extreme": self.max_daily_combo.currentText(),
+            "pnl_view": self.pnl_view_combo.currentText(),
+            "pnl_interval": self.pnl_calendar.interval_combo.currentText(),
+            "pnl_decimals": {"usd": self.pnl_calendar.usd_decimals.value(),
+                             "percent": self.pnl_calendar.percent_decimals.value()},
             "capital_chart": self.capital_combo.currentText(),
             "benchmark": self.benchmark_toggle.isChecked(),
             "pnl": pane(self.pnl_splitter, self.pnl_table),
@@ -728,12 +747,21 @@ class AnalyticsTab(QWidget):
             return False
         for combo, value in ((self.metric_combo, state.get("metric")),
                              (self.max_daily_combo, state.get("daily_extreme")),
+                             (self.pnl_view_combo, state.get("pnl_view")),
+                             (self.pnl_calendar.interval_combo, state.get("pnl_interval")),
                              (self.capital_combo, state.get("capital_chart")),
                              (self.range_combo, state.get("range"))):
             if isinstance(value, str) and combo.findText(value) >= 0:
                 combo.setCurrentText(value)
         if isinstance(state.get("benchmark"), bool):
             self.benchmark_toggle.setChecked(state["benchmark"])
+        precision = state.get("pnl_decimals")
+        if isinstance(precision, dict):
+            for name, control in (("usd", self.pnl_calendar.usd_decimals),
+                                  ("percent", self.pnl_calendar.percent_decimals)):
+                places = precision.get(name)
+                if isinstance(places, int) and not isinstance(places, bool) and 0 <= places <= 30:
+                    control.setValue(places)
         try:
             first = date.fromisoformat(state["start"])
             last = date.fromisoformat(state["end"])
@@ -774,8 +802,8 @@ class AnalyticsTab(QWidget):
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(self.controls_panel)
-        self.stats = self._metric_summary(layout, [metric[0] for metric in self.METRICS],
-                                          show_close=True)
+        self.pnl_summary_panel, self.stats = self._metric_summary(
+            layout, [metric[0] for metric in self.METRICS], show_close=True)
         self.reported_performance_pnl = QLabel()
         self.reported_performance_pnl.setObjectName("hint")
         self.reported_performance_pnl.setWordWrap(True)
@@ -802,9 +830,39 @@ class AnalyticsTab(QWidget):
                                       "Daily adjusted P&L"), "analytics_pnl_decimals",
                                      {1: (2, "usd"), 2: (2, "usd"), 3: (2, "usd"),
                                       4: (2, "percent"), 5: (2, "usd"), 6: (2, "usd")})
+        view_controls = QHBoxLayout()
+        view_controls.addWidget(QLabel("View"))
+        self.pnl_view_combo = style_toolbar_dropdown(QComboBox())
+        self.pnl_view_combo.addItems(("Chart and table", "Calendar"))
+        view_controls.addWidget(self.pnl_view_combo)
+        view_controls.addStretch()
+        layout.addLayout(view_controls)
+        self.pnl_views = QStackedWidget()
+        self.pnl_views.setMinimumWidth(0)
+        self.pnl_views.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        chart_page = QWidget()
+        chart_layout = QVBoxLayout(chart_page)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(8)
         self.pnl_splitter, self.pnl_layout_combo = self._split_view(
-            layout, self.pnl_chart, self.pnl_table, self.pnl_navigator,
+            chart_layout, self.pnl_chart, self.pnl_table, self.pnl_navigator,
             "analytics_pnl_splitter", self.pnl_hint)
+        self.pnl_calendar = PnlCalendar()
+        for name, control in (("usd", self.pnl_calendar.usd_decimals),
+                              ("percent", self.pnl_calendar.percent_decimals)):
+            key = f"analytics_pnl_calendar_{name}_decimals_{self.portfolio_id}"
+            try:
+                saved = int(self.db.setting(key))
+            except (TypeError, ValueError):
+                saved = 2
+            if 0 <= saved <= 30:
+                control.setValue(saved)
+            control.valueChanged.connect(
+                lambda places, setting_key=key: self.db.set_setting(setting_key, str(places)))
+        self.pnl_views.addWidget(chart_page)
+        self.pnl_views.addWidget(self.pnl_calendar)
+        layout.addWidget(self.pnl_views, 1)
+        self.pnl_view_combo.currentIndexChanged.connect(self._pnl_view_changed)
         for column in (2, 5, 6):
             self.pnl_table.hideColumn(column)
         self.pnl_table.horizontalHeader().setToolTip(
@@ -816,7 +874,7 @@ class AnalyticsTab(QWidget):
         layout = QVBoxLayout(self.capital_page)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(8)
-        self.capital_stats = self._metric_summary(layout, ("Bought", "Sold", "Net deployed"))
+        _, self.capital_stats = self._metric_summary(layout, ("Bought", "Sold", "Net deployed"))
         note = QLabel()
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -1034,7 +1092,8 @@ class AnalyticsTab(QWidget):
         self.reported_performance_monthly.setText(reported_text)
         self.reported_performance_pnl.setText(reported_text)
         self.reported_performance_pnl.setVisible(bool(reported) and
-                                                 self.range_combo.currentText() == "All")
+                                                 self.range_combo.currentText() == "All" and
+                                                 self.pnl_view_combo.currentIndex() == 0)
         if selected is self.monthly_page:
             self._fill_table(self.monthly_table, [
                 (row["month"], f'{row["period_from"]} to {row["period_to"]}',
@@ -1123,6 +1182,16 @@ class AnalyticsTab(QWidget):
             self.stats[label].setText(self._percent(value) if unit == "%" else self._money(value))
         self._daily_summary = daily_pnl_summary(pnl_rows, complete)
         self._update_daily_summary()
+        calendar_rows = covered_daily_pnl_rows(snapshots, flows)
+        calendar_first = (date.fromisoformat(calendar_rows[0]["day"])
+                          if calendar_rows else date.today())
+        calendar_last = (date.fromisoformat(calendar_rows[-1]["day"])
+                         if calendar_rows else date.today())
+        self.pnl_calendar.set_data(calendar_rows, calendar_first, calendar_last, True)
+        self.pnl_calendar.set_note(
+            "Daily P&L needs consecutive completed NAV and flow coverage. "
+            "See Monthly P&L for monthly-only history."
+            if not any(row["daily_pnl"] is not None for row in calendar_rows) else "")
         self._render_pnl_chart()
         self._fill_table(self.pnl_table, [
             (row["day"] + (" · provisional" if row["source"] == "live" else ""),

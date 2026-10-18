@@ -3,9 +3,196 @@ from datetime import date, timedelta
 import pytest
 
 from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
-                                   flex_monthly_history, performance_window_rows)
+                                   covered_daily_pnl_rows, flex_monthly_history,
+                                   performance_window_rows)
 from app.storage.database import Database
 from app.market.market_data import IBKRMarketDataProvider
+
+
+def test_pnl_calendar_intervals_use_covered_days_and_selected_range():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QComboBox
+    from app.views.pnl_calendar import PnlCalendar
+
+    app = QApplication.instance() or QApplication([])
+    calendar = PnlCalendar()
+    assert isinstance(calendar.usd_decimals.dropdown, QComboBox)
+    assert calendar.usd_decimals.dropdown.objectName() == "toolbarDropdown"
+    assert calendar.usd_decimals.dropdown.width() >= 80
+    assert len(calendar.day_cells) == 30
+    assert calendar.daily_grid.grid.columnCount() == 5
+    calendar.set_data([], date(2026, 1, 1), date(2026, 10, 18), True)
+    calendar.resize(750, 600)
+    calendar.show()
+    app.processEvents()
+    assert calendar.minimumSizeHint().width() <= 750
+    toolbar = calendar.toolbar
+    assert calendar.usd_decimals.parentWidget() is toolbar
+    assert calendar.percent_decimals.parentWidget() is toolbar
+    assert toolbar.interval_combo.geometry().right() < calendar.usd_decimals.geometry().left()
+    assert calendar.usd_decimals.geometry().right() < calendar.percent_decimals.geometry().left()
+    assert calendar.usd_decimals.caption.text() == "USD decimals"
+    assert calendar.percent_decimals.caption.text() == "P&L % decimals"
+    assert toolbar.previous_button.geometry().center().y() > calendar.percent_decimals.geometry().center().y()
+    assert abs(toolbar.interval_combo.geometry().center().y() -
+               calendar.percent_decimals.geometry().center().y()) < 5
+    rows = [
+        {"day": "2026-01-02", "daily_pnl": 12, "daily_return": .012, "source": "flex"},
+        {"day": "2026-01-05", "daily_pnl": -4, "daily_return": -.009, "source": "flex"},
+        {"day": "2026-01-06", "daily_pnl": None, "daily_return": None, "source": "live"},
+    ]
+    calendar.set_data(rows, date(2026, 1, 2), date(2026, 1, 31), True)
+    assert "+$12.00" in calendar.day_cells[4].text()
+    assert "+1.20%" in calendar.day_cells[4].text()
+    assert "-$4.00" in calendar.day_cells[5].text()
+    assert "-0.90%" in calendar.day_cells[5].text()
+    assert "Provisional" in calendar.day_cells[6].text()
+    assert "2 covered days" in calendar.summary_label.text()
+    assert "P&L %: +0.29%" in calendar.summary_label.text()
+    for interval, cell_index in (("Weekly", 1), ("Monthly", 0),
+                                 ("Quarterly", 0), ("Yearly", 0)):
+        calendar.interval_combo.setCurrentText(interval)
+        assert "+$8.00" in calendar.summary_label.text()
+        assert "+0.29%" in calendar.summary_label.text()
+        if interval == "Weekly":
+            assert "-$4.00" in calendar.period_cells[cell_index].text()
+            assert "-0.90%" in calendar.period_cells[cell_index].text()
+        else:
+            assert "+$8.00" in calendar.period_cells[cell_index].text()
+            assert "+0.29%" in calendar.period_cells[cell_index].text()
+    calendar.usd_decimals.setValue(0)
+    calendar.percent_decimals.setValue(3)
+    assert "+$8" in calendar.period_cells[0].text()
+    assert "+0.289%" in calendar.period_cells[0].text()
+    assert "Net +$8 · P&L %: +0.289%" in calendar.summary_label.text()
+    assert "Compounded P&L %: +0.289%" in calendar.period_cells[0].toolTip()
+    calendar.set_data(rows, date(2026, 1, 2), date(2026, 1, 31), False)
+    assert "No covered daily P&L" in calendar.summary_label.text()
+    assert "$8.00" not in calendar.period_cells[0].text()
+    assert "0.29%" not in calendar.period_cells[0].text()
+    calendar.close()
+
+
+def test_pnl_calendar_weekdays_include_a_sixth_week():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLabel
+    from app.views.pnl_calendar import PnlCalendar
+
+    app = QApplication.instance() or QApplication([])
+    calendar = PnlCalendar()
+    rows = [{"day": "2022-05-31", "daily_pnl": 5,
+             "daily_return": .005, "source": "flex"}]
+    calendar.set_data(rows, date(2022, 5, 1), date(2022, 5, 31), True)
+    assert [label.text() for label in calendar.daily_grid.findChildren(QLabel, "metricLabel")] == [
+        "Mon", "Tue", "Wed", "Thu", "Fri"]
+    assert calendar.day_cells[25].text() == "30"
+    assert calendar.day_cells[26].text().startswith("31\n+$5.00")
+    assert all(not cell.text().startswith("1\n") for cell in calendar.day_cells)
+    calendar.close()
+
+
+def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    import app.ui as ui
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "calendar.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        for day, nav in (("2025-12-31", 1000), ("2026-01-02", 1000),
+                         ("2026-01-05", 1012)):
+            window.db.save_account_history(1, day, nav, source="flex", flow_covered=True)
+        tab = window.analytics_tab
+        tab.range_combo.setCurrentText("Custom")
+        tab._set_dates(date(2026, 1, 2), date(2026, 1, 5))
+        tab.refresh()
+        tab.pnl_view_combo.setCurrentText("Calendar")
+        assert tab.controls_panel.isHidden()
+        assert tab.pnl_summary_panel.isHidden()
+        assert tab.range_combo.isHidden()
+        assert tab.date_summary.isHidden()
+        assert tab.pnl_calendar._first == date(2025, 12, 31)
+        assert tab.pnl_calendar.previous_button.isEnabled()
+        tab.pnl_calendar.interval_combo.setCurrentText("Weekly")
+        assert tab.pnl_views.currentWidget() is tab.pnl_calendar
+        assert "+$12.00" in tab.pnl_calendar.summary_label.text()
+        assert "P&L %: +1.20%" in tab.pnl_calendar.summary_label.text()
+        tab.pnl_calendar.usd_decimals.setValue(0)
+        tab.pnl_calendar.percent_decimals.setValue(3)
+        assert "Net +$12 · P&L %: +1.200%" in tab.pnl_calendar.summary_label.text()
+        state = tab.view_state()
+        tab.pnl_view_combo.setCurrentText("Chart and table")
+        assert not tab.controls_panel.isHidden()
+        assert not tab.pnl_summary_panel.isHidden()
+        assert not tab.range_combo.isHidden()
+        assert tab.range_combo.currentText() == "Custom"
+        tab.pnl_calendar.interval_combo.setCurrentText("Daily")
+        tab.pnl_calendar.usd_decimals.setValue(2)
+        tab.pnl_calendar.percent_decimals.setValue(2)
+        assert tab.apply_view_state(state)
+        assert tab.pnl_view_combo.currentText() == "Calendar"
+        assert tab.pnl_calendar.interval_combo.currentText() == "Weekly"
+        assert (tab.pnl_calendar.usd_decimals.value(),
+                tab.pnl_calendar.percent_decimals.value()) == (0, 3)
+    finally:
+        window.close()
+
+    reopened = ui.MainWindow()
+    try:
+        assert (reopened.analytics_tab.pnl_calendar.usd_decimals.value(),
+                reopened.analytics_tab.pnl_calendar.percent_decimals.value()) == (0, 3)
+    finally:
+        reopened.close()
+
+
+def test_pnl_calendar_shows_eight_quarters_per_page():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from app.views.pnl_calendar import PnlCalendar
+
+    app = QApplication.instance() or QApplication([])
+    calendar = PnlCalendar()
+    rows = [
+        {"day": "2026-01-05", "daily_pnl": 10, "daily_return": .01, "source": "flex"},
+        {"day": "2027-12-31", "daily_pnl": -3, "daily_return": -.003, "source": "flex"},
+        {"day": "2028-01-03", "daily_pnl": 7, "daily_return": .007, "source": "flex"},
+    ]
+    calendar.set_data(rows, date(2026, 1, 1), date(2026, 1, 31), True)
+    calendar.set_data(rows, date(2026, 1, 1), date(2028, 1, 31), True)
+    calendar.interval_combo.setCurrentText("Quarterly")
+    assert calendar.period_label.text() == "2026–2027"
+    assert len([cell for cell in calendar.period_cells if not cell.isHidden()]) == 8
+    assert "Q1 2026" in calendar.period_cells[0].text()
+    assert "Q4 2027" in calendar.period_cells[7].text()
+    assert "+$7.00" in calendar.summary_label.text()
+    calendar.next_button.click()
+    assert calendar.period_label.text() == "2028–2029"
+    assert "Q1 2028" in calendar.period_cells[0].text()
+    assert "+$7.00" in calendar.period_cells[0].text()
+    assert not calendar.next_button.isEnabled()
+    calendar.previous_button.click()
+    assert calendar.period_label.text() == "2026–2027"
+    calendar.close()
+
+
+def test_calendar_daily_pnl_recovers_after_a_history_gap():
+    snapshots = [
+        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-05", "nav_usd": 1510, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-12", "nav_usd": 1500, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-13", "nav_usd": 1515, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-14", "nav_usd": 1600, "source": "live", "flow_covered": 0},
+    ]
+    rows = covered_daily_pnl_rows(
+        snapshots, [{"day": "2026-01-04", "amount_usd": 500}])
+    assert [row["daily_pnl"] for row in rows] == [None, 10, None, 15, None]
+    assert rows[1]["daily_return"] == pytest.approx(10 / 1500)
+    assert rows[3]["daily_return"] == pytest.approx(15 / 1500)
 
 
 def test_cash_share_uses_valid_completed_cash_and_nav_observations():

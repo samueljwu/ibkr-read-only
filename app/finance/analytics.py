@@ -140,6 +140,43 @@ def performance_window_rows(snapshots, flows, first, last):
     return rows, covered and (completed_count >= 2 or usable_predecessor)
 
 
+def covered_daily_pnl_rows(snapshots, flows):
+    """Daily account P&L wherever adjacent completed closes have flow coverage.
+
+    A gap leaves that day blank, then the new close can serve as the next
+    baseline. This lets a calendar browse all history without bridging gaps.
+    """
+    observations = sorted(snapshots, key=lambda row: row["day"])
+    dated_flows = sorted((row["day"], float(row["amount_usd"])) for row in flows)
+    rows = []
+    previous = None
+    flow_index = 0
+    for snapshot in observations:
+        day = snapshot["day"]
+        if snapshot["source"] == "live":
+            rows.append({"day": day, "daily_pnl": None,
+                         "daily_return": None, "source": "live"})
+            continue
+        daily_flow = 0.0
+        while flow_index < len(dated_flows) and dated_flows[flow_index][0] <= day:
+            flow_day, amount = dated_flows[flow_index]
+            if previous and flow_day > previous["day"]:
+                daily_flow += amount
+            flow_index += 1
+        daily_pnl = daily_return = None
+        if previous:
+            gap = (date.fromisoformat(day) - date.fromisoformat(previous["day"])).days
+            capital = return_base(previous["nav_usd"], daily_flow)
+            if (gap <= 4 and previous["flow_covered"] and snapshot["flow_covered"]
+                    and capital > 0):
+                daily_pnl = float(snapshot["nav_usd"]) - float(previous["nav_usd"]) - daily_flow
+                daily_return = daily_pnl / capital
+        rows.append({"day": day, "daily_pnl": daily_pnl,
+                     "daily_return": daily_return, "source": snapshot["source"]})
+        previous = snapshot
+    return rows
+
+
 def daily_pnl_summary(rows, complete):
     """Extremes and annualized Sharpe from covered, completed daily returns."""
     result = {"max_usd_gain": None, "max_usd_loss": None,

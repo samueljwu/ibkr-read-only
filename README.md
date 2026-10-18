@@ -44,7 +44,9 @@ and Activity Statement CSVs. See the in-app guide for import limits.
 
 ## Your data
 
-- Portfolios, backups, and logs stay local. Change folders in **Settings**.
+- Portfolios, backups, and logs stay local. Use **Settings → Advanced settings → Move database…**
+  to choose a parent folder. The app verifies and opens a copy there, then offers a restart;
+  the original database remains in place. Change the backup folder separately in **Settings**.
 - Packaged data: `%LOCALAPPDATA%\IBKRDashboard\prod\data` on Windows;
   `~/Library/Application Support/IBKRDashboard/prod/data` on macOS.
 - Source runs use `dev/data` instead of `prod/data`.
@@ -89,6 +91,9 @@ python main.py
   <tr>
     <td align="center" valign="top" width="50%"><strong>P&amp;L</strong><br><a href="docs/images/demo-analytics.png"><img src="docs/images/demo-analytics.png" alt="Analytics P and L section with synthetic NAV history" width="100%"></a></td>
     <td align="center" valign="top" width="50%"><strong>Returns</strong><br><a href="docs/images/demo-analytics-returns.png"><img src="docs/images/demo-analytics-returns.png" alt="Analytics Returns section with synthetic position returns" width="100%"></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" colspan="2"><strong>P&amp;L calendar</strong><br><a href="docs/images/demo-analytics-calendar.png"><img src="docs/images/demo-analytics-calendar.png" alt="Analytics P and L calendar with synthetic daily gains, losses, and percentage returns" width="100%"></a></td>
   </tr>
   <tr>
     <td align="center" valign="top" width="50%"><strong>Capital deployment</strong><br><a href="docs/images/demo-analytics-capital.png"><img src="docs/images/demo-analytics-capital.png" alt="Analytics Capital deployment section with synthetic trades" width="100%"></a></td>

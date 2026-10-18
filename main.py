@@ -29,7 +29,7 @@ def main(argv=None):
         from sqlcipher3 import dbapi2 as sqlite3
         from PySide6.QtGui import QPixmap
         from app.market.market_data import EClient
-        from scripts import (encrypt_database, history_worker, legacy_history_worker,
+        from scripts import (encrypt_database, move_database, history_worker, legacy_history_worker,
                              sync_analytics, sync_cash, sync_trades)
         if sys.platform == "darwin":
             from keyring.backends.macOS import Keyring
@@ -57,6 +57,9 @@ def main(argv=None):
     if args and args[0] == "--encrypt-database":
         from scripts.encrypt_database import main as encrypt_database
         return encrypt_database(args[1:])
+    if args and args[0] == "--move-database":
+        from scripts.move_database import main as move_database
+        return move_database(args[1:])
     if args and args[0] in ("--sync-trades", "--sync-analytics", "--sync-cash") and len(args) <= 2:
         from scripts.sync_trades import main as sync_trades
         from scripts.sync_analytics import main as sync_analytics

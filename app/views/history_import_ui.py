@@ -8,75 +8,16 @@ one-time legacy import/removal path.
 
 from datetime import timedelta
 
-from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtWidgets import (QCalendarWidget, QComboBox, QDialog, QDialogButtonBox,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
-                               QPlainTextEdit, QProgressBar, QPushButton,
-                               QToolButton, QVBoxLayout, QWidget, QWidgetAction)
+from PySide6.QtCore import QDate, Qt
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QGridLayout,
+                               QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar,
+                               QPushButton, QToolButton, QVBoxLayout)
 
 from app.platform.history_status import format_history_details, merge_periods
 from app.flex.flex_import import flex_today, oldest_flex_date
 from app.views import widgets
+from app.views.date_input import CalendarDateInput
 from app.views.table_ui import ReportTable, SortItem
-
-
-class HistoryDateInput(QWidget):
-    """ISO date text entry with a calendar picker and QDate-compatible accessors."""
-
-    dateChanged = Signal(QDate)
-
-    def __init__(self, selected):
-        super().__init__()
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        self.line_edit = QLineEdit()
-        self.line_edit.setInputMask("0000-00-00;_")
-        self.line_edit.setText(selected.toString("yyyy-MM-dd"))
-        self.line_edit.setMinimumWidth(136)
-        self.line_edit.setToolTip("Type a date as YYYY-MM-DD.")
-        self.setFocusProxy(self.line_edit)
-        row.addWidget(self.line_edit)
-        self.calendar_button = QToolButton()
-        self.calendar_button.setObjectName("historyCalendarButton")
-        self.calendar_button.setArrowType(Qt.DownArrow)
-        self.calendar_button.setFixedWidth(28)
-        self.calendar_button.setToolTip("Choose a date from the calendar")
-        self.calendar_button.setFocusPolicy(Qt.NoFocus)
-        self.calendar_button.clicked.connect(self._show_calendar)
-        row.addWidget(self.calendar_button)
-        self._maximum = QDate.currentDate().addDays(-1)
-        self.line_edit.editingFinished.connect(self._edited)
-
-    def date(self):
-        return QDate.fromString(self.line_edit.text(), "yyyy-MM-dd")
-
-    def setDate(self, selected):
-        if selected.isValid():
-            self.line_edit.setText(selected.toString("yyyy-MM-dd"))
-            self.dateChanged.emit(selected)
-
-    def setMaximumDate(self, maximum):
-        self._maximum = maximum
-
-    def _edited(self):
-        selected = self.date()
-        if selected.isValid():
-            self.dateChanged.emit(selected)
-
-    def _show_calendar(self):
-        menu = QMenu(self)
-        menu.setAttribute(Qt.WA_DeleteOnClose)
-        calendar = QCalendarWidget(menu)
-        calendar.setMaximumDate(self._maximum)
-        selected = self.date()
-        if selected.isValid() and selected <= self._maximum:
-            calendar.setSelectedDate(selected)
-        action = QWidgetAction(menu)
-        action.setDefaultWidget(calendar)
-        menu.addAction(action)
-        calendar.clicked.connect(lambda chosen: (self.setDate(chosen), menu.close()))
-        menu.popup(self.calendar_button.mapToGlobal(self.calendar_button.rect().bottomLeft()))
 
 
 class HistoryImportDialog(QDialog):
@@ -106,8 +47,10 @@ class HistoryImportDialog(QDialog):
             self.source.addItem(label, value)
         yesterday = flex_today() - timedelta(days=1)
         first_day = yesterday - timedelta(days=29)
-        self.from_date = HistoryDateInput(QDate(first_day.year, first_day.month, first_day.day))
-        self.to_date = HistoryDateInput(QDate(yesterday.year, yesterday.month, yesterday.day))
+        self.from_date = CalendarDateInput(QDate(first_day.year, first_day.month, first_day.day))
+        self.to_date = CalendarDateInput(QDate(yesterday.year, yesterday.month, yesterday.day))
+        self.from_date.setRangePartner(self.to_date, starts_range=True)
+        self.to_date.setRangePartner(self.from_date)
         for date_field in (self.from_date, self.to_date):
             date_field.setMaximumDate(QDate(yesterday.year, yesterday.month, yesterday.day))
         for column, caption, field in ((0, "Source", self.source),

@@ -226,6 +226,14 @@ def capture(path, screenshot_dir):
             if image.isNull() or not image.save(str(screenshot)):
                 raise RuntimeError(f"Could not save screenshot: {screenshot}")
         analytics.sections.setCurrentWidget(analytics.pnl_page)
+        analytics.pnl_view_combo.setCurrentText("Calendar")
+        analytics.refresh()
+        app.processEvents()
+        app.processEvents()
+        screenshot = screenshot_dir / "demo-analytics-calendar.png"
+        image = window.grab()
+        if image.isNull() or not image.save(str(screenshot)):
+            raise RuntimeError(f"Could not save screenshot: {screenshot}")
         analytics.range_combo.setCurrentText("3 months")
         window.tabs.setCurrentWidget(window.views["Portfolio"].parentWidget())
         app.processEvents()

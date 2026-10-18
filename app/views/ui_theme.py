@@ -21,6 +21,7 @@ COLORS = {
         "grid_warning_text": "#9b4917",
         "disabled_surface": "#e8ecef", "disabled_text": "#87939d",
         "disabled_border": "#cfd7dd",
+        "calendar_range": "#eef1f3", "calendar_selected": "#343a40",
     },
     "dark": {
         "canvas": "#0b0b0d", "surface": "#171719", "surface_alt": "#222225",
@@ -38,6 +39,7 @@ COLORS = {
         "grid_warning_text": "#ffb871",
         "disabled_surface": "#303034", "disabled_text": "#85858d",
         "disabled_border": "#4a4a50",
+        "calendar_range": "#29292d", "calendar_selected": "#d4d4d8",
     },
 }
 
@@ -96,6 +98,14 @@ QLabel#chartHoverCard {
     background: ${surface}; color: ${text}; border: 1px solid ${accent};
     border-radius: 6px; padding: 8px 10px; font-size: 13px;
 }
+QLabel#calendarCell {
+    background: ${surface}; color: ${text}; border: 1px solid ${line};
+    border-radius: 5px;
+}
+QLabel#calendarCell[calendarState="positive"] { background: ${accent_soft}; color: ${positive}; }
+QLabel#calendarCell[calendarState="negative"] { background: ${accent_soft}; color: ${negative}; }
+QLabel#calendarCell[calendarState="inactive"] { background: ${canvas}; color: ${muted}; }
+QLabel#calendarCell[calendarState="empty"] { background: transparent; border: 0; }
 QWidget#chartHoverLine { background: ${accent}; }
 QPlainTextEdit {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
@@ -109,11 +119,31 @@ QToolButton#historyHelpButton, QToolButton#historyTextAction, QToolButton#return
 }
 QToolButton#historyHelpButton:hover, QToolButton#historyTextAction:hover,
 QToolButton#returnNotesButton:hover { color: ${accent_hover}; }
-QToolButton#historyCalendarButton {
+QToolButton#calendarDateButton {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 4px; padding: 4px 6px;
 }
-QToolButton#historyCalendarButton:hover { background: ${accent_soft}; border-color: ${accent}; }
+QToolButton#calendarDateButton:hover { background: ${surface_alt}; border-color: ${muted}; }
+QMenu#datePickerMenu { background: ${surface}; border: 1px solid ${line}; border-radius: 8px; padding: 4px; }
+QCalendarWidget#datePickerCalendar { background: ${surface}; color: ${text}; border: 0; }
+QCalendarWidget#datePickerCalendar QWidget#qt_calendar_navigationbar {
+    background: ${surface}; border: 0; border-bottom: 1px solid ${line}; min-height: 38px;
+}
+QCalendarWidget#datePickerCalendar QToolButton {
+    background: transparent; color: ${text}; border: 0; border-radius: 5px;
+    padding: 4px 6px; margin: 3px; font-weight: 600;
+}
+QCalendarWidget#datePickerCalendar QToolButton:hover { background: ${surface_alt}; }
+QCalendarWidget#datePickerCalendar QToolButton::menu-indicator { image: none; }
+QCalendarWidget#datePickerCalendar QTableView {
+    background: ${surface}; color: ${text}; border: 0; outline: 0;
+    selection-background-color: ${surface}; selection-color: ${text};
+}
+QCalendarWidget#datePickerCalendar QTableView::item { border: 0; padding: 0; }
+QCalendarWidget#datePickerCalendar QTableView::item:selected,
+QCalendarWidget#datePickerCalendar QTableView::item:focus {
+    background: ${surface}; color: ${text}; border: 0;
+}
 QPlainTextEdit#historyImportDetails {
     background: ${surface}; color: ${text}; border: 1px solid ${line}; border-radius: 4px;
     padding: 6px;
@@ -170,7 +200,7 @@ QComboBox#toolbarDropdown:focus, QPushButton#toolbarDropdown:focus {
 }
 QPushButton:disabled, QPushButton#secondary:disabled, QPushButton#themeToggle:disabled,
 QPushButton#danger:disabled, QPushButton#toolbarDropdown:disabled,
-QToolButton:disabled, QToolButton#historyCalendarButton:disabled {
+QToolButton:disabled, QToolButton#calendarDateButton:disabled {
     background: ${disabled_surface}; color: ${disabled_text};
     border: 1px solid ${disabled_border};
 }

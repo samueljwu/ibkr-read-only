@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QStyleOptionViewItem, QTableView, QToolButton, QVBoxLayout, QWidget)
 
 from app.storage.database import Database
-from app.platform.paths import default_data_dir
 from app.platform.diagnostics import configure_diagnostics, diagnostic_log_path
 from app.platform import secret_store
 from app.platform.history_status import pause_request_path, read_status, write_status
@@ -473,7 +472,10 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             zoom = 100
         self.zoom_percent = zoom if self.MIN_ZOOM <= zoom <= self.MAX_ZOOM and zoom % self.ZOOM_STEP == 0 else 100
-        self._pending_data_directory = None
+        self._move_process = None
+        self._move_status_path = None
+        self._move_progress = None
+        self._move_source_path = None
         self.log = configure_diagnostics(self.db.path, "monitor")
         self.log.info("IBKR Dashboard opened; database=%s", self.db.path)
         self.portfolio_id = 1
@@ -674,6 +676,8 @@ class MainWindow(QMainWindow):
         self.timer.start(250)
         self._encryption_poll_timer = QTimer(self)
         self._encryption_poll_timer.timeout.connect(self._poll_encryption)
+        self._move_poll_timer = QTimer(self)
+        self._move_poll_timer.timeout.connect(self._poll_database_move)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._periodic_refresh)
         self._set_refresh_interval()
@@ -1530,7 +1534,6 @@ class MainWindow(QMainWindow):
             ("cash_flex_query_id", "Cash Flex query ID", None),
             ("data_mode", "Preferred data mode", ["Live", "Frozen", "Delayed"]),
             ("refresh_seconds", "Refresh interval (seconds)", None),
-            ("data_directory", "Data directory (next launch)", None),
             ("backup_directory", "Backup directory", None),
         ]
         for key, label, options in definitions:
@@ -1546,8 +1549,16 @@ class MainWindow(QMainWindow):
             self.settings_fields[key] = widget
             target = advanced_form if key in (
                 "provider", "ib_client_id", "data_mode", "refresh_seconds",
-                "data_directory", "backup_directory") else form
+                "backup_directory") else form
             target.addRow(label, widget)
+        self.database_location = QLabel(str(self.db.path))
+        self.database_location.setTextFormat(Qt.PlainText)
+        self.database_location.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.database_location.setWordWrap(True)
+        self.database_location.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        advanced_form.addRow(QLabel("Current database"))
+        advanced_form.addRow(self.database_location)
+        advanced_form.addRow(widgets.button("Move database…", self.move_database, variant="secondary"))
         layout.addLayout(form)
         token_row = QHBoxLayout()
         self.flex_token_input = QLineEdit()
@@ -2327,19 +2338,12 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event):
-        if self._encryption_process is not None:
+        if self._encryption_process is not None or self._move_process is not None:
             event.ignore()
             return
         if not self._stop_history_import_on_close():
             event.ignore()
             QMessageBox.warning(self, "Import Data", "Could not stop the history worker. Try closing the app again.")
-            return
-        if self._pending_data_directory is not None and ((not self._sync_paused and
-                (self._sync_all_active or self._sync_all_queue)) or any(
-                process is not None and process.poll() is None for process in
-                (self._sync_process, self._analytics_process, self._cash_process))):
-            event.ignore()
-            self.statusBar().showMessage("Wait for history sync to finish before moving the database", 10000)
             return
         self.calcs_tab.save_view()
         for name, view in self.views.items():
@@ -2353,16 +2357,6 @@ class MainWindow(QMainWindow):
         self.calcs_refresh_timer.stop()
         if isinstance(self.market, IBKRMarketDataProvider):
             self.market.stop()
-        if self._pending_data_directory is not None:
-            try:
-                self.db.configure_data_directory(self._pending_data_directory)
-            except Exception as exc:
-                event.ignore()
-                self.timer.start(250)
-                self._set_refresh_interval()
-                self._start_provider()
-                QMessageBox.warning(self, "Database move failed", str(exc))
-                return
         for table in self.findChildren(ReportTable):
             table.finish_layout_persistence()
         self.db.conn.close()
@@ -2810,12 +2804,7 @@ class MainWindow(QMainWindow):
             secret_store.save_database_key(self.db.path, code)
             self.show_database_recovery_code()
             self._encryption_status_path = self.db.path.parent / f"database-encryption-{uuid4().hex}.json"
-            if isinstance(self.market, IBKRMarketDataProvider):
-                self.market.stop()
-            for timer in (self.timer, self.refresh_timer, self.lots_refresh_timer,
-                          self.calcs_refresh_timer):
-                timer.stop()
-            self.db.conn.close()
+            self._pause_for_database_worker()
             args = ["--database", str(self.db.path), "--status-file", str(self._encryption_status_path)]
             if getattr(sys, "frozen", False):
                 command = [sys.executable, "--encrypt-database", *args]
@@ -2839,12 +2828,143 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Encrypt Database", str(exc))
 
     def _resume_after_encryption(self):
-        reopened = Database(self.db.path)
+        self._resume_database_worker(self.db.path)
+
+    def _pause_for_database_worker(self):
+        if isinstance(self.market, IBKRMarketDataProvider):
+            self.market.stop()
+        for timer in (self.timer, self.refresh_timer, self.lots_refresh_timer,
+                      self.calcs_refresh_timer):
+            timer.stop()
+        self.db.conn.close()
+
+    def _resume_database_worker(self, path, *, start_services=True):
+        reopened = Database(path)
         self.db.__dict__.update(reopened.__dict__)
         self.setEnabled(True)
+        if start_services:
+            self._start_database_services()
+
+    def _start_database_services(self):
         self.timer.start(250)
         self._set_refresh_interval()
         self._start_provider()
+
+    def move_database(self):
+        if (self._move_process is not None or self._encryption_process is not None or
+                self._history_process is not None or self._sync_all_active or self._sync_all_queue or
+                any(process is not None and process.poll() is None for process in
+                    (self._sync_process, self._analytics_process, self._cash_process))):
+            QMessageBox.warning(self, "Move database", "Wait for imports and synchronization to finish.")
+            return
+        source = self.db.path
+        directory = QFileDialog.getExistingDirectory(
+            self, "Choose a parent folder for the database", str(source.parent.parent))
+        if not directory:
+            return
+        root = Path(directory).resolve()
+        if root == source.parent.parent.resolve():
+            QMessageBox.information(self, "Move database", "The database is already in this folder.")
+            return
+        if root == source.parent.resolve() or source.parent.resolve() in root.parents:
+            QMessageBox.warning(self, "Move database", "Choose a folder outside the current portfolio folder.")
+            return
+        answer = QMessageBox.question(
+            self, "Move database",
+            f"Copy the database into a new portfolio folder inside:\n{root}\n\n"
+            "The original will be kept. The app will use the verified copy when the move finishes.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        if (self._history_process is not None or self._sync_all_active or self._sync_all_queue or
+                any(process is not None and process.poll() is None for process in
+                    (self._sync_process, self._analytics_process, self._cash_process))):
+            QMessageBox.warning(self, "Move database", "Wait for imports and synchronization to finish.")
+            return
+        paused = False
+        try:
+            self.calcs_tab.save_view()
+            for table in self.findChildren(ReportTable):
+                table.finish_layout_persistence()
+            self._move_source_path = source
+            self._move_status_path = source.parent / f"database-move-{uuid4().hex}.json"
+            self._pause_for_database_worker()
+            paused = True
+            args = ["--database", str(source), "--directory", str(root),
+                    "--status-file", str(self._move_status_path)]
+            if getattr(sys, "frozen", False):
+                command = [sys.executable, "--move-database", *args]
+                workdir = source.parent
+            else:
+                command = [sys.executable, "-m", "scripts.move_database", *args]
+                workdir = Path(__file__).resolve().parent.parent
+            self._move_process = subprocess.Popen(
+                command, cwd=workdir, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.setEnabled(False)
+            self._move_progress = QProgressDialog("Copying and verifying database…", None, 0, 0)
+            self._move_progress.setWindowTitle("Move database")
+            self._move_progress.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+            self._move_progress.setWindowModality(Qt.ApplicationModal)
+            self._move_progress.show()
+            self._move_poll_timer.start(250)
+        except Exception as exc:
+            self._move_process = None
+            if paused:
+                self._resume_database_worker(source)
+            QMessageBox.warning(self, "Move database", str(exc))
+
+    def _poll_database_move(self):
+        if self._move_process is None or self._move_process.poll() is None:
+            return
+        code = self._move_process.returncode
+        self._move_poll_timer.stop()
+        self._move_process = None
+        if self._move_progress is not None:
+            self._move_progress.close()
+            self._move_progress = None
+        try:
+            result = json.loads(self._move_status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = {"state": "failed"}
+        try:
+            self._move_status_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        completed = (code == 0 and result.get("state") == "completed" and
+                     isinstance(result.get("database"), str))
+        path = Path(result["database"]) if completed else self._move_source_path
+        try:
+            self._resume_database_worker(path, start_services=not completed)
+        except Exception:
+            QMessageBox.critical(self, "Move database", "The portfolio could not be reopened. "
+                                 "Both database files were preserved; restart the app to recover.")
+            QApplication.quit()
+            return
+        if completed:
+            self.database_location.setText(str(self.db.path))
+            self.log = configure_diagnostics(self.db.path, "monitor")
+            answer = QMessageBox.question(
+                self, "Database moved",
+                "The app is now using:\n" + str(self.db.path) +
+                "\n\nThe original database remains at:\n" + str(self._move_source_path) +
+                "\n\nRestart the app now?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer == QMessageBox.Yes:
+                try:
+                    command = ([sys.executable] if getattr(sys, "frozen", False) else
+                               [sys.executable, str(Path(__file__).resolve().parent.parent / "main.py")])
+                    subprocess.Popen(command, cwd=self.db.path.parent)
+                    self.settings_dialog.close()
+                    self.close()
+                except OSError as exc:
+                    self._start_database_services()
+                    QMessageBox.warning(self, "Restart failed", str(exc))
+            else:
+                self._start_database_services()
+        else:
+            QMessageBox.warning(self, "Database move failed",
+                                "The original database remains in use. Check the destination folder and try again.")
 
     def _poll_encryption(self):
         if self._encryption_process is None or self._encryption_process.poll() is None:
@@ -2899,22 +3019,16 @@ class MainWindow(QMainWindow):
             if int(values["ib_port"]) <= 0 or int(values["ib_client_id"]) < 0 or int(values["refresh_seconds"]) < 1:
                 raise ValueError("Port, client ID, and refresh interval must be valid positive numbers")
             self.db.validate_account_change(values["ib_account_id"])
-            directory_changed = values["data_directory"] != self.db.setting("data_directory")
-            target_dir = Path(values["data_directory"]) if values["data_directory"] else default_data_dir()
-            pending_move = target_dir.resolve() != self.db.path.parent.parent.resolve()
             for key, value in values.items():
                 self.db.set_setting(key, value)
             self._refresh_history_import_coverage()
             self._refresh_flex_token_status()
-            self._pending_data_directory = values["data_directory"] if pending_move else None
             self.use_ibkr_button.setVisible(values["provider"] != "IBKR")
             self._set_refresh_interval()
             self._start_provider()
             self._queue_configured_syncs()
             self._update_sync_button()
             self._refresh_models()
-            if directory_changed and pending_move:
-                self.statusBar().showMessage("Database will move when the app closes; restart afterward", 10000)
         except Exception as exc:
             QMessageBox.warning(self, "Settings rejected", str(exc))
 
