@@ -21,7 +21,8 @@ COLORS = {
         "grid_warning_text": "#9b4917",
         "disabled_surface": "#e8ecef", "disabled_text": "#87939d",
         "disabled_border": "#cfd7dd",
-        "calendar_range": "#eef1f3", "calendar_selected": "#343a40",
+        "calendar_range": "#eef1f3", "calendar_selected": "#d9edf6",
+        "calendar_selected_text": "#15374a",
     },
     "dark": {
         "canvas": "#0b0b0d", "surface": "#171719", "surface_alt": "#222225",
@@ -40,6 +41,7 @@ COLORS = {
         "disabled_surface": "#303034", "disabled_text": "#85858d",
         "disabled_border": "#4a4a50",
         "calendar_range": "#29292d", "calendar_selected": "#d4d4d8",
+        "calendar_selected_text": "#0b0b0d",
     },
 }
 
@@ -135,6 +137,11 @@ QCalendarWidget#datePickerCalendar QToolButton {
 }
 QCalendarWidget#datePickerCalendar QToolButton:hover { background: ${surface_alt}; }
 QCalendarWidget#datePickerCalendar QToolButton::menu-indicator { image: none; }
+QCalendarWidget#datePickerCalendar QSpinBox#qt_calendar_yearedit {
+    background: ${surface}; color: ${text}; border: 1px solid ${line};
+    border-radius: 4px; selection-background-color: ${selection};
+    selection-color: ${selection_text};
+}
 QCalendarWidget#datePickerCalendar QTableView {
     background: ${surface}; color: ${text}; border: 0; outline: 0;
     selection-background-color: ${surface}; selection-color: ${text};

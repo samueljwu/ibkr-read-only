@@ -6,6 +6,8 @@ from PySide6.QtSvg import QSvgRenderer
 
 
 _PATHS = {
+    "chevron_left": '<path d="m15 18-6-6 6-6"/>',
+    "chevron_right": '<path d="m9 6 6 6-6 6"/>',
     "sync": ('<path d="M3 12a9 9 0 0 1 15.36-6.36L21 8"/>'
              '<path d="M21 3v5h-5"/>'
              '<path d="M21 12a9 9 0 0 1-15.36 6.36L3 16"/>'

@@ -1,9 +1,9 @@
 """Reusable ISO date entry with a keyboard-friendly calendar grid."""
 
 from PySide6.QtCore import QDate, QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPen, QTextCharFormat
-from PySide6.QtWidgets import (QCalendarWidget, QHBoxLayout, QLineEdit,
-                               QMenu, QToolButton, QWidget, QWidgetAction)
+from PySide6.QtGui import QColor, QFont, QPen, QTextCharFormat
+from PySide6.QtWidgets import (QAbstractSpinBox, QCalendarWidget, QHBoxLayout, QLineEdit,
+                               QMenu, QSpinBox, QToolButton, QWidget, QWidgetAction)
 
 from app.views.ui_theme import COLORS
 
@@ -29,14 +29,14 @@ class DatePickerCalendar(QCalendarWidget):
         for weekday in (Qt.Monday, Qt.Tuesday, Qt.Wednesday, Qt.Thursday,
                         Qt.Friday, Qt.Saturday, Qt.Sunday):
             self.setWeekdayTextFormat(weekday, header)
-        for name, label in (("qt_calendar_prevmonth", "‹"),
-                            ("qt_calendar_nextmonth", "›")):
+        for name, direction in (("qt_calendar_prevmonth", Qt.LeftArrow),
+                                ("qt_calendar_nextmonth", Qt.RightArrow)):
             button = self.findChild(QToolButton, name)
             if button is not None:
-                button.setArrowType(Qt.NoArrow)
-                button.setIcon(QIcon())
-                button.setText(label)
-                button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+                button.setArrowType(direction)
+        year_editor = self.findChild(QSpinBox, "qt_calendar_yearedit")
+        if year_editor is not None:
+            year_editor.setButtonSymbols(QAbstractSpinBox.NoButtons)
 
     def setRange(self, first, last):
         self.range_start = first if first.isValid() and last.isValid() and first <= last else None
@@ -61,7 +61,7 @@ class DatePickerCalendar(QCalendarWidget):
             painter.drawRoundedRect(tile.adjusted(0, 0, -1, -1), 6, 6)
         available = self.minimumDate() <= day <= self.maximumDate()
         current_month = day.year() == self.yearShown() and day.month() == self.monthShown()
-        painter.setPen(QColor(colors["surface"] if selected else
+        painter.setPen(QColor(colors["calendar_selected_text"] if selected else
                                colors["text"] if available and current_month else colors["muted"]))
         painter.drawText(rect, Qt.AlignCenter, str(day.day()))
         painter.restore()

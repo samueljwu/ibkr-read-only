@@ -7,7 +7,9 @@ import math
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
-from app.views.calendar_ui import CalendarGrid, CalendarToolbar, DecimalPlacesControl
+from app.views.calendar_ui import (CalendarGrid, CalendarNavigation, CalendarToolbar,
+                                   DecimalPlacesControl)
+from app.views.widgets import hint
 
 
 def _signed_money(value, places=2):
@@ -29,7 +31,7 @@ def _signed_percent(value, places=2):
 class PnlCalendar(QWidget):
     """Browse daily or aggregated P&L within the selected analytics range."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, inline_toolbar=True):
         super().__init__(parent)
         self._first = self._last = self._anchor = date.today()
         self._rows = {}
@@ -40,10 +42,11 @@ class PnlCalendar(QWidget):
         self.toolbar = CalendarToolbar(("Daily", "Weekly", "Monthly", "Quarterly", "Yearly"))
         self.interval_combo = self.toolbar.interval_combo
         self.interval_combo.currentIndexChanged.connect(self._render)
-        self.previous_button = self.toolbar.previous_button
+        self.navigator = CalendarNavigation()
+        self.previous_button = self.navigator.previous_button
         self.previous_button.clicked.connect(lambda: self._change_page(-1))
-        self.period_label = self.toolbar.period_label
-        self.next_button = self.toolbar.next_button
+        self.period_label = self.navigator.period_label
+        self.next_button = self.navigator.next_button
         self.next_button.clicked.connect(lambda: self._change_page(1))
         self.usd_decimal_control = DecimalPlacesControl("USD")
         self.percent_decimal_control = DecimalPlacesControl("P&L %")
@@ -51,14 +54,15 @@ class PnlCalendar(QWidget):
         self.percent_decimals = self.percent_decimal_control
         self.toolbar.add_control(self.usd_decimal_control)
         self.toolbar.add_control(self.percent_decimal_control)
-        layout.addWidget(self.toolbar)
+        if inline_toolbar:
+            layout.addWidget(self.toolbar)
         self.usd_decimals.valueChanged.connect(self._render)
         self.percent_decimals.valueChanged.connect(self._render)
-        self.summary_label = QLabel()
-        self.summary_label.setObjectName("hint")
+        self.summary_label = hint("")
         self.summary_label.setAlignment(Qt.AlignCenter)
         self.summary_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.toolbar.add_navigation_detail(self.summary_label)
+        self.navigator.add_detail(self.summary_label)
+        layout.addWidget(self.navigator)
         self.note_label = QLabel()
         self.note_label.setObjectName("hint")
         self.note_label.setWordWrap(True)
@@ -73,6 +77,9 @@ class PnlCalendar(QWidget):
         self.period_cells = self.period_grid.cells
         self.grids.addWidget(self.period_grid)
         layout.addWidget(self.grids, 1)
+
+    def set_theme(self, theme):
+        self.navigator.set_theme(theme)
 
     def set_data(self, rows, first, last, complete):
         self._rows = {row["day"]: row for row in rows}
@@ -141,7 +148,7 @@ class PnlCalendar(QWidget):
             return
         interval = self.interval_combo.currentText()
         page = self._page_start(self._anchor)
-        self.toolbar.set_period("", page > self._page_start(self._first),
+        self.navigator.set_period("", page > self._page_start(self._first),
                                 page < self._page_start(self._last))
         self.grids.setCurrentIndex(0 if interval == "Daily" else 1)
         if interval == "Daily":

@@ -1,21 +1,22 @@
 """Reusable interval controls and adaptive calendar grids."""
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel,
-                               QSizePolicy, QToolButton, QVBoxLayout, QWidget)
+                               QSizePolicy, QWidget)
 
-from app.views.ui_theme import style_toolbar_dropdown
+from app.views.action_icons import action_icon
+from app.views.ui_theme import COLORS, style_toolbar_dropdown
+from app.views.widgets import button, section_title
 
 
 class CalendarToolbar(QWidget):
+    """Interval and optional filters on one row."""
+
     def __init__(self, intervals, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        row = QHBoxLayout()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
-        layout.addLayout(row)
         self._row = row
         row.addWidget(QLabel("Interval"))
         self.interval_combo = style_toolbar_dropdown(QComboBox())
@@ -24,38 +25,52 @@ class CalendarToolbar(QWidget):
         row.addWidget(self.interval_combo)
         self._next_control_index = row.count()
         row.addStretch()
-        navigation = QHBoxLayout()
-        navigation.setSpacing(8)
-        layout.addLayout(navigation)
-        self._navigation = navigation
-        self.previous_button = QToolButton()
-        self.previous_button.setText("‹")
-        self.previous_button.setToolTip("Previous period")
-        self.previous_button.setFixedWidth(30)
-        navigation.addWidget(self.previous_button)
-        self.period_label = QLabel()
-        self.period_label.setObjectName("sectionTitle")
-        self.period_label.setAlignment(Qt.AlignCenter)
-        navigation.addWidget(self.period_label)
-        self.next_button = QToolButton()
-        self.next_button.setText("›")
-        self.next_button.setToolTip("Next period")
-        self.next_button.setFixedWidth(30)
-        navigation.addWidget(self.next_button)
 
     def add_control(self, widget):
         """Place another filter beside the interval selector."""
         self._row.insertWidget(self._next_control_index, widget)
         self._next_control_index += 1
 
-    def add_navigation_detail(self, widget):
+
+class CalendarNavigation(QWidget):
+    """Theme-aware period navigation with room for a summary."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self._row = row
+        self.previous_button = button("")
+        self.previous_button.setToolTip("Previous period")
+        self.previous_button.setAccessibleName("Previous period")
+        self.previous_button.setFixedSize(32, 32)
+        self.previous_button.setIconSize(QSize(16, 16))
+        row.addWidget(self.previous_button)
+        self.period_label = section_title("")
+        self.period_label.setAlignment(Qt.AlignCenter)
+        row.addWidget(self.period_label)
+        self.next_button = button("")
+        self.next_button.setToolTip("Next period")
+        self.next_button.setAccessibleName("Next period")
+        self.next_button.setFixedSize(32, 32)
+        self.next_button.setIconSize(QSize(16, 16))
+        row.addWidget(self.next_button)
+        self.set_theme("light")
+
+    def add_detail(self, widget):
         """Show contextual information beside the current period."""
-        self._navigation.addWidget(widget, 1)
+        self._row.addWidget(widget, 1)
 
     def set_period(self, label, can_previous, can_next):
         self.period_label.setText(label)
         self.previous_button.setEnabled(can_previous)
         self.next_button.setEnabled(can_next)
+
+    def set_theme(self, theme):
+        color = COLORS[theme]["text"]
+        self.previous_button.setIcon(action_icon("chevron_left", color))
+        self.next_button.setIcon(action_icon("chevron_right", color))
 
 
 class DecimalPlacesControl(QWidget):

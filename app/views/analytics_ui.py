@@ -639,6 +639,7 @@ class AnalyticsTab(QWidget):
 
     def _pnl_view_changed(self, index):
         self.pnl_views.setCurrentIndex(index)
+        self.pnl_calendar.toolbar.setVisible(index == 1)
         if self.sections.currentWidget() is self.pnl_page:
             self._update_section_controls()
 
@@ -830,11 +831,16 @@ class AnalyticsTab(QWidget):
                                       "Daily adjusted P&L"), "analytics_pnl_decimals",
                                      {1: (2, "usd"), 2: (2, "usd"), 3: (2, "usd"),
                                       4: (2, "percent"), 5: (2, "usd"), 6: (2, "usd")})
+        self.pnl_calendar = PnlCalendar(inline_toolbar=False)
         view_controls = QHBoxLayout()
+        view_controls.setSpacing(TOOLBAR_ITEM_SPACING)
         view_controls.addWidget(QLabel("View"))
         self.pnl_view_combo = style_toolbar_dropdown(QComboBox())
         self.pnl_view_combo.addItems(("Chart and table", "Calendar"))
         view_controls.addWidget(self.pnl_view_combo)
+        view_controls.addSpacing(TOOLBAR_GROUP_SPACING - TOOLBAR_ITEM_SPACING)
+        view_controls.addWidget(self.pnl_calendar.toolbar)
+        self.pnl_calendar.toolbar.hide()
         view_controls.addStretch()
         layout.addLayout(view_controls)
         self.pnl_views = QStackedWidget()
@@ -847,7 +853,6 @@ class AnalyticsTab(QWidget):
         self.pnl_splitter, self.pnl_layout_combo = self._split_view(
             chart_layout, self.pnl_chart, self.pnl_table, self.pnl_navigator,
             "analytics_pnl_splitter", self.pnl_hint)
-        self.pnl_calendar = PnlCalendar()
         for name, control in (("usd", self.pnl_calendar.usd_decimals),
                               ("percent", self.pnl_calendar.percent_decimals)):
             key = f"analytics_pnl_calendar_{name}_decimals_{self.portfolio_id}"
@@ -1557,6 +1562,7 @@ class AnalyticsTab(QWidget):
 
     def set_theme(self, theme):
         self.palette_name = theme
+        self.pnl_calendar.set_theme(theme)
         self.levels_page.set_theme(theme)
         self.exposure_page.set_theme(theme)
         self.return_page.set_theme(theme)

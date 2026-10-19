@@ -28,13 +28,22 @@ def test_pnl_calendar_intervals_use_covered_days_and_selected_range():
     app.processEvents()
     assert calendar.minimumSizeHint().width() <= 750
     toolbar = calendar.toolbar
+    navigator = calendar.navigator
+    assert navigator.previous_button.text() == ""
+    assert navigator.next_button.text() == ""
+    assert navigator.previous_button.objectName() == "secondary"
+    assert navigator.next_button.objectName() == "secondary"
+    assert navigator.previous_button.accessibleName() == "Previous period"
+    assert navigator.next_button.accessibleName() == "Next period"
+    assert not navigator.previous_button.icon().isNull()
+    assert not navigator.next_button.icon().isNull()
     assert calendar.usd_decimals.parentWidget() is toolbar
     assert calendar.percent_decimals.parentWidget() is toolbar
     assert toolbar.interval_combo.geometry().right() < calendar.usd_decimals.geometry().left()
     assert calendar.usd_decimals.geometry().right() < calendar.percent_decimals.geometry().left()
     assert calendar.usd_decimals.caption.text() == "USD decimals"
     assert calendar.percent_decimals.caption.text() == "P&L % decimals"
-    assert toolbar.previous_button.geometry().center().y() > calendar.percent_decimals.geometry().center().y()
+    assert navigator.geometry().center().y() > toolbar.geometry().center().y()
     assert abs(toolbar.interval_combo.geometry().center().y() -
                calendar.percent_decimals.geometry().center().y()) < 5
     rows = [
@@ -71,6 +80,27 @@ def test_pnl_calendar_intervals_use_covered_days_and_selected_range():
     assert "No covered daily P&L" in calendar.summary_label.text()
     assert "$8.00" not in calendar.period_cells[0].text()
     assert "0.29%" not in calendar.period_cells[0].text()
+    calendar.close()
+
+
+def test_pnl_calendar_daily_arrows_move_one_month():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from app.views.pnl_calendar import PnlCalendar
+
+    app = QApplication.instance() or QApplication([])
+    calendar = PnlCalendar()
+    calendar.set_data([], date(2026, 7, 1), date(2026, 9, 30), True)
+    assert calendar.period_label.text() == "September 2026"
+    assert not calendar.next_button.isEnabled()
+    calendar.previous_button.click()
+    assert calendar.period_label.text() == "August 2026"
+    calendar.previous_button.click()
+    assert calendar.period_label.text() == "July 2026"
+    assert not calendar.previous_button.isEnabled()
+    calendar.next_button.click()
+    assert calendar.period_label.text() == "August 2026"
     calendar.close()
 
 
@@ -111,6 +141,15 @@ def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeyp
         tab._set_dates(date(2026, 1, 2), date(2026, 1, 5))
         tab.refresh()
         tab.pnl_view_combo.setCurrentText("Calendar")
+        window.tabs.setCurrentWidget(tab)
+        window.resize(1400, 900)
+        window.show()
+        app.processEvents()
+        assert not tab.pnl_calendar.toolbar.isHidden()
+        control_y = lambda widget: widget.mapTo(tab.pnl_page, widget.rect().center()).y()
+        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.interval_combo)) < 5
+        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.usd_decimals.dropdown)) < 5
+        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.percent_decimals.dropdown)) < 5
         assert tab.controls_panel.isHidden()
         assert tab.pnl_summary_panel.isHidden()
         assert tab.range_combo.isHidden()
@@ -126,6 +165,7 @@ def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeyp
         assert "Net +$12 · P&L %: +1.200%" in tab.pnl_calendar.summary_label.text()
         state = tab.view_state()
         tab.pnl_view_combo.setCurrentText("Chart and table")
+        assert tab.pnl_calendar.toolbar.isHidden()
         assert not tab.controls_panel.isHidden()
         assert not tab.pnl_summary_panel.isHidden()
         assert not tab.range_combo.isHidden()
