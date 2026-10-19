@@ -128,11 +128,12 @@ python main.py
     </td>
   </tr>
   <tr>
-    <td align="center" valign="top" colspan="2">
+    <td align="center" valign="top" width="50%">
       <strong>Buy / sell levels</strong><br>
       <a href="docs/images/demo-analytics-levels.png">
-        <img src="docs/images/demo-analytics-levels.png" width="50%">
+        <img src="docs/images/demo-analytics-levels.png" alt="Buy and sell markers on synthetic stock prices" width="100%">
       </a>
     </td>
+    <td width="50%"></td>
   </tr>
 </table>

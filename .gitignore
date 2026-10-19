@@ -32,4 +32,5 @@ venv/
 .venv-release/
 *.dmg
 *.exe
+scripts/create_demo.py
 AGENTS.md
