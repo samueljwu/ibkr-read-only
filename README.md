@@ -18,6 +18,10 @@ also provides ZIP artifacts from individual build runs. To install:
 - **macOS (Apple silicon):** open `IBKRDashboard-<version>-macos-arm64.dmg` and drag the app to Applications.
 
 Python is bundled. Windows builds are unsigned; macOS builds are unsigned and not notarized.
+For later releases, use **Help → Check for updates…** in the installed app. It
+downloads the matching release installer, verifies its SHA-256 digest, and closes
+the app before installation. On macOS, a protected installation folder opens the
+verified DMG for a manual copy instead.
 
 ## Connect IBKR
 

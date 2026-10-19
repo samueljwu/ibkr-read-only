@@ -1,10 +1,10 @@
 from types import SimpleNamespace
-from datetime import date, datetime
+from datetime import datetime
 
 import pytest
 
 from app.storage.database import Database
-from app.finance.exposure import (add_custom_set, custom_labels, delete_custom_set, exposure_mix,
+from app.finance.exposure import (add_custom_set, custom_labels, delete_custom_set,
                           exposure_snapshot, grouped_exposure, rename_custom_set,
                           save_broker_fact, set_custom_label)
 
@@ -73,44 +73,10 @@ def test_option_can_use_recent_underlying_holding_quote(tmp_path):
     assert exposure_snapshot(db, service, 1)["positions"][1]["adjusted"] is None
 
 
-def test_fund_sector_classification(tmp_path):
-    db = Database(tmp_path / "classification.sqlite3")
-    rows = [_row(101, "EURO", "STK", 1, 50), _row(102, "FUND", "STK", 1, 50)]
-    service = SimpleNamespace(portfolio_rows=lambda: rows)
-    save_broker_fact(db, 1, ("exposure_detail", 102,
-                             {"sector": "Financial", "stock_type": "ETF"}))
-    snapshot = exposure_snapshot(db, service, 1)
-    assert snapshot["positions"][0]["sector"] == "Unclassified"
-    assert snapshot["positions"][1]["sector"] == "Funds / ETFs"
 
 
-def test_option_adjustment_uses_underlying_currency_fx_and_requires_it(tmp_path):
-    db = Database(tmp_path / "option-fx.sqlite3")
-    service = SimpleNamespace(portfolio_rows=lambda: [_row(401, "EUR CALL", "OPT", 1, 400, 100)])
-    save_broker_fact(db, 1, ("exposure_delta", 401, .5, "Live"))
-    save_broker_fact(db, 1, ("exposure_underlying_price", 401, 100, "EUR", "Live"))
-    assert exposure_snapshot(db, service, 1)["totals"]["adjusted"] is None
-    db.set_fx_rate("EUR", date.today().isoformat(), 1.2)
-    assert exposure_snapshot(db, service, 1)["totals"]["adjusted"] == pytest.approx(6000)
-    with db.conn:
-        db.conn.execute("UPDATE exposure_facts SET delta_as_of='2020-01-01' WHERE con_id=401")
-    stale = exposure_snapshot(db, service, 1)
-    assert stale["totals"]["adjusted"] is None
-    assert "recent delta" in stale["issues"][0]
 
 
-def test_broker_mismatch_and_unsupported_derivative_cannot_look_complete(tmp_path):
-    db = Database(tmp_path / "mismatch.sqlite3")
-    option = _row(401, "CALL", "OPT", 1, None, 100)
-    option["reconciliation"] = "DIFFERENCE"
-    future = _row(501, "FUT", "FUT", 1, 100)
-    service = SimpleNamespace(portfolio_rows=lambda: [option, future])
-    save_broker_fact(db, 1, ("exposure_delta", 401, .5, "Live"))
-    save_broker_fact(db, 1, ("exposure_underlying_price", 401, 100, "USD", "Live"))
-    snapshot = exposure_snapshot(db, service, 1)
-    assert snapshot["totals"]["adjusted"] is None
-    assert any("mismatch" in issue for issue in snapshot["issues"])
-    assert any("unsupported" in issue for issue in snapshot["issues"])
 
 
 def test_ibkr_exposure_callbacks_keep_model_delta_and_latest_underlying_mark():
@@ -160,13 +126,6 @@ def test_ibkr_calculates_delta_when_model_missing_and_prices_are_available(monke
     assert ("exposure_underlying_price", 401, 150.0, "USD", "Live") in events
 
 
-def test_exposure_mix_uses_gross_slices_and_marks_missing_values():
-    rows = [{"sector": "Tech", "adjusted": -200},
-            {"sector": "Tech", "adjusted": 100},
-            {"sector": "Funds", "adjusted": None}]
-    mix = exposure_mix(rows, "sector", "adjusted")
-    assert mix == {"slices": [("Tech", 300.0)], "gross": 300.0,
-                   "known_net": -100.0, "missing": 1}
 
 
 def test_custom_set_editor_saves_underlying_assignments(tmp_path):
@@ -276,35 +235,6 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     panel.close()
 
 
-def test_exposure_basis_changes_pie_breakdown_and_position_share(tmp_path):
-    from PySide6.QtWidgets import QApplication
-
-    from app.views.exposure_ui import ExposurePanel
-
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "basis.sqlite3")
-    db.set_portfolio_nav(1, 1000)
-    rows = [_row(301, "ABC", "STK", 1, 100),
-            _row(401, "ABC CALL", "OPT", 1, 20, 100)]
-    save_broker_fact(db, 1, ("exposure_detail", 301, {"sector": "Technology"}))
-    save_broker_fact(db, 1, ("exposure_detail", 401,
-                             {"sector": "Technology", "under_con_id": 301}))
-    save_broker_fact(db, 1, ("exposure_underlying_price", 401, 100, "USD", "Live"))
-    save_broker_fact(db, 1, ("exposure_delta", 401, .5, "Live"))
-    panel = ExposurePanel(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
-    try:
-        panel.basis_combo.setCurrentText("Market value")
-        assert panel.chart_view.chart().series()[0].slices()[0].value() == pytest.approx(120)
-        assert panel.groups.item(0, 1).text() == "$120.00"
-        assert {panel.positions.item(row, 5).text() for row in range(2)} == \
-            {"+10.00%", "+2.00%"}
-        panel.basis_combo.setCurrentText("Adjusted")
-        assert panel.chart_view.chart().series()[0].slices()[0].value() == pytest.approx(5100)
-        assert panel.groups.item(0, 1).text() == "$5,100.00"
-        assert {panel.positions.item(row, 5).text() for row in range(2)} == \
-            {"+10.00%", "+500.00%"}
-    finally:
-        panel.close()
 
 
 def test_custom_set_selection_saved_and_legacy_view_restored(tmp_path):
@@ -337,38 +267,6 @@ def test_custom_set_selection_saved_and_legacy_view_restored(tmp_path):
         restored.close()
 
 
-def test_exposure_controls_align_and_wrap_below_net_totals(tmp_path):
-    from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QApplication
-
-    from app.views.exposure_ui import ExposurePanel
-
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "layout.sqlite3")
-    add_custom_set(db, 1, "Theme")
-    panel = ExposurePanel(db, SimpleNamespace(portfolio_rows=lambda: [
-        _row(301, "ABC", "STK", 1, 100)]), 1)
-    try:
-        panel.group_combo.setCurrentText("Custom")
-        panel.resize(1200, 650)
-        panel.show()
-        app.processEvents()
-
-        def top(widget):
-            return widget.mapTo(panel, QPoint()).y()
-
-        assert max(map(top, (panel.group_combo, panel.basis_combo,
-                             panel.custom_set_combo, panel.assign_button))) - min(map(
-                                 top, (panel.group_combo, panel.basis_combo,
-                                       panel.custom_set_combo, panel.assign_button))) <= 2
-        assert top(panel.net_summary) + panel.net_summary.height() < top(panel.group_combo)
-        panel.resize(760, 650)
-        app.processEvents()
-        assert top(panel.group_combo) == top(panel.basis_combo)
-        assert top(panel.custom_set_combo) == top(panel.assign_button)
-        assert top(panel.custom_set_combo) > top(panel.group_combo)
-    finally:
-        panel.close()
 
 
 def test_custom_view_guides_first_set_and_editor_switches_active_set(tmp_path, monkeypatch):

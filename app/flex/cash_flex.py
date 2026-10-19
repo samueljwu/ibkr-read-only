@@ -167,18 +167,22 @@ def cash_import_windows(db, account_id, first, last, *, portfolio_id=1,
             result.append((cursor.isoformat(), stop.isoformat()))
             cursor = stop + timedelta(days=1)
 
-    previous_existing = False
     for start, end in existing:
         if result and start <= result[-1][1]:
-            raise FlexValidationError("Needs review: existing Cash periods overlap")
+            if (date.fromisoformat(max(end, result[-1][1])) -
+                    date.fromisoformat(result[-1][0])).days >= days:
+                raise FlexValidationError(
+                    "Needs review: overlapping Cash periods exceed the Flex date limit")
+            result[-1] = (result[-1][0], max(end, result[-1][1]))
+            cursor = date.fromisoformat(result[-1][1]) + timedelta(days=1)
+            continue
         had_gap = cursor < date.fromisoformat(start)
         gaps(date.fromisoformat(start) - timedelta(days=1))
-        if (previous_existing and not had_gap and result and
+        if (not had_gap and result and
                 (date.fromisoformat(end) - date.fromisoformat(result[-1][0])).days < days):
             result[-1] = (result[-1][0], end)
         else:
             result.append((start, end))
-        previous_existing = True
         cursor = date.fromisoformat(end) + timedelta(days=1)
     gaps(through)
     return result

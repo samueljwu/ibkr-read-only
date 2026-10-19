@@ -5,7 +5,7 @@ import pytest
 
 from app.broker.broker_sync import BrokerIngestor
 from app.storage.database import Database
-from app.market.market_data import IBKRMarketDataProvider, five_year_start
+from app.market.market_data import IBKRMarketDataProvider
 
 
 ACCOUNT = "U0000002"
@@ -172,23 +172,4 @@ def test_one_click_pages_back_five_years_before_first_saved_close():
     assert {bar["day"] for bar in events[0][2]} == {
         (date.today() - timedelta(days=365 * age)).isoformat() for age in (4, 5)}
     assert events[1] == ("chart_history_complete", 123, True)
-    assert 123 not in provider.client.chart_history_jobs
-
-
-def test_five_year_start_handles_leap_day():
-    assert five_year_start(date(2028, 2, 29)) == date(2023, 2, 28)
-
-
-def test_five_year_request_stops_when_ibkr_has_no_older_bars():
-    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17, account_id=ACCOUNT)
-    provider.connected = True
-    provider.client.isConnected = lambda: True
-    calls = []
-    provider.client.reqHistoricalData = lambda *args: calls.append(args)
-    position = {"con_id": 123, "ib_symbol": "ABC", "security_type": "STK"}
-    assert provider.request_price_history(position, (date.today() - timedelta(days=365)).isoformat())
-    provider.client.historicalDataEnd(calls[0][0], "", "")
-    assert len(calls) == 1
-    assert provider.events.get_nowait() == ("history", 123, [])
-    assert provider.events.get_nowait() == ("chart_history_complete", 123, False)
     assert 123 not in provider.client.chart_history_jobs

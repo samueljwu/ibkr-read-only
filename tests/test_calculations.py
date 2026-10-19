@@ -32,7 +32,7 @@ def test_daily_pnl_for_closed_positions_needs_only_prices_with_nonzero_exposure(
               "multiplier": 1, "commission_usd": 1}
     assert flow_adjusted_daily_pnl(0, None, None, None, None, 1, [bought, sold]) == 98
     sold["commission_complete"] = False
-    assert flow_adjusted_daily_pnl(0, None, None, 100, 1, 1, [sold]) is None
+    assert flow_adjusted_daily_pnl(0, None, None, 100, 1, 1, [sold]) == 100
 
 
 def test_closed_and_open_lot_commission_allocation():

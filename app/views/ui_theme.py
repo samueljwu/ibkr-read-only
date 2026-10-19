@@ -65,6 +65,11 @@ def style_toolbar_dropdown(widget):
     return widget
 
 
+def apply_widget_theme(widget, theme, zoom_percent=100):
+    """Apply the shared stylesheet to a standalone window."""
+    widget.setStyleSheet(stylesheet(theme, zoom_percent))
+
+
 STYLESHEET = Template("""
 QMainWindow, QWidget#central, QWidget#settingsPage, QWidget#helpPage, QWidget#calcsPage,
 QWidget#analyticsContent, QWidget#analyticsPage, QWidget#analyticsSection,
@@ -80,13 +85,19 @@ QLabel#helpHeading { color: ${text}; font-size: 18px; font-weight: 600; }
 QLabel#helpSection { color: ${text}; font-size: 14px; font-weight: 600; }
 QLabel#helpKey { color: ${accent}; font-weight: 600; }
 QFrame#helpDivider { background: ${line}; border: 0; }
-QListWidget#helpNavigation {
+QListWidget#helpNavigation, QListWidget#portfolioList {
     background: ${surface}; color: ${text}; border: 1px solid ${line};
     border-radius: 6px; outline: 0;
 }
-QListWidget#helpNavigation::item { padding: 9px 10px; margin: 2px; border-radius: 4px; }
-QListWidget#helpNavigation::item:selected { background: ${selection}; color: ${selection_text}; }
-QListWidget#helpNavigation::item:hover:!selected { background: ${accent_soft}; }
+QListWidget#helpNavigation::item, QListWidget#portfolioList::item {
+    padding: 9px 10px; margin: 2px; border-radius: 4px;
+}
+QListWidget#helpNavigation::item:selected, QListWidget#portfolioList::item:selected {
+    background: ${selection}; color: ${selection_text};
+}
+QListWidget#helpNavigation::item:hover:!selected,
+QListWidget#portfolioList::item:hover:!selected { background: ${accent_soft}; }
+QListWidget#portfolioList::item:disabled { color: ${disabled_text}; }
 QLabel#heading { color: ${text}; font-size: 19px; font-weight: 650; }
 QLabel#sectionTitle { color: ${text}; font-size: 14px; font-weight: 600; }
 QLabel#fieldLabel { color: ${muted}; font-size: 12px; }

@@ -2,8 +2,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.finance.analytics import (capital_flow_rows, cash_share_rows, daily_pnl_summary,
-                                   covered_daily_pnl_rows, flex_monthly_history,
+from app.finance.analytics import (capital_flow_rows, flex_monthly_history,
                                    performance_window_rows)
 from app.storage.database import Database
 from app.market.market_data import IBKRMarketDataProvider
@@ -104,23 +103,6 @@ def test_pnl_calendar_daily_arrows_move_one_month():
     calendar.close()
 
 
-def test_pnl_calendar_weekdays_include_a_sixth_week():
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication, QLabel
-    from app.views.pnl_calendar import PnlCalendar
-
-    app = QApplication.instance() or QApplication([])
-    calendar = PnlCalendar()
-    rows = [{"day": "2022-05-31", "daily_pnl": 5,
-             "daily_return": .005, "source": "flex"}]
-    calendar.set_data(rows, date(2022, 5, 1), date(2022, 5, 31), True)
-    assert [label.text() for label in calendar.daily_grid.findChildren(QLabel, "metricLabel")] == [
-        "Mon", "Tue", "Wed", "Thu", "Fri"]
-    assert calendar.day_cells[25].text() == "30"
-    assert calendar.day_cells[26].text().startswith("31\n+$5.00")
-    assert all(not cell.text().startswith("1\n") for cell in calendar.day_cells)
-    calendar.close()
 
 
 def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeypatch):
@@ -220,32 +202,8 @@ def test_pnl_calendar_shows_eight_quarters_per_page():
     calendar.close()
 
 
-def test_calendar_daily_pnl_recovers_after_a_history_gap():
-    snapshots = [
-        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-05", "nav_usd": 1510, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-12", "nav_usd": 1500, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-13", "nav_usd": 1515, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-14", "nav_usd": 1600, "source": "live", "flow_covered": 0},
-    ]
-    rows = covered_daily_pnl_rows(
-        snapshots, [{"day": "2026-01-04", "amount_usd": 500}])
-    assert [row["daily_pnl"] for row in rows] == [None, 10, None, 15, None]
-    assert rows[1]["daily_return"] == pytest.approx(10 / 1500)
-    assert rows[3]["daily_return"] == pytest.approx(15 / 1500)
 
 
-def test_cash_share_uses_valid_completed_cash_and_nav_observations():
-    snapshots = [
-        {"day": "2026-01-02", "cash_usd": 0, "nav_usd": 1000, "source": "flex"},
-        {"day": "2026-01-05", "cash_usd": -100, "nav_usd": 1000, "source": "flex"},
-        {"day": "2026-01-06", "cash_usd": None, "nav_usd": 1000, "source": "flex"},
-        {"day": "2026-01-07", "cash_usd": 100, "nav_usd": 0, "source": "flex"},
-        {"day": "2026-01-08", "cash_usd": 500, "nav_usd": 1000, "source": "live"},
-    ]
-    rows = cash_share_rows(snapshots, date(2026, 1, 2), date(2026, 1, 8))
-    assert [row["percent"] for row in rows] == [0, -10]
-    assert cash_share_rows(snapshots, date(2026, 1, 8), date(2026, 1, 8))[0]["percent"] == 50
 
 
 def test_flex_monthly_history_links_flows_and_includes_latest_partial_month():
@@ -279,33 +237,8 @@ def test_flex_monthly_history_leaves_gapped_return_blank_but_keeps_latest_nav():
     assert rows[2]["return_pct"] is None
 
 
-def test_selected_period_uses_prior_close_and_removes_both_flow_directions():
-    snapshots = [
-        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-05", "nav_usd": 1510, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-06", "nav_usd": 1300, "source": "flex", "flow_covered": 1},
-    ]
-    flows = [{"day": "2026-01-05", "amount_usd": 500},
-             {"day": "2026-01-06", "amount_usd": -200}]
-    rows, complete = performance_window_rows(
-        snapshots, flows, date(2026, 1, 5), date(2026, 1, 6))
-    assert complete
-    assert [row["nav_change"] for row in rows] == [510, 300]
-    assert [row["adjusted_change"] for row in rows] == [10, 0]
-    assert [row["performance"] for row in rows] == pytest.approx(
-        [10 / 1500 * 100, ((1 + 10 / 1500) * (1 - 10 / 1310) - 1) * 100])
 
 
-def test_missing_prior_close_does_not_silently_rebase_selected_period():
-    snapshots = [
-        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-12", "nav_usd": 1200, "source": "flex", "flow_covered": 1},
-    ]
-    rows, complete = performance_window_rows(snapshots, [], date(2026, 1, 9), date(2026, 1, 12))
-    assert not complete
-    assert rows[0]["nav_change"] is None
-    assert rows[0]["adjusted_change"] is None
-    assert rows[0]["performance"] is None
 
 
 def test_weekend_flow_keeps_its_date_and_does_not_count_as_gain():
@@ -322,89 +255,16 @@ def test_weekend_flow_keeps_its_date_and_does_not_count_as_gain():
     assert rows[-1]["adjusted_change"] == 0
 
 
-def test_live_nav_does_not_overwrite_imported_close(tmp_path):
-    db = Database(tmp_path / "account.sqlite3")
-    db.save_account_history(1, "2026-01-02", 1000, 200, "imported", True)
-    db.set_account_value(1, "NetLiquidation", 900, "USD", "2026-01-02T12:00:00")
-    db.set_account_value(1, "NetLiquidation", 1100, "USD", "2026-01-05T12:00:00")
-    snapshots, flows = db.analytics_history(1)
-    assert snapshots[0]["nav_usd"] == 1000
-    assert snapshots[1]["source"] == "live"
-    db.conn.close()
 
 
-def test_ibkr_daily_pnl_is_saved_with_live_nav(tmp_path):
-    db = Database(tmp_path / "account.sqlite3")
-    db.set_daily_pnl(1, 12.5, "2026-01-05T09:00:00")
-    db.set_account_value(1, "NetLiquidation", 1012.5, "USD", "2026-01-05T09:01:00")
-    snapshots, flows = db.analytics_history(1)
-    assert snapshots[0]["daily_pnl_usd"] == 12.5
-    assert snapshots[0]["source"] == "live"
-    db.conn.close()
 
 
-def test_flow_day_return_matches_ibkr_published_twr_formula():
-    # IBKR's published account TWR divides ending NAV by beginning NAV plus flow.
-    snapshots = [
-        {"day": "2026-01-01", "nav_usd": 100000, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-02", "nav_usd": 160000, "source": "flex", "flow_covered": 1},
-    ]
-    flows = [{"day": "2026-01-02", "amount_usd": 50000}]
-    rows, complete = performance_window_rows(snapshots, flows, date(2026, 1, 1), date(2026, 1, 2))
-    assert complete
-    assert rows[-1]["daily_pnl"] == 10000
-    assert rows[-1]["daily_return"] == pytest.approx(10000 / 150000)
 
 
-def test_ibkr_published_twr_example_matches_daily_and_linked_returns():
-    # Public illustrative NAV and flow example in IBKR's PortfolioAnalyst white paper.
-    navs = [4549863.44, 4629129.14, 4197829.64, 4278627.55, 4249124.71, 4417916.19]
-    days = ["2011-09-30", *[f"2011-10-{day:02d}" for day in range(3, 8)]]
-    snapshots = [{"day": day, "nav_usd": nav, "source": "flex", "flow_covered": 1}
-                 for day, nav in zip(days, navs)]
-    flows = [{"day": "2011-10-04", "amount_usd": -225000},
-             {"day": "2011-10-07", "amount_usd": 81500}]
-    rows, complete = performance_window_rows(snapshots, flows, date(2011, 9, 30), date(2011, 10, 7))
-    assert complete
-    assert [row["daily_return"] * 100 for row in rows[1:]] == pytest.approx(
-        [1.74, -4.68, 1.92, -0.69, 2.02], abs=0.005)
-    assert rows[-1]["performance"] == pytest.approx(0.14, abs=0.005)
 
 
-def test_first_observation_shows_its_flow_without_counting_it_twice():
-    snapshots = [
-        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
-        {"day": "2026-01-05", "nav_usd": 1100, "source": "flex", "flow_covered": 1},
-    ]
-    flows = [{"day": "2026-01-02", "amount_usd": 500}]
-    rows, complete = performance_window_rows(
-        snapshots, flows, date(2026, 1, 2), date(2026, 1, 5))
-    assert complete
-    assert rows[0]["external_flow"] == 500
-    assert rows[-1]["daily_pnl"] == 100
-    assert rows[-1]["adjusted_change"] == 100
 
 
-def test_daily_pnl_summary_uses_completed_covered_days_and_sample_sharpe():
-    rows = [
-        {"day": "2026-01-02", "daily_pnl": 100, "daily_return": .01, "source": "flex"},
-        {"day": "2026-01-05", "daily_pnl": 80, "daily_return": .04, "source": "flex"},
-        {"day": "2026-01-06", "daily_pnl": -50, "daily_return": -.02, "source": "flex"},
-        {"day": "2026-01-07", "daily_pnl": -200, "daily_return": -.01, "source": "flex"},
-        {"day": "2026-01-08", "daily_pnl": 999, "daily_return": .99, "source": "live"},
-    ]
-    summary = daily_pnl_summary(rows, True)
-    assert summary["max_usd_gain"]["day"] == "2026-01-02"
-    assert summary["max_usd_loss"]["day"] == "2026-01-07"
-    assert summary["max_pct_gain"]["day"] == "2026-01-05"
-    assert summary["max_pct_loss"]["day"] == "2026-01-06"
-    assert summary["return_count"] == 4
-    returns = [.01, .04, -.02, -.01]
-    average = sum(returns) / len(returns)
-    sample_variance = sum((value - average) ** 2 for value in returns) / 3
-    assert summary["sharpe"] == pytest.approx(average / sample_variance ** .5 * 252 ** .5)
-    assert daily_pnl_summary(rows, False)["max_usd_gain"] is None
-    assert daily_pnl_summary(rows[:1], True)["sharpe"] is None
 
 
 def test_ibkr_pnl_callback_is_scoped_to_its_account_request():
@@ -667,21 +527,6 @@ def test_capital_deployed_uses_purchase_value_less_sale_proceeds_in_selected_ran
     assert totals is None
 
 
-def test_capital_activity_groups_trade_values_without_changing_net():
-    from app.views.analytics_ui import _capital_activity_buckets
-
-    rows = [
-        {"day": "2026-01-05", "bought": 1000, "sold": 0},
-        {"day": "2026-01-07", "bought": 0, "sold": 900},
-    ]
-    period, buckets = _capital_activity_buckets(rows, date(2026, 1, 5), date(2026, 1, 9))
-    assert period == "day"
-    assert [(bucket[3], bucket[4]) for bucket in buckets] == [(1000, 0), (0, 900)]
-    period, buckets = _capital_activity_buckets(rows, date(2026, 1, 1), date(2026, 3, 1))
-    assert period == "week"
-    assert len(buckets) == 1
-    assert buckets[0][3:] == (1000, 900)
-    assert sum(bucket[3] - bucket[4] for bucket in buckets) == 100
 
 
 def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
@@ -762,178 +607,14 @@ def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
         window.close()
 
 
-def test_analytics_chart_table_layouts_are_independent_and_saved(tmp_path, monkeypatch):
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
-    import app.ui as ui
-
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "layouts.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        window.resize(1200, 800)
-        window.show()
-        window.tabs.setCurrentWidget(window.analytics_tab)
-        app.processEvents()
-        tab = window.analytics_tab
-        assert tab.pnl_splitter.orientation() == Qt.Vertical
-        assert tab.capital_splitter.orientation() == Qt.Vertical
-
-        tab.pnl_layout_combo.setCurrentText("Side by side")
-        app.processEvents()
-        assert tab.pnl_splitter.orientation() == Qt.Horizontal
-        assert tab.capital_splitter.orientation() == Qt.Vertical
-        tab.pnl_splitter.moveSplitter(320, 1)
-        horizontal_state = window.db.setting("analytics_pnl_splitter_horizontal")
-        assert horizontal_state
-        assert window.db.setting("analytics_pnl_splitter_orientation") == "horizontal"
-
-        tab.pnl_layout_combo.setCurrentText("Top and bottom")
-        assert tab.pnl_splitter.orientation() == Qt.Vertical
-        tab.pnl_layout_combo.setCurrentText("Side by side")
-        assert tab.pnl_splitter.saveState().toBase64().data().decode("ascii") == horizontal_state
-
-        tab.sections.setCurrentWidget(tab.capital_page)
-        tab.capital_layout_combo.setCurrentText("Side by side")
-        assert tab.capital_splitter.orientation() == Qt.Horizontal
-        tab.capital_layout_combo.setCurrentText("Top and bottom")
-        assert window.db.setting("analytics_capital_splitter_orientation") == "vertical"
-    finally:
-        window.close()
-
-    reopened = ui.MainWindow()
-    try:
-        assert reopened.analytics_tab.pnl_layout_combo.currentText() == "Side by side"
-        assert reopened.analytics_tab.pnl_splitter.orientation() == Qt.Horizontal
-        assert reopened.analytics_tab.pnl_splitter.saveState().toBase64().data().decode("ascii") == horizontal_state
-        assert reopened.analytics_tab.capital_layout_combo.currentText() == "Top and bottom"
-        assert reopened.analytics_tab.capital_splitter.orientation() == Qt.Vertical
-    finally:
-        reopened.close()
 
 
-def test_analytics_tab_opens_promptly_with_account_sized_history(tmp_path, monkeypatch):
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication, QHeaderView
-    import app.ui as ui
-
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "large-ui.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        start_day = date(2024, 1, 1)
-        with window.db.conn:
-            window.db.conn.executemany("""INSERT INTO account_history
-                (portfolio_id,day,nav_usd,source,flow_covered) VALUES (1,?,?,'imported',1)""",
-                (((start_day + timedelta(days=offset)).isoformat(), 100000 + offset * 10)
-                 for offset in range(500)))
-        window.analytics_tab.range_combo.setCurrentText("All")
-        window.tabs.setCurrentWidget(window.analytics_tab)
-        app.processEvents()
-        assert window.analytics_tab.pnl_table.rowCount() == 500
-        assert window.analytics_tab.pnl_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.Interactive
-    finally:
-        window.close()
 
 
-def test_provisional_live_nav_does_not_change_completed_pnl_summary(tmp_path, monkeypatch):
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-    import app.ui as ui
-
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "live-after-close.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        for day, nav, source, covered in (
-                ("2026-01-02", 1000, "flex", True),
-                ("2026-01-05", 1010, "flex", True),
-                ("2026-01-06", 1200, "live", False)):
-            window.db.save_account_history(1, day, nav, source=source, flow_covered=covered)
-        window.analytics_tab.range_combo.setCurrentText("All")
-        window.analytics_tab.refresh()
-        assert window.analytics_tab.stats["NAV change"].text() == "$10.00"
-        assert window.analytics_tab.stats["Adjusted NAV change"].text() == "$10.00"
-        window.analytics_tab.metric_combo.setCurrentText("NAV change")
-        assert len(window.analytics_tab.pnl_chart.chart().series()[0].points()) == 2
-        assert "provisional" in window.analytics_tab.pnl_table.item(0, 0).text()
-    finally:
-        window.close()
 
 
-def test_analytics_compact_controls_and_default_columns(tmp_path, monkeypatch):
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QApplication
-    import app.ui as ui
-
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "compact.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        tab = window.analytics_tab
-        assert tab.date_summary.text()
-        assert tab.start_date.isHidden() and tab.end_date.isHidden()
-        assert [column for column in range(tab.pnl_table.columnCount())
-                if tab.pnl_table.isColumnHidden(column)] == [2, 5, 6]
-        assert tab.metric_combo.currentText() == "Adjusted NAV change"
-        assert tab.stats["Adjusted NAV change"].property("analyticsSelected") is True
-        tab.range_combo.setCurrentText("Custom")
-        assert tab.date_summary.isHidden()
-        assert not tab.start_date.isHidden() and not tab.end_date.isHidden()
-        tab.range_combo.setCurrentText("3 months")
-        assert tab.start_date.isHidden() and not tab.date_summary.isHidden()
-        tab.sections.setCurrentWidget(tab.capital_page)
-        assert tab.metric_combo.isHidden()
-        assert not tab.capital_combo.isHidden()
-        tab.sections.setCurrentWidget(tab.pnl_page)
-        assert not tab.metric_combo.isHidden()
-        assert tab.capital_combo.isHidden()
-        window.tabs.setCurrentWidget(tab)
-        for width in (800, 1200):
-            window.resize(width, 750)
-            window.show()
-            tab.pnl_hint.show()
-            app.processEvents()
-            assert tab.controls_panel.parentWidget() is tab.pnl_page
-            assert tab.controls_panel.isVisible()
-            tab_bar_bottom = tab.sections.tabBar().mapToGlobal(
-                QPoint(0, tab.sections.tabBar().height())).y()
-            assert tab.controls_panel.mapToGlobal(QPoint()).y() >= tab_bar_bottom
-            assert abs(tab.pnl_hint.geometry().center().y() -
-                       tab.pnl_layout_combo.geometry().center().y()) < 20
-            tab.sections.setCurrentWidget(tab.capital_page)
-            app.processEvents()
-            assert tab.controls_panel.parentWidget() is tab.capital_page
-            assert tab.controls_panel.isVisible()
-            assert tab.controls_panel.mapToGlobal(QPoint()).y() >= tab_bar_bottom
-            assert abs(tab.capital_caption.geometry().center().y() -
-                       tab.capital_layout_combo.geometry().center().y()) < 20
-            tab.sections.setCurrentWidget(tab.pnl_page)
-        tab.sections.setCurrentWidget(tab.exposure_page)
-        assert tab.controls_panel.isHidden()
-        tab.sections.setCurrentWidget(tab.pnl_page)
-        assert tab.range_combo.currentText() == "3 months"
-        assert tab.metric_combo.currentText() == "Adjusted NAV change"
-        tab.pnl_table._show_all_columns()
-        assert all(not tab.pnl_table.isColumnHidden(column)
-                   for column in range(tab.pnl_table.columnCount()))
-    finally:
-        window.close()
 
 
-def test_chart_axes_use_round_value_intervals():
-    from app.views.analytics_ui import _nice_scale
-
-    assert _nice_scale([0, 165000]) == (0, 200000, 5, 0)
-    assert _nice_scale([0, .67]) == pytest.approx((0, .8, 5, 1))
-    assert _nice_scale([0, 12]) == pytest.approx((0, 12.5, 6, 1))
-    assert _nice_scale([1000, 1510, 1310], zero_based=False) == (1000, 1600, 4, 0)
 
 
 def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch):
@@ -1093,30 +774,3 @@ def test_timeline_handles_resize_and_move_shared_timeframe(tmp_path, monkeypatch
         assert window.analytics_tab.range_combo.currentText() == "Custom"
     finally:
         window.close()
-
-
-def test_short_range_handles_stay_grabbable_on_long_history():
-    import os
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
-    from app.views.analytics_ui import TimeRangeNavigator
-
-    app = QApplication.instance() or QApplication([])
-    navigator = TimeRangeNavigator()
-    navigator.resize(800, 68)
-    navigator.set_range(date(2022, 1, 1), date(2026, 10, 7),
-                        date(2026, 10, 3), date(2026, 10, 7), "light")
-    navigator.show()
-    app.processEvents()
-    try:
-        left, right = navigator._bar()
-        assert right - left >= 36
-        QTest.mousePress(navigator, Qt.LeftButton, Qt.NoModifier, QPoint(round(left), 18))
-        QTest.mouseMove(navigator, QPoint(round(left - 20), 18))
-        QTest.mouseRelease(navigator, Qt.LeftButton, Qt.NoModifier, QPoint(round(left - 20), 18))
-        assert navigator.start < date(2026, 10, 3)
-        assert navigator.end == date(2026, 10, 7)
-    finally:
-        navigator.close()

@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 import json
 import math
+import shutil
 from secrets import token_hex
 import subprocess
 import sys
@@ -46,6 +47,7 @@ from app.views.action_icons import action_icon
 from app.views.shortcuts import native_text, shortcut
 from app.views.lot_matching_ui import LotMatchDialog
 from app.views.tutorial_ui import TutorialOverlay
+from app.views.update_dialog import UpdateDialog
 from app.views import widgets
 from app.views.widgets import enable_label_copy
 
@@ -274,6 +276,8 @@ class GridModel(QAbstractTableModel):
         row = self.rows[index.row()]
         value = row.get(key)
         if role == Qt.ToolTipRole:
+            if key == "commission_usd" and not row.get("commission_complete", True):
+                return "Fee or rebate has not arrived from IBKR; P&L excludes it for now."
             if self.name == "Portfolio" and row.get("estimated_baseline") and key in (
                     "average_cost", "unrealized_pnl", "unrealized_pct", "data_status"):
                 return (f"Estimated from the Activity Statement closing market price on "
@@ -291,6 +295,13 @@ class GridModel(QAbstractTableModel):
                 return (self.rows[index.row()].get("valuation_status") or
                         self.rows[index.row()].get("lot_note") or
                         self.rows[index.row()].get("data_status") or "Data unavailable")
+            if key == "daily_pnl" and row.get("daily_pnl_fee_pending"):
+                return ("Estimated daily P&L excludes fees or rebates pending from IBKR. "
+                        "It will update when they arrive.")
+            if self.name == "Portfolio" and key in ("average_cost", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
+                return "Estimated without pending fees or rebates; this value will update when they arrive."
+            if self.name in ("Lots", "Trades") and key in ("realized_net", "realized_pct", "net_unrealized", "unrealized_pct") and row.get("fee_pending"):
+                return "Estimated without pending fees or rebates; this value will update when they arrive."
             return {"gross_usd": "Gross trade value in USD, before commission.",
                     "one_day": "Price change from the prior session close in the instrument's currency. Excludes FX, trades, fees and position direction.",
                     "daily_pnl": "Security-position P&L in USD since the prior session, including today's trades, their commissions and FX changes. Excludes cash income, bond accrued interest and standalone FX effects.",
@@ -457,7 +468,8 @@ class MainWindow(QMainWindow):
     MAX_ZOOM = 150
     ZOOM_STEP = 10
 
-    def __init__(self, database_path=None, *, recovery_key=None):
+    def __init__(self, database_path=None, *, recovery_key=None,
+                 on_manage_portfolios=None):
         super().__init__()
         self.setWindowTitle("IBKR Dashboard")
         available = QApplication.primaryScreen().availableGeometry()
@@ -465,6 +477,8 @@ class MainWindow(QMainWindow):
                     min(850, max(480, available.height() - 40)))
         self.db = (Database(database_path, recovery_key=recovery_key) if recovery_key is not None else
                    Database(database_path) if database_path else Database())
+        self._last_db_data_version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+        self._on_manage_portfolios = on_manage_portfolios
         self._base_font = self.font()
         saved_zoom = self.db.setting("ui_zoom_percent")
         try:
@@ -511,6 +525,7 @@ class MainWindow(QMainWindow):
         self._last_history_status = None
         self._last_history_status_path = None
         self._stream_rows = None
+        self._quote_dirty_tabs = set()
         self._last_connection_attempt = 0.0
         self._disconnected_since = None
         self._connection_error = ""
@@ -518,6 +533,7 @@ class MainWindow(QMainWindow):
         self.service = PortfolioService(self.db, self.market, self.portfolio_id)
         self.models = {name: GridModel(name, self.db, self.service) for name in COLUMNS}
         self.views = {}
+        self.grid_tabs = {}
         self.selection_info = {}
         self.search_fields = {}
         root = QWidget()
@@ -648,14 +664,12 @@ class MainWindow(QMainWindow):
         self.previous_tab_shortcut = QShortcut(shortcut("Ctrl+Shift+Tab", "Meta+Shift+Tab"), self)
         self.previous_tab_shortcut.setContext(Qt.WindowShortcut)
         self.previous_tab_shortcut.activated.connect(lambda: self._step_tab(-1))
-        help_key = QKeySequence(QKeySequence.HelpContents) if sys.platform == "darwin" else QKeySequence("F1")
-        self.help_shortcut = QShortcut(help_key, self)
-        self.help_shortcut.setContext(Qt.ApplicationShortcut)
-        self.help_shortcut.activated.connect(self.open_help)
         if sys.platform == "darwin":
-            self.help_f1_shortcut = QShortcut(QKeySequence("F1"), self)
-            self.help_f1_shortcut.setContext(Qt.ApplicationShortcut)
-            self.help_f1_shortcut.activated.connect(self.open_help)
+            help_key = QKeySequence(QKeySequence.HelpContents)
+            if help_key != QKeySequence("F1"):
+                self.help_shortcut = QShortcut(help_key, self)
+                self.help_shortcut.setContext(Qt.ApplicationShortcut)
+                self.help_shortcut.activated.connect(self.open_help)
         self._restore_columns()
         self._restore_default_views()
         self._update_summary_visibility()
@@ -688,6 +702,14 @@ class MainWindow(QMainWindow):
     def _refresh_special_tab(self, index):
         widget = self.tabs.widget(index)
         self._update_summary_visibility()
+        name = next((name for name, page in self.grid_tabs.items() if widget is page), None)
+        if name in self._quote_dirty_tabs:
+            if name == "Portfolio":
+                self._refresh_model(name, self._stream_rows)
+                self._quote_dirty_tabs.discard(name)
+            else:
+                self.lots_refresh_timer.stop()
+                self._refresh_lots_and_summary()
         if widget is self.calcs_tab or widget is self.cash_tab or widget is self.analytics_tab:
             widget.refresh()
 
@@ -1414,6 +1436,7 @@ class MainWindow(QMainWindow):
 
     def _make_grid_tab(self, name):
         page = QWidget()
+        self.grid_tabs[name] = page
         layout = QVBoxLayout(page)
         widgets.apply_layout(layout, "page")
         toolbar_widget = QWidget()
@@ -2058,7 +2081,11 @@ class MainWindow(QMainWindow):
             self._show_tutorial_step()
 
     def _make_menu(self):
-        file_menu = self.menuBar().addMenu("File")
+        self.file_menu = self.menuBar().addMenu("File")
+        file_menu = self.file_menu
+        if self._on_manage_portfolios is not None:
+            file_menu.addAction("Portfolios…", lambda: self._on_manage_portfolios(self))
+            file_menu.addSeparator()
         file_menu.addAction("Import Data…", self.open_history_import)
         for title, handler in (("Export Workbook", self.export), ("Create SQLite Backup", self.backup)):
             action = QAction(title, self)
@@ -2120,9 +2147,36 @@ class MainWindow(QMainWindow):
         self.matches_menu.addAction("Clear match for selected lot", self.clear_match)
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Take a tour…", self.start_tutorial)
-        guide_action = QAction("User guide (F1)", self)
-        guide_action.triggered.connect(self.open_help)
-        help_menu.addAction(guide_action)
+        self.help_guide_action = QAction("User guide", self)
+        self.help_guide_action.setShortcut(QKeySequence("F1"))
+        self.help_guide_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.help_guide_action.triggered.connect(self.open_help)
+        help_menu.addAction(self.help_guide_action)
+        help_menu.addSeparator()
+        help_menu.addAction("Check for updates…", self.check_for_updates)
+
+    def check_for_updates(self):
+        dialog = getattr(self, "_update_dialog", None)
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        self._update_dialog = UpdateDialog(self._install_update, self)
+        self._update_dialog.show()
+
+    def _install_update(self, installer, installed):
+        app = QApplication.instance()
+        app.pending_update = (installer, installed)
+        app.closeAllWindows()
+
+        def cancel_if_still_open():
+            if any(widget.isVisible() and widget.isWindow() for widget in app.topLevelWidgets()):
+                app.pending_update = None
+                shutil.rmtree(installer.parent, ignore_errors=True)
+                QMessageBox.warning(None, "Update postponed",
+                                    "Close the open portfolio window before updating.")
+
+        QTimer.singleShot(0, cancel_if_still_open)
 
     def _restore_columns(self):
         use_saved = self.db.setting("header_layout_version") == "3"
@@ -2619,6 +2673,7 @@ class MainWindow(QMainWindow):
             lots = self.service.lots_rows(portfolio)
             trades = self.service.trade_rows(lots)
         self._stream_rows = portfolio
+        self._quote_dirty_tabs.clear()
         for name in self.models:
             self._refresh_model(name, portfolio if name == "Portfolio" else
                                 lots if name == "Lots" else trades)
@@ -2633,7 +2688,13 @@ class MainWindow(QMainWindow):
     def _refresh_lots_and_summary(self):
         rows = self._stream_rows if self._stream_rows is not None else self.service.portfolio_rows()
         lots = self.service.lots_rows(rows)
-        self._refresh_model("Lots", lots)
+        current = self.tabs.currentWidget()
+        if current is self.grid_tabs["Lots"]:
+            self._refresh_model("Lots", lots)
+            self._quote_dirty_tabs.discard("Lots")
+        elif current is self.grid_tabs["Trades"]:
+            self._refresh_model("Trades", self.service.trade_rows(lots))
+            self._quote_dirty_tabs.discard("Trades")
         self._refresh_summary(rows, lots)
 
     def _refresh_summary(self, rows=None, lots=None):
@@ -2648,10 +2709,10 @@ class MainWindow(QMainWindow):
                        or r.get("traded_today")]
         daily = sum(r["daily_pnl"] for r in daily_scope
                     if r["reconciliation"] != "DIFFERENCE" and r["daily_pnl"] is not None)
-        realized_rows = [r for r in lots if r.get("realized_net") is not None]
+        closed_lots = [r for r in lots if str(r.get("lot_state", "")).startswith("Closed")]
+        realized_rows = [r for r in closed_lots if r.get("realized_net") is not None]
         realized = sum(r["realized_net"] for r in realized_rows)
-        pending_realized = sum(r.get("lot_note") == "Fee pending" and
-                               str(r.get("lot_state", "")).startswith("Closed") for r in lots)
+        pending_realized = sum(bool(r.get("fee_pending")) for r in closed_lots)
         missing = [r for r in active if
                    r["value"] is None and r["reconciliation"] != "DIFFERENCE"]
         differences = sum(1 for r in rows if r["reconciliation"] == "DIFFERENCE")
@@ -2664,7 +2725,7 @@ class MainWindow(QMainWindow):
             issues.append(f"{differences:,} position difference{'s' if differences != 1 else ''}")
         if pending_realized:
             issues.append(f"{pending_realized:,} closed lot fee{'s' if pending_realized != 1 else ''} pending")
-        pending_open = sum(r.get("data_status") == "FEE PENDING" for r in active)
+        pending_open = sum(bool(r.get("open_pnl_fee_pending")) for r in active)
         if pending_open:
             issues.append(f"{pending_open:,} holding fee{'s' if pending_open != 1 else ''} pending")
         if missing:
@@ -2681,23 +2742,48 @@ class MainWindow(QMainWindow):
                 return "—"
             amount = sum(r[key] for r in covered)
             return f"{'Partial ' if len(covered) != len(scope) else ''}${amount:,.2f}"
+        daily_text = subtotal("daily_pnl", daily_scope)
+        daily_fee_pending = any(r.get("daily_pnl_fee_pending") and r["daily_pnl"] is not None
+                                for r in daily_scope if r["reconciliation"] != "DIFFERENCE")
+        daily_pct_available = (daily_text != "—" and nav is not None and
+                               math.isfinite(nav) and nav > 0)
+        if daily_pct_available:
+            daily_text += f" ({daily / nav:.2%})"
+        if daily_fee_pending:
+            daily_text = "Estimated " + daily_text
+        open_text = subtotal("unrealized_pnl")
+        open_fee_pending = open_text != "—" and any(
+            r.get("open_pnl_fee_pending") and r["unrealized_pnl"] is not None for r in eligible)
+        if open_fee_pending:
+            open_text = "Estimated " + open_text
+        realized_text = ("—" if differences or (closed_lots and not realized_rows) else
+                         f"{'Partial ' if len(realized_rows) < len(closed_lots) else ''}${realized:,.2f}")
+        if pending_realized and realized_text != "—":
+            realized_text = "Estimated " + realized_text
         amounts = {
             "nav": nav_text, "cash": cash_text,
             "holdings": subtotal("value"),
-            "daily": subtotal("daily_pnl", daily_scope),
-            "open": subtotal("unrealized_pnl"),
-            "realized": ("—" if differences or (pending_realized and not realized_rows) else
-                         f"{'Partial ' if pending_realized else ''}${realized:,.2f}"),
+            "daily": daily_text,
+            "open": open_text,
+            "realized": realized_text,
         }
         for key, text in amounts.items():
             label = self.metric_values[key]
             label.setText(text)
-            note = (" Security-position P&L excludes cash income and standalone FX effects."
-                    if key == "daily" else "")
+            note = ""
+            if key == "daily":
+                note = " Security-position P&L excludes cash income and standalone FX effects."
+                if daily_fee_pending:
+                    note += " Pending fees or rebates are excluded until IBKR supplies them."
+                if daily_pct_available:
+                    note += " Percentage is the displayed P&L divided by current NAV."
+            if (key == "open" and open_fee_pending) or (key == "realized" and pending_realized):
+                note += " Pending fees or rebates are excluded until IBKR supplies them."
             if key == "daily" and any(str(r.get("price_source", "")).startswith("SAVED SESSION BAR")
                                       for r in eligible):
                 note += " Saved session bars may reflect an unfinished trading day and are not live quotes."
-            label.setToolTip((("Subtotal only: " + "; ".join(issues) + note) if text.startswith("Partial ") else
+            label.setToolTip((("Subtotal only: " + "; ".join(issues) + note) if
+                              text.startswith(("Partial ", "Estimated Partial ")) else
                               ("Incomplete: " + "; ".join(issues) + note) if text == "—" and incomplete else
                               "Current daily P&L needs a current-session price and prior close" if
                               key == "daily" and text == "—" else
@@ -3113,9 +3199,14 @@ class MainWindow(QMainWindow):
             self._start_provider(force_history=False)
 
     def _periodic_refresh(self):
+        data_version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+        database_changed = data_version != self._last_db_data_version
+        self._last_db_data_version = data_version
         stamp = self.db.metadata("ibkr_flex_sync_completed")
-        if stamp and stamp != self._last_flex_sync_stamp:
+        flex_completed = bool(stamp and stamp != self._last_flex_sync_stamp)
+        if flex_completed:
             self._last_flex_sync_stamp = stamp
+        if database_changed or flex_completed:
             self._refresh_models()
         analytics_updated = False
         if self._analytics_process is not None and self._analytics_process.poll() is not None:
@@ -3236,7 +3327,10 @@ class MainWindow(QMainWindow):
                 else:
                     by_id = {row["id"]: row for row in changed}
                     self._stream_rows = [by_id.get(row["id"], row) for row in self._stream_rows]
-                    self.models["Portfolio"].update_positions(position_ids, changed)
+                    self._quote_dirty_tabs.update(self.grid_tabs)
+                    if self.tabs.currentWidget() is self.grid_tabs["Portfolio"]:
+                        self.models["Portfolio"].update_positions(position_ids, changed)
+                        self._quote_dirty_tabs.discard("Portfolio")
                     if not self.lots_refresh_timer.isActive():
                         self.lots_refresh_timer.start(1000)
             if (self.tabs.currentWidget() is self.analytics_tab and

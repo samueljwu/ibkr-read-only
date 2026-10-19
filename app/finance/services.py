@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from app.finance.calculations import (adv20, advx, choose_price, closed_lot, flow_adjusted_daily_pnl,
+from app.finance.calculations import (adv20, advx, choose_price, closed_lot, effective_commission_usd, flow_adjusted_daily_pnl,
                               looks_like_option_ticker, open_lot, position_metrics,
                               prepare_history, valid_multiplier, valid_price, window_returns)
 
@@ -127,8 +127,6 @@ class MatchingService:
     @staticmethod
     def _open_cost_per_unit(buy):
         """USD purchase cost per unit, including its share of the buy commission."""
-        if not buy.get("commission_complete", True):
-            return None
         try:
             multiplier = Decimal(str(buy["multiplier"]))
             fx = Decimal(str(buy["fx_to_usd"]))
@@ -136,15 +134,13 @@ class MatchingService:
             if multiplier <= 0 or fx <= 0 or qty <= 0:
                 return None
             return (Decimal(str(buy["price"])) * multiplier * fx +
-                    Decimal(str(buy["commission_usd"] or 0)) / qty)
+                    Decimal(str(effective_commission_usd(buy))) / qty)
         except (ValueError, TypeError, ArithmeticError):
             return None
 
     @staticmethod
     def _gain_per_unit(buy, sell):
         """Net USD gain for one unit, including pro-rata commissions."""
-        if not buy.get("commission_complete", True) or not sell.get("commission_complete", True):
-            return None
         try:
             multiplier = Decimal(str(sell["multiplier"]))
             if multiplier <= 0 or Decimal(str(buy["multiplier"])) != multiplier:
@@ -156,9 +152,9 @@ class MatchingService:
             if buy_qty <= 0 or sell_qty <= 0:
                 return None
             return (Decimal(str(sell["price"])) * multiplier * sell_fx -
-                    Decimal(str(sell["commission_usd"] or 0)) / sell_qty -
+                    Decimal(str(effective_commission_usd(sell))) / sell_qty -
                     Decimal(str(buy["price"])) * multiplier * buy_fx -
-                    Decimal(str(buy["commission_usd"] or 0)) / buy_qty)
+                    Decimal(str(effective_commission_usd(buy))) / buy_qty)
         except (ValueError, TypeError, ArithmeticError):
             return None
 
@@ -519,7 +515,7 @@ class PortfolioService:
         aggregates = defaultdict(lambda: {
             "realized_net": 0.0, "realized_basis": 0.0, "realized_missing": False,
             "net_unrealized": 0.0, "open_basis": 0.0, "open_missing": False,
-            "has_realized": False, "has_open": False,
+            "has_realized": False, "has_open": False, "fee_pending": False,
         })
         for lot in lots:
             closed = str(lot.get("lot_state", "")).startswith("Closed")
@@ -531,20 +527,19 @@ class PortfolioService:
                 aggregate = aggregates[trade_id]
                 if closed:
                     aggregate["has_realized"] = True
-                    if (lot.get("realized_net") is None or lot.get("buy_value_usd") is None or
-                        lot.get("buy_commission") is None):
+                    if lot.get("realized_net") is None or lot.get("buy_value_usd") is None:
                         aggregate["realized_missing"] = True
                     else:
                         aggregate["realized_net"] += lot["realized_net"]
-                        aggregate["realized_basis"] += lot["buy_value_usd"] + lot["buy_commission"]
+                        aggregate["realized_basis"] += lot["buy_value_usd"] + (lot["buy_commission"] or 0)
                 else:
                     aggregate["has_open"] = True
-                    if (lot.get("net_unrealized") is None or lot.get("buy_value_usd") is None or
-                        lot.get("buy_commission") is None):
+                    if lot.get("net_unrealized") is None or lot.get("buy_value_usd") is None:
                         aggregate["open_missing"] = True
                     else:
                         aggregate["net_unrealized"] += lot["net_unrealized"]
-                        aggregate["open_basis"] += lot["buy_value_usd"] + lot["buy_commission"]
+                        aggregate["open_basis"] += lot["buy_value_usd"] + (lot["buy_commission"] or 0)
+                aggregate["fee_pending"] = aggregate.get("fee_pending", False) or lot.get("fee_pending", False)
 
         trades = self._trades()
         rows = self.matching.trade_rows(trades=trades, remaining=self._remaining(trades))
@@ -554,6 +549,7 @@ class PortfolioService:
                         "net_unrealized": None, "unrealized_pct": None})
             if aggregate is None:
                 continue
+            row["fee_pending"] = aggregate["fee_pending"] or not row["commission_complete"]
             if aggregate["has_realized"] and not aggregate["realized_missing"]:
                 row["realized_net"] = aggregate["realized_net"]
                 if aggregate["realized_basis"]:
@@ -616,11 +612,12 @@ class PortfolioService:
                                   abs(open_qty - row["position_qty"]) < 1e-9 and
                                   multiplier is not None and all(
                                       valid_price(t["fx_to_usd"]) is not None and
-                                      t["multiplier"] == multiplier and t["commission_complete"]
+                                      t["multiplier"] == multiplier
                                       for t, _ in open_buys))
+            row["open_pnl_fee_pending"] = any(not t["commission_complete"] for t, _ in open_buys)
             row["average_cost"] = (
                 sum(qty * (t["price"] * multiplier +
-                           t["commission_usd"] / t["quantity"] / t["fx_to_usd"])
+                           effective_commission_usd(t) / t["quantity"] / t["fx_to_usd"])
                     for t, qty in open_buys) / (open_qty * multiplier)
                 if complete_open_lots else None)
             current_fx = fx_rate(position["currency"], date.today().isoformat())
@@ -677,6 +674,7 @@ class PortfolioService:
                          (as_of - timedelta(days=1)).isoformat())
             today_trades = [t for t in position_trades if t["trade_date"] == as_of.isoformat()]
             row["traded_today"] = bool(today_trades)
+            row["daily_pnl_fee_pending"] = any(not t["commission_complete"] for t in today_trades)
             row["daily_pnl"] = flow_adjusted_daily_pnl(
                 row["position_qty"], price, current_fx, prior_close,
                 fx_rate(position["currency"], prior_day), position["multiplier"],
@@ -725,7 +723,7 @@ class PortfolioService:
                 row["data_status"] = "STATEMENT OPENING" if opening else "NO TRADES"
             elif any(t["side"] == "SELL" and remaining[t["id"]] > 1e-9 for t in position_trades):
                 row["data_status"] = "UNMATCHED SALE"
-            elif any(not t["commission_complete"] for t, qty in open_buys if qty > 1e-9):
+            elif row["open_pnl_fee_pending"]:
                 row["data_status"] = "FEE PENDING"
             row["adv20"] = adv20(history)
             row["advx"] = advx(row["position_qty"], row["adv20"])
@@ -780,8 +778,10 @@ class PortfolioService:
                         if buy["source"] != "CSV market baseline" and buy["trade_date"] and sell["trade_date"]
                         else None})
             row.update(closed_lot(buy, sell, qty))
+            row["buy_fee_pending"] = not buy["commission_complete"]
+            row["sell_fee_pending"] = not sell["commission_complete"]
+            row["fee_pending"] = row["buy_fee_pending"] or row["sell_fee_pending"]
             if not buy["commission_complete"] or not sell["commission_complete"]:
-                row["realized_net"] = row["realized_pct"] = None
                 if not buy["commission_complete"]:
                     row["buy_commission"] = None
                 if not sell["commission_complete"]:
@@ -817,11 +817,11 @@ class PortfolioService:
             row["last_price"] = price
             current_fx = valuations[position["id"]]["fx_to_usd"] if position else buy["fx_to_usd"]
             row.update(open_lot(buy, qty, price, current_fx))
+            row["fee_pending"] = not buy["commission_complete"]
             if buy["security_type"] == "FUT":
                 row["current_value"] = row["net_unrealized"] = row["unrealized_pct"] = None
                 row["lot_note"] = "Futures valuation unavailable"
             if not buy["commission_complete"]:
-                row["net_unrealized"] = row["unrealized_pct"] = None
                 row["buy_commission"] = None
                 row["lot_note"] = "Fee pending"
             if reconciliation.get(buy["position_id"]) == "DIFFERENCE":

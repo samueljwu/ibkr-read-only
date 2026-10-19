@@ -16,6 +16,73 @@ from app.views.ui_theme import COLORS, TOOLBAR_GROUP_SPACING
 from app.views.shortcuts import native_text, shortcut
 
 
+def test_trade_fee_refreshes_after_another_process_updates_shared_database(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    db_path = tmp_path / "shared-fee.sqlite3"
+    seed = Database(db_path)
+    try:
+        trade_id = seed.add_trade({"display_ticker": "ABC", "ib_symbol": "ABC",
+                                   "trade_date": "2026-10-06", "side": "BUY",
+                                   "quantity": 5, "price": 10, "commission_usd": 0})
+        with seed.conn:
+            seed.conn.execute("""INSERT INTO broker_executions
+                (account_id,execution_key,trade_row_id,status)
+                VALUES (?,?,?,'pending commission')""", ("U-SYNTHETIC", "EX.01", trade_id))
+    finally:
+        seed.conn.close()
+
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    writer = Database(db_path)
+    try:
+        assert window.models["Trades"].rows[0]["commission_usd"] is None
+        with writer.conn:
+            writer.conn.execute("UPDATE trades SET commission_usd=? WHERE id=?", (0.5, trade_id))
+            writer.conn.execute("UPDATE broker_executions SET status='complete' WHERE trade_row_id=?",
+                                (trade_id,))
+        assert window.models["Trades"].rows[0]["commission_usd"] is None
+        window._periodic_refresh()
+        assert window.models["Trades"].rows[0]["commission_usd"] == pytest.approx(0.5)
+    finally:
+        writer.conn.close()
+        window.close()
+
+
+def test_live_quote_refreshes_grid_pnl_when_tab_is_accessed(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "live-trade-pnl.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        position_id = window.db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
+        window.db.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
+                             "side": "BUY", "quantity": 10, "price": 10, "commission_usd": 0})
+        window.market.quotes[position_id] = {"mode": "Mock", "ticks": {"last": 11}, "status": "MOCK"}
+        window._refresh_models()
+        assert window.models["Trades"].rows[0]["net_unrealized"] == pytest.approx(10)
+        assert window.metric_values["open"].text() == "$10.00"
+
+        window.market.events.put(("quote", [position_id], "last", 12, "Mock"))
+        window._poll()
+        assert window.lots_refresh_timer.isActive()
+        window.lots_refresh_timer.timeout.emit()
+        assert window.metric_values["open"].text() == "$20.00"
+        assert window.models["Trades"].rows[0]["net_unrealized"] == pytest.approx(10)
+        window.tabs.setCurrentWidget(window.grid_tabs["Trades"])
+        assert window.models["Trades"].rows[0]["net_unrealized"] == pytest.approx(20)
+
+        window.market.events.put(("quote", [position_id], "last", 13, "Mock"))
+        window._poll()
+        window.lots_refresh_timer.timeout.emit()
+        assert window.models["Trades"].rows[0]["net_unrealized"] == pytest.approx(30)
+        assert window.metric_values["open"].text() == "$30.00"
+        window.tabs.setCurrentWidget(window.grid_tabs["Lots"])
+        assert window.models["Lots"].rows[0]["net_unrealized"] == pytest.approx(30)
+        window.tabs.setCurrentWidget(window.grid_tabs["Portfolio"])
+        assert window.models["Portfolio"].rows[0]["unrealized_pnl"] == pytest.approx(30)
+    finally:
+        window.close()
+
+
 def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "header_icons.sqlite3"))
@@ -1491,11 +1558,12 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
         window.activateWindow()
         window.setFocus()
         app.processEvents()
+        assert window.help_guide_action.text() == "User guide"
+        assert window.help_guide_action.shortcut() == QKeySequence("F1")
         if sys.platform == "darwin":
             # The offscreen macOS plugin cannot raise the window for a native
             # application shortcut, so exercise the registered action.
-            assert window.help_f1_shortcut.key() == QKeySequence("F1")
-            window.help_f1_shortcut.activated.emit()
+            window.help_guide_action.trigger()
         else:
             QTest.keyClick(window, Qt.Key_F1)
         app.processEvents()

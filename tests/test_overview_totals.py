@@ -90,6 +90,30 @@ def test_overview_daily_pnl_includes_position_closed_today(tmp_path, monkeypatch
         window.close()
 
 
+def test_overview_daily_pnl_shows_percent_of_current_nav(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "daily-percent.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        window.db.set_portfolio_nav(window.portfolio_id, 1_000)
+        rows = [{"display_ticker": "ABC", "position_qty": 10,
+                 "reconciliation": "OK", "value": 200,
+                 "daily_pnl": 25, "unrealized_pnl": 10,
+                 "last_px": 20, "fx_to_usd": 1}]
+        window._refresh_summary(rows, [])
+        assert window.metric_values["daily"].text() == "$25.00 (2.50%)"
+        assert "divided by current NAV" in window.metric_values["daily"].toolTip()
+
+        rows.append({"display_ticker": "MISSING", "position_qty": 1,
+                     "reconciliation": "OK", "value": None,
+                     "daily_pnl": None, "unrealized_pnl": None,
+                     "last_px": None, "fx_to_usd": 1})
+        window._refresh_summary(rows, [])
+        assert window.metric_values["daily"].text() == "Partial $25.00 (2.50%)"
+    finally:
+        window.close()
+
+
 def test_closed_today_position_has_daily_pnl_without_current_quote(tmp_path):
     db = Database(tmp_path / "closed-position.sqlite3")
     try:

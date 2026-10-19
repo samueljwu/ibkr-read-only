@@ -25,6 +25,11 @@ def valid_multiplier(value):
     return valid_price(value)
 
 
+def effective_commission_usd(trade):
+    """Use known fees, or zero provisionally until the broker reports a fee."""
+    return (trade.get("commission_usd") or 0) if trade.get("commission_complete", True) else 0
+
+
 def choose_price(ticks, mode="Live"):
     """Return (price, source); a missing price is never converted to zero."""
     if mode == "Delayed":
@@ -144,8 +149,8 @@ def closed_lot(buy, sell, qty):
                                       "realized_gross", "realized_net", "realized_pct")}
     buy_value = qty * float(buy["price"]) * buy_multiplier * buy_fx
     sell_value = qty * float(sell["price"]) * sell_multiplier * sell_fx
-    buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
-    sell_comm = float(sell["commission_usd"] or 0) * qty / float(sell["quantity"])
+    buy_comm = float(effective_commission_usd(buy)) * qty / float(buy["quantity"])
+    sell_comm = float(effective_commission_usd(sell)) * qty / float(sell["quantity"])
     buy_accrued = float(buy.get("accrued_interest_usd") or 0) * qty / float(buy["quantity"])
     sell_accrued = float(sell.get("accrued_interest_usd") or 0) * qty / float(sell["quantity"])
     gross = sell_value - buy_value
@@ -168,7 +173,7 @@ def open_lot(buy, qty, current, current_fx):
         return {key: None for key in ("buy_value_usd", "buy_commission", "buy_accrued_interest",
                                       "current_value", "net_unrealized", "unrealized_pct")}
     buy_value = qty * float(buy["price"]) * multiplier * buy_fx
-    buy_comm = float(buy["commission_usd"] or 0) * qty / float(buy["quantity"])
+    buy_comm = float(effective_commission_usd(buy)) * qty / float(buy["quantity"])
     buy_accrued = float(buy.get("accrued_interest_usd") or 0) * qty / float(buy["quantity"])
     gross = qty * multiplier * (current * current_fx - float(buy["price"]) * buy_fx) if current else None
     net = gross - buy_comm if gross is not None else None
@@ -192,8 +197,6 @@ def flow_adjusted_daily_pnl(current_qty, current_price, current_fx, prior_price,
         prior_qty = Decimal(str(current_qty))
         trade_cash = Decimal(0)
         for trade in today_trades:
-            if not trade.get("commission_complete", True):
-                return None
             fx = valid_price(trade.get("fx_to_usd"))
             trade_mult = valid_multiplier(trade.get("multiplier"))
             if fx is None or trade_mult != multiplier:
@@ -201,8 +204,11 @@ def flow_adjusted_daily_pnl(current_qty, current_price, current_fx, prior_price,
             units = Decimal(str(trade["quantity"]))
             sign = 1 if trade["side"] == "SELL" else -1
             prior_qty -= units if trade["side"] == "BUY" else -units
+            # An execution can precede its commission report. Show a provisional
+            # daily result from the known cash flow and add the fee when it arrives.
+            fee = effective_commission_usd(trade)
             trade_cash += (sign * units * Decimal(str(trade["price"])) * Decimal(str(fx)) *
-                           Decimal(str(multiplier)) - Decimal(str(trade["commission_usd"] or 0)))
+                           Decimal(str(multiplier)) - Decimal(str(fee or 0)))
         current_qty = Decimal(str(current_qty))
         if current_qty and (current_price is None or current_fx is None):
             return None

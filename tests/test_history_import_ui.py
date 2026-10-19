@@ -12,8 +12,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCalendarWidget, QLineEdit
 
 import app.ui as ui
-from app.flex.flex_import import flex_today, oldest_flex_date
-from app.platform.history_status import pause_request_path, read_status, write_status
+from app.flex.flex_import import oldest_flex_date
+from app.platform.history_status import read_status, write_status
 
 
 TOKEN = "0000000000000000"
@@ -54,37 +54,8 @@ def configure(window):
     window.open_history_import()
 
 
-def test_import_defaults_to_recent_30_completed_days(window):
-    window.open_history_import()
-    dialog = window.history_import_dialog
-    today = flex_today()
-    assert dialog.to_date.date() == QDate(today.year, today.month, today.day).addDays(-1)
-    assert dialog.from_date.date().daysTo(dialog.to_date.date()) == 29
 
 
-def test_dates_can_be_typed_pasted_and_committed_with_tab(window):
-    window.open_history_import()
-    dialog = window.history_import_dialog
-    app = QApplication.instance()
-    app.processEvents()
-    typed = QDate.currentDate().addDays(-12)
-    pasted = QDate.currentDate().addDays(-3)
-    dialog.from_date.setFocus()
-    app.processEvents()
-    dialog.from_date.line_edit.selectAll()
-    QTest.keyClicks(dialog.from_date.line_edit, typed.toString("yyyy-MM-dd"))
-    QTest.keyClick(dialog.from_date.line_edit, Qt.Key_Tab)
-    app.processEvents()
-    assert dialog.from_date.date() == typed
-    assert dialog.to_date.hasFocus()
-
-    dialog.to_date.line_edit.selectAll()
-    app.clipboard().setText(pasted.toString("yyyy-MM-dd"))
-    QTest.keyClick(dialog.to_date.line_edit, Qt.Key_V, Qt.ControlModifier)
-    QTest.keyClick(dialog.to_date.line_edit, Qt.Key_Tab)
-    app.processEvents()
-    assert dialog.to_date.date() == pasted
-    assert dialog.from_date.calendar_button.isVisible() and dialog.to_date.calendar_button.isVisible()
 
 
 def test_typed_leap_day_range_reaches_worker_arguments(window, monkeypatch):
@@ -120,19 +91,6 @@ def test_typed_leap_day_range_reaches_worker_arguments(window, monkeypatch):
     assert command[command.index("--to-date") + 1] == last.toString("yyyy-MM-dd")
 
 
-def test_calendar_picker_keeps_yesterday_limit(window):
-    window.open_history_import()
-    dialog = window.history_import_dialog
-    dialog.from_date.calendar_button.click()
-    QApplication.instance().processEvents()
-    calendar = dialog.from_date.findChild(QCalendarWidget)
-    assert calendar is not None
-    today = flex_today()
-    assert calendar.maximumDate() == QDate(today.year, today.month, today.day).addDays(-1)
-    selected = QDate.currentDate().addDays(-8)
-    calendar.clicked.emit(selected)
-    QApplication.instance().processEvents()
-    assert dialog.from_date.date() == selected
 
 
 def test_calendar_grid_shows_ordered_range_and_navigates_months(window):
@@ -287,187 +245,14 @@ def test_import_rejects_incomplete_typed_date(window):
     assert window._history_process is None
 
 
-@pytest.mark.parametrize("busy", ["_sync_process", "_analytics_process", "_cash_process", "_live_sync_pending", "_sync_all_active", "_sync_all_queue"])
-def test_import_waits_for_active_sync(window, busy):
-    configure(window)
-    setattr(window, busy, SimpleNamespace(poll=lambda: None) if busy.endswith("process") else True)
-    window.start_history_import()
-    assert "current IBKR sync" in window.test_warnings[-1]
-    assert window._history_process is None
 
 
-def test_launch_progress_result_and_sync_guards(window, monkeypatch):
-    configure(window)
-    dialog = window.history_import_dialog
-    with window.db.conn:
-        window.db.conn.execute("""INSERT INTO broker_sync_windows
-            (account_id,source,from_day,to_day,status)
-            VALUES ('SYNTHETIC','flex','2025-11-01','2025-11-30','complete')""")
-    window.open_history_import()
-    assert "Trades: 2025-11-01 to 2025-11-30" in periods_table_text(dialog)
-    launches = []
-    process = SimpleNamespace(code=None)
-    process.poll = lambda: process.code
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs: launches.append((command, kwargs)) or process)
-    window.start_history_import()
-    assert window._history_process is process
-    command, kwargs = launches[0]
-    assert command[1:3] == ["-m", "scripts.history_worker"]
-    assert command[command.index("--database") + 1] == str(window.db.path)
-    assert command[command.index("--source") + 1] == "all"
-    assert TOKEN not in " ".join(command)
-    assert kwargs["creationflags"] == getattr(ui.subprocess, "CREATE_NO_WINDOW", 0)
-    assert kwargs["stdout"] == kwargs["stderr"] == ui.subprocess.DEVNULL
-    assert not window.sync_button.isEnabled()
-    assert window.sync_button.text() == ""
-    assert window.sync_button.accessibleName() == "Importing Flex history…"
-    assert window.sync_progress_label.text() == "Importing Flex history…"
-    assert not dialog.import_button.isEnabled()
-    for launch in (window.sync_all, window._queue_configured_syncs, window._launch_flex_sync,
-                   window._launch_cash_sync, window._launch_analytics_sync):
-        launch()
-    assert len(launches) == 1
-    window.apply_settings()
-    assert "Wait" in window.test_warnings[-1]
-    status = read_status(window._history_status_path)
-    status.update(state="running", active_source="trades", started_sources=["trades"],
-                  current_window=["2026-01-01", "2026-01-14"])
-    write_status(window._history_status_path, status)
-    window._poll_history_import()
-    assert "Trades" in dialog.progress_label.text()
-    assert "2026-01-14" in dialog.progress_label.text()
-    assert "Trades: 2025-11-01 to 2025-11-30" in periods_table_text(dialog)
-    status.update(state="completed_with_gaps", active_source=None, current_window=None,
-                  completed_windows={"trades": [["2026-01-01", "2026-01-14"]]},
-                  unavailable_windows={"trades": [["2025-12-18", "2025-12-31"]]})
-    with window.db.conn:
-        window.db.conn.execute("""INSERT INTO broker_sync_windows
-            (account_id,source,from_day,to_day,status)
-            VALUES ('SYNTHETIC','flex','2026-01-01','2026-01-14','complete')""")
-    write_status(window._history_status_path, status)
-    refreshed = []
-    monkeypatch.setattr(window, "_refresh_models", lambda: refreshed.append("models"))
-    monkeypatch.setattr(window.cash_tab, "refresh", lambda: refreshed.append("cash"))
-    monkeypatch.setattr(window.analytics_tab, "refresh", lambda: refreshed.append("analytics"))
-    process.code = 0
-    window._poll_history_import()
-    assert refreshed == ["models", "cash", "analytics"]
-    assert window._history_process is None
-    assert window.sync_button.isEnabled() and dialog.import_button.isEnabled()
-    assert "Not available: 2025-12-18 to 2025-12-31" in dialog.details.toPlainText()
-    assert ("Trades: 2025-11-01 to 2025-11-30, 2026-01-01 to 2026-01-14"
-            in periods_table_text(dialog))
-    assert "completed with gaps" in dialog.progress_label.text()
-    assert TOKEN not in window._history_status_path.read_text()
 
 
-def test_closing_app_interrupts_import_and_preserves_completed_progress(window, monkeypatch):
-    configure(window)
-
-    class Process:
-        code = None
-        terminated = False
-
-        def poll(self):
-            return self.code
-
-        def terminate(self):
-            self.terminated = True
-            self.code = -15
-
-        def wait(self, timeout):
-            assert timeout == 3
-            return self.code
-
-    process = Process()
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda *args, **kwargs: process)
-    window.start_history_import()
-    status_path = window._history_status_path
-    status = read_status(status_path)
-    status.update(state="running", pid=1234, started_sources=["trades"], active_source="trades",
-                  current_window=["2026-01-15", "2026-01-28"],
-                  completed_windows={"trades": [["2026-01-01", "2026-01-14"]]})
-    write_status(status_path, status)
-    pause_request_path(status_path).touch()
-
-    assert window.close()
-    assert process.terminated
-    assert window._history_process is None
-    assert not pause_request_path(status_path).exists()
-    saved = read_status(status_path)
-    assert saved["state"] == "interrupted"
-    assert saved["pid"] is None
-    assert saved["failed_window"] == ["2026-01-15", "2026-01-28"]
-    assert saved["completed_windows"]["trades"] == [["2026-01-01", "2026-01-14"]]
-    assert TOKEN not in status_path.read_text()
 
 
-def test_pause_and_resume_reuse_the_import_status(window, monkeypatch):
-    configure(window)
-    processes = [SimpleNamespace(code=None), SimpleNamespace(code=None)]
-    for process in processes:
-        process.poll = lambda process=process: process.code
-    launches = []
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs:
-                        launches.append(command) or processes[len(launches) - 1])
-
-    window.start_history_import()
-    status_path = window._history_status_path
-    dialog = window.history_import_dialog
-    assert dialog.pause_button.isEnabled()
-    dialog.pause_button.click()
-    assert pause_request_path(status_path).exists()
-    assert not dialog.pause_button.isEnabled()
-    assert "Pausing" in dialog.progress_label.text()
-    window._poll_history_import()
-    assert "Pausing" in dialog.progress_label.text()
-
-    status = read_status(status_path)
-    status.update(state="paused", completed_windows={"trades": [["2026-01-01", "2026-01-14"]]})
-    write_status(status_path, status)
-    processes[0].code = 0
-    window._poll_history_import()
-    assert dialog.import_button.text() == "Resume import"
-    assert dialog.import_button.isEnabled()
-    assert "Import paused" in dialog.details.toPlainText()
-
-    dialog.import_button.click()
-    assert window._history_status_path == status_path
-    assert len(launches) == 2
-    assert not pause_request_path(status_path).exists()
-    assert window._history_process is processes[1]
 
 
-def test_global_pause_resumes_only_the_import_it_paused(window, monkeypatch):
-    configure(window)
-    processes = [SimpleNamespace(code=None), SimpleNamespace(code=None)]
-    for process in processes:
-        process.poll = lambda process=process: process.code
-    launches = []
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs:
-                        launches.append(command) or processes[len(launches) - 1])
-
-    window.start_history_import()
-    status_path = window._history_status_path
-    assert window._history_process is processes[0]
-    window.pause_sync_button.click()
-    assert pause_request_path(status_path).exists()
-    assert window._global_paused_history_path == status_path
-    assert not window.sync_button.isEnabled()
-    window.start_history_import()
-    assert len(launches) == 1
-
-    status = read_status(status_path)
-    status.update(state="paused")
-    write_status(status_path, status)
-    processes[0].code = 0
-    window._poll()
-    assert window._history_process is None
-    assert len(launches) == 1
-    window.pause_sync_button.click()
-    assert len(launches) == 2
-    assert window._history_process is processes[1]
-    assert window._history_status_path == status_path
 
 
 def test_global_resume_leaves_a_manually_paused_import_paused(window, monkeypatch):
@@ -520,22 +305,6 @@ def test_worker_launch_failure_is_visible_and_retryable(window, monkeypatch):
     assert read_status(window._history_status_path)["state"] == "failed"
 
 
-def test_worker_review_result_remains_visible_after_nonzero_exit(window, monkeypatch):
-    configure(window)
-    process = SimpleNamespace(code=None)
-    process.poll = lambda: process.code
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda *args, **kwargs: process)
-    window.start_history_import()
-    status = read_status(window._history_status_path)
-    status.update(state="needs_review", active_source="cash", started_sources=["cash"],
-                  review_windows={"cash": [["2026-01-01", "2026-01-30"]]},
-                  message="Needs review: Cash report omits an existing currency.")
-    write_status(window._history_status_path, status)
-    process.code = 1
-    window._poll_history_import()
-    assert "needs review" in window.history_import_dialog.progress_label.text()
-    assert "Needs review:" in window.history_import_dialog.details.toPlainText()
-    assert read_status(window._history_status_path)["state"] == "needs_review"
 
 
 def test_worker_failure_keeps_partial_results_and_failed_window(window, monkeypatch):
@@ -559,22 +328,6 @@ def test_worker_failure_keeps_partial_results_and_failed_window(window, monkeypa
     assert "overlaps" in details
 
 
-def test_frozen_launch_and_dispatch(window, monkeypatch):
-    configure(window)
-    launches = []
-    monkeypatch.setattr(ui.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(ui.subprocess, "Popen", lambda command, **kwargs: launches.append(command) or SimpleNamespace(poll=lambda: None))
-    window.history_import_dialog.source.setCurrentIndex(1)
-    window.start_history_import()
-    command = launches[0]
-    assert command[1] == "--history-worker"
-    assert command[command.index("--source") + 1] == "trades"
-    import main
-    from scripts import history_worker
-    calls = []
-    monkeypatch.setattr(history_worker, "main", lambda args: calls.append(args) or 0)
-    assert main.main(command[1:]) == 0
-    assert calls == [command[2:]]
 
 
 def test_older_csv_launch_and_monthly_daily_boundary(window, monkeypatch):

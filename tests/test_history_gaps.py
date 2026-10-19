@@ -10,7 +10,7 @@ from app.storage.database import Database
 from app.flex import flex_import
 from app.flex.analytics_flex import run_analytics_flex_sync
 from app.flex.cash_flex import cash_import_windows, run_cash_flex_sync
-from app.flex.flex_import import FlexRequestPacer, FlexServiceError
+from app.flex.flex_import import FlexRequestPacer, FlexServiceError, FlexValidationError
 from app.platform.history_status import (format_history_details, pause_request_path,
                                          read_status, write_status)
 from app.sync.sync_service import run_flex_sync
@@ -121,6 +121,39 @@ def test_cash_import_splits_saved_periods_without_exceeding_365_days(tmp_path):
         assert cash_import_windows(db, "TEST", "2025-01-01",
                                    (cursor - timedelta(days=1)).isoformat()) == [
             ("2025-01-01", "2025-12-30"), ("2025-12-31", "2026-02-24")]
+    finally:
+        db.conn.close()
+
+
+def test_cash_import_combines_overlapping_saved_periods(tmp_path):
+    db = Database(tmp_path / "portfolio.sqlite3")
+    try:
+        with db.conn:
+            db.conn.executemany("""INSERT INTO broker_sync_windows
+                (account_id,source,from_day,to_day,status)
+                VALUES ('TEST','flex_cash',?,?,'complete')""", [
+                ("2026-01-01", "2026-01-14"),
+                ("2026-01-10", "2026-01-24"),
+                ("2026-01-20", "2026-01-31"),
+            ])
+        assert cash_import_windows(db, "TEST", "2026-01-12", "2026-01-26") == [
+            ("2026-01-01", "2026-01-31")]
+    finally:
+        db.conn.close()
+
+
+def test_cash_import_rejects_overlap_longer_than_flex_limit(tmp_path):
+    db = Database(tmp_path / "portfolio.sqlite3")
+    try:
+        with db.conn:
+            db.conn.executemany("""INSERT INTO broker_sync_windows
+                (account_id,source,from_day,to_day,status)
+                VALUES ('TEST','flex_cash',?,?,'complete')""", [
+                ("2025-01-01", "2025-12-30"),
+                ("2025-12-25", "2026-01-15"),
+            ])
+        with pytest.raises(FlexValidationError, match="overlapping Cash periods exceed"):
+            cash_import_windows(db, "TEST", "2025-01-01", "2026-01-15")
     finally:
         db.conn.close()
 

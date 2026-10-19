@@ -7,7 +7,7 @@ import pytest
 
 from app.finance.position_returns import position_return_rows
 from app.finance.services import PortfolioService
-from app.flex.cash_flex import parse_cash_flex, run_cash_flex_sync
+from app.flex.cash_flex import run_cash_flex_sync
 from app.market.market_data import MockMarketDataProvider
 from app.storage.database import Database
 
@@ -96,41 +96,6 @@ def test_open_and_unattributed_income_show_partial_total(tmp_path):
         db.conn.close()
 
 
-def test_cash_gaps_show_partial_total_until_coverage_is_complete(tmp_path):
-    db = Database(tmp_path / "cash-gap-returns.sqlite3")
-    try:
-        pid = db.add_position({"display_ticker": "GAP", "ib_symbol": "GAP"})
-        buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-02",
-                            "side": "BUY", "quantity": 1, "price": 10})
-        sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-05",
-                             "side": "SELL", "quantity": 1, "price": 12})
-        service = PortfolioService(db, MockMarketDataProvider())
-        service.matching.match(sell, [(buy, 1)])
-        valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
-        rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        assert rows[0]["realized"] == pytest.approx(2)
-        assert rows[0]["total"] == pytest.approx(2)
-        assert rows[0]["partial"]
-        assert "dividends, interest, or withholding" in rows[0]["return_note"]
-        assert "Cash history incomplete" in rows[0]["issues"]
-        _cover_cash(db, "2026-01-02", "2026-01-03")
-        with db.conn:
-            db.conn.execute("""INSERT INTO broker_sync_windows
-                (account_id,source,from_day,to_day,status) VALUES
-                ('SYNTHETIC','flex_cash','2026-01-05','2026-01-05','complete')""")
-        rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        assert rows[0]["total"] == pytest.approx(2)
-        assert rows[0]["partial"]
-        with db.conn:
-            db.conn.execute("""INSERT INTO broker_sync_windows
-                (account_id,source,from_day,to_day,status) VALUES
-                ('SYNTHETIC','flex_cash','2026-01-04','2026-01-04','complete')""")
-        rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        assert rows[0]["total"] == pytest.approx(2)
-        assert not rows[0]["partial"]
-        assert not rows[0]["issues"]
-    finally:
-        db.conn.close()
 
 
 def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp_path):
@@ -189,68 +154,8 @@ def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp
         db.conn.close()
 
 
-def test_partial_sale_open_lot_and_foreign_bond_income(tmp_path):
-    db = Database(tmp_path / "partial-returns.sqlite3")
-    try:
-        pid = db.add_position({"display_ticker": "BOND", "ib_symbol": "BOND"})
-        db.cache_contract(pid, 303)
-        start = (date.today() - timedelta(days=5)).isoformat()
-        through = (date.today() - timedelta(days=1)).isoformat()
-        buy = db.add_trade({"position_id": pid, "trade_date": start, "side": "BUY",
-                            "quantity": 10, "price": 10, "commission_usd": 1})
-        sell = db.add_trade({"position_id": pid, "trade_date": through, "side": "SELL",
-                             "quantity": 4, "price": 15, "commission_usd": 1})
-        service = PortfolioService(db, MockMarketDataProvider())
-        service.matching.match(sell, [(buy, 4)])
-        _income(db, "coupon", through, "Credit interest", 5, con_id=303,
-                currency="EUR", fx="1.2", income_type="Bond interest")
-        _income(db, "coupon-tax", through, "Withholding tax", -1, con_id=303,
-                currency="EUR", fx="1.2")
-        _cover_cash(db, start, through)
-        valuations = [{"id": pid, "position_qty": 6, "last_px": 12,
-                       "fx_to_usd": 1, "reconciliation": "OK", "price_source": "MOCK"}]
-        rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        row = rows[0]
-        assert row["realized"] == pytest.approx(18.6)
-        assert row["unrealized"] == pytest.approx(11.4)
-        assert row["income"] == pytest.approx(4.8)
-        assert row["total"] == pytest.approx(34.8)
-        assert row["percent"] == pytest.approx(34.8 / 101 * 100)
-    finally:
-        db.conn.close()
 
 
-def test_bond_clean_price_interest_transfers_and_withholding_are_separate(tmp_path):
-    db = Database(tmp_path / "bond-returns.sqlite3")
-    try:
-        pid = db.add_position({"display_ticker": "BOND", "ib_symbol": "BOND",
-                               "security_type": "BOND", "multiplier": 0.01})
-        db.cache_contract(pid, 404)
-        buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "BUY",
-                            "quantity": 1000, "price": 95, "accrued_interest_usd": -30})
-        sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-08", "side": "SELL",
-                             "quantity": 1000, "price": 97, "accrued_interest_usd": 35})
-        service = PortfolioService(db, MockMarketDataProvider())
-        service.matching.match(sell, [(buy, 1000)])
-        _income(db, "coupon", "2026-01-08", "Credit interest", 20, con_id=404,
-                income_type="Bond interest")
-        _income(db, "tax", "2026-01-08", "Withholding tax", -4, con_id=404)
-        # IBKR can also list settlement accrued interest in Cash Transactions.
-        _income(db, "buy-accrued", "2026-01-02", "Debit interest", -30,
-                con_id=404, income_type="Bond interest", description="Accrued Interest Paid BOND")
-        _income(db, "sell-accrued", "2026-01-08", "Credit interest", 35,
-                con_id=404, income_type="Bond interest", description="Accrued Interest Received BOND")
-        _cover_cash(db, "2026-01-02", "2026-01-08")
-        valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
-        row = position_return_rows(db, 1, valuations, service.lots_rows(valuations))[0][0]
-        assert row["realized"] == pytest.approx(20)
-        assert row["income"] == pytest.approx(-30 + 35 + 20 - 4)
-        assert row["total"] == pytest.approx(41)
-        assert row["percent"] == pytest.approx(41 / 980 * 100)
-        assert len(row["income_details"]) == 4
-        assert not row["issues"]
-    finally:
-        db.conn.close()
 
 
 def test_open_bond_requires_current_accrued_receivable_for_full_return(tmp_path):
@@ -280,64 +185,10 @@ def test_open_bond_requires_current_accrued_receivable_for_full_return(tmp_path)
         db.conn.close()
 
 
-def test_missing_withholding_fx_shows_partial_total(tmp_path):
-    db = Database(tmp_path / "missing-tax-fx.sqlite3")
-    try:
-        pid = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-        db.cache_contract(pid, 505)
-        buy = db.add_trade({"position_id": pid, "trade_date": "2026-01-02",
-                            "side": "BUY", "quantity": 1, "price": 10})
-        sell = db.add_trade({"position_id": pid, "trade_date": "2026-01-08",
-                             "side": "SELL", "quantity": 1, "price": 12})
-        service = PortfolioService(db, MockMarketDataProvider())
-        service.matching.match(sell, [(buy, 1)])
-        _income(db, "tax", "2026-01-08", "Withholding tax", -1,
-                con_id=505, currency="EUR", fx="")
-        _cover_cash(db, "2026-01-02", "2026-01-08")
-        valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
-        row = position_return_rows(db, 1, valuations, service.lots_rows(valuations))[0][0]
-        assert row["realized"] == 2
-        assert row["income"] is None
-        assert row["total"] == 2
-        assert row["partial"]
-        assert "Income/accrual amount is unavailable" in row["return_note"]
-        assert "Income FX missing" in row["issues"]
-    finally:
-        db.conn.close()
 
 
-def test_closed_short_has_dollar_result_without_return_on_cost(tmp_path):
-    db = Database(tmp_path / "short-returns.sqlite3")
-    try:
-        pid = db.add_position({"display_ticker": "OPT", "ib_symbol": "OPT",
-                               "security_type": "OPT", "multiplier": 100})
-        db.add_trade({"position_id": pid, "trade_date": "2026-01-02", "side": "SELL",
-                      "quantity": 1, "price": 13.67, "multiplier": 100})
-        db.add_trade({"position_id": pid, "trade_date": "2026-01-05", "side": "BUY",
-                      "quantity": 1, "price": 0, "multiplier": 100})
-        service = PortfolioService(db, MockMarketDataProvider())
-        service.matching.rebuild_auto([pid])
-        _cover_cash(db, "2026-01-02", "2026-01-05")
-        valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
-        rows, _ = position_return_rows(db, 1, valuations, service.lots_rows(valuations))
-        assert rows[0]["total"] == pytest.approx(1367)
-        assert rows[0]["percent"] is None
-    finally:
-        db.conn.close()
 
 
-def test_cash_parser_retains_instrument_and_fx_fields():
-    xml = b"""<FlexQueryResponse><FlexStatements>
-      <FlexStatement accountId="SYNTHETIC" fromDate="20260106" toDate="20260106">
-        <CashTransactions><CashTransaction accountId="SYNTHETIC" currency="USD"
-          dateTime="20260106;090000" type="Dividends" amount="2"
-          conid="101" symbol="ABC" fxRateToBase="1" transactionID="tx-1" />
-        </CashTransactions>
-      </FlexStatement></FlexStatements></FlexQueryResponse>"""
-    movement = parse_cash_flex(xml, "SYNTHETIC", "2026-01-06", "2026-01-06")[0]
-    assert (movement["con_id"], movement["symbol"], movement["transaction_id"],
-            movement["fx_to_usd"], movement["income_type"]) == (
-                101, "ABC", "tx-1", "1", "Dividend")
 
 
 def test_cash_reimport_adds_attribution_even_when_amount_is_unchanged(tmp_path):

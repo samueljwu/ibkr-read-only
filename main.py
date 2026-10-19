@@ -6,8 +6,12 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QInputDialog, QLineEdit, QMessageBox
 
 from app.ui import MainWindow
+from app.platform.paths import default_data_dir, new_portfolio_dir
+from app.storage.database import Database, MissingSelectedDatabase
 from app.storage.encryption import InvalidDatabaseKey, MissingDatabaseKey
+from app.views.database_selection import DatabaseSelectionWindow
 from app.version import VERSION
+from app.platform.app_update import launch_update
 
 
 def _show_recovery_code(parent, code):
@@ -79,26 +83,124 @@ def main(argv=None):
     app.setApplicationDisplayName("IBKR Dashboard")
     app.setApplicationVersion(VERSION)
     app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "app" / "assets" / "app_icon.png")))
-    try:
-        window = MainWindow(database_path=database_path)
-    except (MissingDatabaseKey, InvalidDatabaseKey):
-        while True:
-            code, accepted = QInputDialog.getText(
-                None, "Unlock portfolio", "Enter the 64-character database recovery code:",
-                QLineEdit.Password)
-            if not accepted:
-                return 1
+    windows = {}
+    chooser = None
+    switch_from = None
+
+    def show_chooser(current_window=None):
+        nonlocal switch_from
+        switch_from = current_window
+        current = current_window.db.path if current_window is not None else None
+        if current_window is not None:
+            chooser.set_appearance(current_window.theme, current_window.zoom_percent,
+                                   current_window.font())
+        chooser.refresh(Database.saved_databases(), current=current)
+        chooser.show()
+        chooser.raise_()
+        chooser.activateWindow()
+
+    def open_window(path, *, parent=None):
+        try:
+            return MainWindow(database_path=path, on_manage_portfolios=show_chooser)
+        except (MissingDatabaseKey, InvalidDatabaseKey):
+            while True:
+                code, accepted = QInputDialog.getText(
+                    parent, "Unlock portfolio", "Enter the 64-character database recovery code:",
+                    QLineEdit.Password)
+                if not accepted:
+                    return None
+                try:
+                    return MainWindow(database_path=path, recovery_key=code.strip(),
+                                      on_manage_portfolios=show_chooser)
+                except (MissingDatabaseKey, InvalidDatabaseKey, ValueError):
+                    QMessageBox.warning(parent, "Unlock portfolio",
+                                        "The recovery code could not open this database.")
+
+    def register(window):
+        marker = id(window)
+        window.setAttribute(Qt.WA_DeleteOnClose)
+        windows[marker] = window
+        window.destroyed.connect(lambda _object=None, key=marker: windows.pop(key, None))
+        window.show()
+        return window
+
+    def activate(path, recovery_code=None):
+        nonlocal switch_from
+        key = Path(path).resolve()
+        existing = next((window for window in windows.values()
+                         if window.db.path.resolve() == key), None)
+        if existing is not None:
             try:
-                window = MainWindow(database_path=database_path, recovery_key=code.strip())
-                break
-            except (MissingDatabaseKey, InvalidDatabaseKey, ValueError):
-                QMessageBox.warning(None, "Unlock portfolio", "The recovery code could not open this database.")
-    window.show()
-    recovery_code = getattr(getattr(window, "db", None), "recovery_code", None)
-    if recovery_code:
-        _show_recovery_code(window, recovery_code)
-        window.db.recovery_code = None
-    return app.exec()
+                Database.select_database(key)
+            except Exception as exc:
+                QMessageBox.warning(chooser, "Open portfolio", str(exc))
+                return
+            existing.showNormal()
+            existing.raise_()
+            existing.activateWindow()
+            chooser.close()
+            return
+        if not key.is_file():
+            QMessageBox.warning(chooser, "Open portfolio", "The selected database is unavailable.")
+            return
+        if switch_from is not None:
+            previous = switch_from
+            if not previous.close():
+                return
+            windows.pop(id(previous), None)
+            switch_from = None
+        selected = None
+        try:
+            selected = open_window(key, parent=chooser)
+            if selected is None:
+                return
+            Database.select_database(selected.db.path)
+        except Exception as exc:
+            if selected is not None:
+                selected.close()
+            QMessageBox.warning(chooser, "Open portfolio", str(exc))
+            return
+        register(selected)
+        chooser.close()
+        code = recovery_code or selected.db.recovery_code
+        if code:
+            _show_recovery_code(selected, code)
+            selected.db.recovery_code = None
+
+    def create_new():
+        try:
+            folder = new_portfolio_dir(default_data_dir())
+            created = Database(folder / "portfolio.sqlite3")
+            code = created.recovery_code
+            created.conn.close()
+        except Exception as exc:
+            QMessageBox.warning(chooser, "Create portfolio", str(exc))
+            return
+        activate(created.path, code)
+
+    chooser = DatabaseSelectionWindow(activate, create_new)
+    try:
+        window = open_window(database_path)
+    except MissingSelectedDatabase:
+        show_chooser()
+    else:
+        if window is None:
+            return 1
+        if database_path is not None:
+            Database.select_database(window.db.path)
+        register(window)
+        if window.db.recovery_code:
+            _show_recovery_code(window, window.db.recovery_code)
+            window.db.recovery_code = None
+    result = app.exec()
+    pending_update = getattr(app, "pending_update", None)
+    if pending_update is not None:
+        try:
+            launch_update(*pending_update)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(None, "Update could not start",
+                                f"The installer was downloaded to:\n{pending_update[0]}\n\n{exc}")
+    return result
 
 
 if __name__ == "__main__":

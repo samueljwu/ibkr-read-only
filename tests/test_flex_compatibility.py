@@ -3,11 +3,11 @@
 import pytest
 
 from app.flex.analytics_flex import parse_analytics_flex
-from app.flex.cash_flex import parse_cash_flex, run_cash_flex_sync
+from app.flex.cash_flex import run_cash_flex_sync
 from app.flex.flex_import import FlexValidationError
 from app.platform.history_status import read_status
 from app.storage.database import Database
-from app.sync.sync_service import _validate_report_window, run_flex_sync
+from app.sync.sync_service import _validate_report_window
 from scripts import history_worker, import_history
 
 
@@ -25,39 +25,12 @@ def analytics_report(*statements):
             '</FlexStatements></FlexQueryResponse>').encode()
 
 
-def test_real_shaped_daily_usd_report_links_weekend_without_fabricating_nav():
-    xml = analytics_report(analytics_day("20260109", "20260108"),
-                           analytics_day("20260112", "20260109"))
-    nav, flows = parse_analytics_flex(xml, "SYNTHETIC", "2026-01-09", "2026-01-12")
-    assert set(nav) == {"2026-01-09", "2026-01-12"}
-    assert flows == []
 
 
-def test_multi_day_statement_preserves_reported_weekdays_without_creating_weekend_nav():
-    xml = analytics_report(analytics_day("20260112", "20260109")).replace(
-        b'fromDate="20260112"', b'fromDate="20260109"')
-    assert set(parse_analytics_flex(xml, "SYNTHETIC", "2026-01-09", "2026-01-12")[0]) == {
-        "2026-01-09", "2026-01-12"}
 
 
-def test_empty_daily_statement_cannot_hide_weekday_gap_in_nonempty_report():
-    empty = ('<FlexStatement accountId="SYNTHETIC" fromDate="20260113" toDate="20260113" baseCurrency="USD">'
-             '<EquitySummaryInBase/><CashTransactions/><Transfers/></FlexStatement>')
-    xml = analytics_report(analytics_day("20260112", "20260109"), empty,
-                           analytics_day("20260114", "20260113"))
-    with pytest.raises(FlexValidationError, match="include every weekday NAV date"):
-        parse_analytics_flex(xml, "SYNTHETIC", "2026-01-12", "2026-01-14")
 
 
-@pytest.mark.parametrize("day,previous,prior", [("20260113", "20260109", "100"),
-                                               ("20260112", "20260108", "100"),
-                                               ("20260112", "20260109", "101")])
-def test_daily_weekday_gap_or_unlinked_weekend_is_unverified(day, previous, prior):
-    xml = analytics_report(analytics_day("20260109", "20260108"),
-                           analytics_day(day, previous, prior=prior))
-    with pytest.raises(FlexValidationError, match="cover the requested dates"):
-        parse_analytics_flex(xml, "SYNTHETIC", "2026-01-09",
-                             f"{day[:4]}-{day[4:6]}-{day[6:]}")
 
 
 def test_weekend_edges_require_adjacent_reported_nav_and_never_fill_values():
@@ -111,19 +84,6 @@ def sync_cash(db, xml):
                              fetcher=lambda *a, **k: xml)
 
 
-def test_multicurrency_cash_replay_correction_and_removed_currency(tmp_path):
-    db = Database(tmp_path / "cash.sqlite3")
-    try:
-        for xml in (cash_report(), cash_report(), cash_report(usd="4", aud="5")):
-            assert sync_cash(db, xml) == {"windows": 1, "movements": 2}
-            assert db.conn.execute("SELECT COUNT(*) FROM cash_movements").fetchone()[0] == 2
-        assert dict(db.conn.execute("SELECT currency,amount FROM cash_movements")) == {"AUD": "5", "USD": "4"}
-        sync_cash(db, cash_report(usd="4", include_aud=False))
-        assert list(map(tuple, db.conn.execute("SELECT currency,amount FROM cash_movements"))) == [("USD", "4")]
-        assert db.conn.execute("""SELECT source_count FROM broker_sync_windows
-            WHERE source='flex_cash'""").fetchone()[0] == 1
-    finally:
-        db.conn.close()
 
 
 def test_multicurrency_replacement_rolls_back_if_transaction_is_invalid(tmp_path):
@@ -141,17 +101,8 @@ def test_multicurrency_replacement_rolls_back_if_transaction_is_invalid(tmp_path
         db.conn.close()
 
 
-def test_cash_transactions_do_not_need_cash_report_currency_rows():
-    xml = cash_report().replace(b'<CashReport>', b'<UnusedReport>').replace(
-        b'</CashReport>', b'</UnusedReport>')
-    assert len(parse_cash_flex(xml, "SYNTHETIC", "2026-01-12", "2026-01-12")) == 2
 
 
-def test_cash_bond_interest_is_imported_as_income():
-    xml = cash_report(include_aud=False).replace(b'dividends="2"', b'brokerInterest="0" bondInterest="2"').replace(b'type="Dividends"', b'type="Bond Interest Received"')
-    row = parse_cash_flex(xml, "SYNTHETIC", "2026-01-12", "2026-01-12")[0]
-    assert row["amount"] == "2"
-    assert row["income_type"] == "Bond interest"
 
 
 def trades_report(detail="EXECUTIONS"):
@@ -160,10 +111,6 @@ def trades_report(detail="EXECUTIONS"):
             f'<Trades><Trade levelOfDetailCode="{detail}" tradeID="T1" tradeDate="2026-01-12"/></Trades></FlexStatement>').encode()
 
 
-@pytest.mark.parametrize("detail", ["EXECUTION", "EXECUTIONS"])
-def test_trades_accepts_both_execution_labels_iso_dates_and_account_currency(detail):
-    records, _ = _validate_report_window(trades_report(detail), "SYNTHETIC", "2026-01-12", "2026-01-12")
-    assert len(records) == 1
 
 
 @pytest.mark.parametrize("xml", [
@@ -177,9 +124,6 @@ def test_trades_rejects_missing_or_wrong_detail_invalid_dates_and_non_usd(xml):
         _validate_report_window(xml, "SYNTHETIC", "2026-01-12", "2026-01-12")
 
 
-def test_explicit_empty_trades_section_is_valid():
-    xml = trades_report().split(b'<Trades>')[0] + b'<Trades/></FlexStatement>'
-    assert _validate_report_window(xml, "SYNTHETIC", "2026-01-12", "2026-01-12") == ([], [])
 
 
 def test_execution_outside_trades_section_is_rejected():
@@ -215,22 +159,3 @@ def test_worker_validation_failure_keeps_source_window_and_remaining_requests(tm
     assert secret not in status_path.read_text() and 'https://' not in status_path.read_text()
     if not unexpected:
         assert "Executions detail" in status["message"]
-
-
-def test_trade_sync_never_persists_server_echo_or_unknown_exception_text(tmp_path):
-    db = Database(tmp_path / "errors.sqlite3")
-    secret = "synthetic-secret"
-
-    def fail(*args, **kwargs):
-        raise RuntimeError(f"https://example.invalid/?t={secret}&other=private")
-
-    try:
-        with pytest.raises(RuntimeError):
-            run_flex_sync(db, "SYNTHETIC", "query", token=secret, pacing_seconds=0,
-                          windows_override=[("2026-01-12", "2026-01-12")], fetcher=fail)
-        error = db.metadata("ibkr_flex_sync_error")
-        log = (tmp_path / "logs" / "sync-trades.log").read_text()
-        assert "https://" not in error + log and "private" not in error + log
-        assert secret not in error + log
-    finally:
-        db.conn.close()

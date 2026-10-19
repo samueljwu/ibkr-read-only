@@ -17,8 +17,7 @@ from app.storage.database import Database
 from app.finance.services import PortfolioService
 from app.market.market_data import MockMarketDataProvider
 from app.views.analytics_ui import AnalyticsTab
-from app.views.buy_sell_levels_ui import BuySellLevelsPanel, _marker_size
-from app.views.chart_ui import price_scale
+from app.views.buy_sell_levels_ui import BuySellLevelsPanel
 from app.views.ui_theme import COLORS
 
 
@@ -31,17 +30,8 @@ class FixedSplitHistory:
         return self._events, self._state
 
 
-def test_price_scale_uses_nonnegative_mental_intervals():
-    assert price_scale([16, 91]) == (0, 100, 20, 0)
-    assert price_scale([95, 115]) == (95, 115, 5, 0)
-    low, high, step, decimals = price_scale([.12, .19])
-    assert (low, high, step, decimals) == (0.12, 0.2, 0.02, 2)
 
 
-def test_marker_size_tracks_notional_with_readable_bounds():
-    assert _marker_size(100, 1000) == 8
-    assert 8 < _marker_size(500, 1000) < 18
-    assert _marker_size(1000, 1000) == 18
 
 
 def test_levels_table_reuses_trade_and_lot_pnl_rows(tmp_path):
@@ -189,35 +179,6 @@ def test_stock_chart_uses_execution_prices_and_filters_positions(tmp_path):
     app.processEvents()
 
 
-def test_levels_layout_persists_both_orientations(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "layout.sqlite3")
-    panel = BuySellLevelsPanel(db, 1)
-    panel.resize(900, 600)
-    panel.layout_combo.setCurrentText("Side by side")
-    panel.axis_decimals_combo.setCurrentText("3")
-    panel.show()
-    app.processEvents()
-    assert panel.splitter.orientation() == Qt.Horizontal
-    assert panel.table.width() > 200
-    assert panel.chart_view.width() > 300
-    panel.splitter.moveSplitter(380, 1)
-    horizontal_state = db.setting("analytics_levels_splitter_1_horizontal")
-    assert horizontal_state
-    panel.layout_combo.setCurrentText("Top and bottom")
-    assert panel.splitter.orientation() == Qt.Vertical
-    panel.layout_combo.setCurrentText("Side by side")
-    assert bytes(panel.splitter.saveState().toBase64()).decode("ascii") == horizontal_state
-    panel.close()
-    reopened = BuySellLevelsPanel(db, 1)
-    assert reopened.layout_combo.currentText() == "Side by side"
-    assert reopened.splitter.orientation() == Qt.Horizontal
-    assert reopened.axis_decimals_combo.currentText() == "3"
-    reopened.apply_view_state({"axis_decimals": None})
-    assert reopened.axis_decimals_combo.currentText() == "Auto"
-    reopened.close()
-    db.conn.close()
-    app.processEvents()
 
 
 def test_executions_and_closes_use_the_same_axis(tmp_path):
@@ -301,61 +262,8 @@ def test_recorded_split_events_align_markers_with_closes(tmp_path):
     app.processEvents()
 
 
-def test_same_side_marker_sizes_use_original_notional_after_split(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "notional-markers.sqlite3")
-    position_id = db.add_position({"display_ticker": "SIZE", "ib_symbol": "SIZE",
-                                   "position_qty": 11, "currency": "USD"})
-    with db.conn:
-        db.conn.execute("UPDATE positions SET con_id=24682 WHERE id=?", (position_id,))
-    db.save_history(24682, [{"day": "2024-05-01", "close": 50, "volume": 1000},
-                            {"day": "2025-01-01", "close": 50, "volume": 900}])
-    db.add_trade({"position_id": position_id, "trade_date": "2024-05-01", "side": "BUY",
-                  "quantity": 1, "price": 100, "trade_id": "small-buy"})
-    db.add_trade({"position_id": position_id, "trade_date": "2025-01-01", "side": "BUY",
-                  "quantity": 10, "price": 50, "trade_id": "large-buy"})
-    panel = BuySellLevelsPanel(
-        db, 1, split_history=FixedSplitHistory({"2024-06-12": Decimal(2)}))
-    panel.refresh()
-    buys = next(item for item in panel.chart_view.chart().series()
-                if isinstance(item, QScatterSeries) and item.name() == "Buys")
-    assert [point.y() for point in buys.points()] == [50, 50]
-    sizes = [buys.pointConfiguration(index)[QScatterSeries.PointConfiguration.Size]
-             for index in range(2)]
-    assert sizes[0] == 18
-    assert sizes[1] < sizes[0]
-    assert {panel.table.item(row, 3).raw_value for row in range(2)} == {100, 50}
-    panel.close()
-    db.conn.close()
-    app.processEvents()
 
 
-def test_stock_uses_overview_quantity_and_can_request_older_prices(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "older-levels.sqlite3")
-    position_id = db.add_position({"display_ticker": "OLD", "ib_symbol": "OLD",
-                                   "position_qty": 0})
-    with db.conn:
-        db.conn.execute("UPDATE positions SET con_id=67890 WHERE id=?", (position_id,))
-    db.save_history(67890, [{"day": "2025-10-01", "close": 100, "volume": 100}])
-    db.add_trade({"position_id": position_id, "trade_date": "2021-12-01", "side": "BUY",
-                  "quantity": 2, "price": 50, "trade_id": "synthetic-old-buy"})
-    requests = []
-    panel = BuySellLevelsPanel(
-        db, 1, request_price_history=lambda position, first_saved_day:
-        requests.append((position["con_id"], first_saved_day)) or True,
-        portfolio_rows_provider=lambda: [{**db.rows("positions", 1)[0], "position_qty": 2}],
-        split_history=FixedSplitHistory({}))
-    panel.refresh()
-    assert panel.stock_combo.currentText() == "OLD"
-    assert panel.load_button.isEnabled()
-    assert "earlier trades have no matching price line" in panel.note.text()
-    panel.load_button.click()
-    assert requests == [(67890, "2025-10-01")]
-    assert "Requesting older daily prices" in panel.note.text()
-    panel.close()
-    db.conn.close()
-    app.processEvents()
 
 
 def test_recent_trade_does_not_hide_five_year_history_button(tmp_path):

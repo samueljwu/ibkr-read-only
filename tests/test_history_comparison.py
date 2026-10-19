@@ -340,6 +340,32 @@ def test_cash_import_consolidates_old_periods_and_preserves_movements(db, monkey
     assert list(_iterdump(db.conn)) == before
 
 
+def test_cash_import_repairs_overlapping_saved_periods(db, monkeypatch):
+    first, last = "2026-01-01", "2026-01-23"
+    run_cash_flex_sync(db, ACCOUNT, "synthetic", token="synthetic", pacing_seconds=0,
+        windows_override=[(first, "2026-01-14")],
+        fetcher=lambda *a, **k: cash_report(first, "2026-01-14", amounts=("5",)))
+    with db.conn:
+        db.conn.execute("""INSERT INTO broker_sync_windows
+            (account_id,source,from_day,to_day,status)
+            VALUES (?,'flex_cash','2026-01-10',?,'complete')""", (ACCOUNT, last))
+    calls = []
+
+    def fetcher(*a, from_day, to_day):
+        calls.append((from_day, to_day))
+        return cash_report(first, last, amounts=("5",))
+
+    monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
+    monkeypatch.setitem(import_history.RUNNERS, "cash", partial(run_cash_flex_sync,
+        token="synthetic", fetcher=fetcher))
+    assert import_history.main(["--source", "cash", "--from-date", "2026-01-12",
+        "--to-date", "2026-01-20", "--database", str(db.path)]) == 0
+    assert calls == [(first, last)]
+    assert [tuple(row) for row in db.conn.execute("""SELECT from_day,to_day
+        FROM broker_sync_windows WHERE source='flex_cash'""")] == [(first, last)]
+    assert [row[0] for row in db.conn.execute("SELECT amount FROM cash_movements")] == ["5"]
+
+
 def test_cash_import_rejects_unknown_type_without_replacing_old_periods(db, tmp_path, monkeypatch):
     seed_adjacent(db)
     before = list(_iterdump(db.conn))

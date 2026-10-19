@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from math import isfinite
 
-from app.finance.calculations import valid_multiplier, valid_price
+from app.finance.calculations import effective_commission_usd, valid_multiplier, valid_price
 
 
 INCOME_KINDS = {"Dividend", "Payment in lieu", "Withholding tax", "Bond interest"}
@@ -142,6 +142,8 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
             issues.append("Position difference")
         if any(t["security_type"] != position["security_type"] for t in position_trades):
             issues.append("Security type mismatch")
+        if any(not t["commission_complete"] for t in position_trades):
+            issues.append("Fee/rebate pending; returns exclude that amount")
         first_trade = min((t["trade_date"] for t in position_trades if t["trade_date"]), default=None)
         estimated_baseline = next((t["trade_date"] for t in position_trades
                                    if t["source"] == "CSV market baseline"), None)
@@ -226,11 +228,11 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                 continue
             multiplier = valid_multiplier(trade["multiplier"])
             fx = valid_price(trade["fx_to_usd"])
-            if multiplier is None or fx is None or not trade["commission_complete"]:
+            if multiplier is None or fx is None:
                 cost_valid = False
                 break
             cost += float(trade["quantity"]) * float(trade["price"]) * multiplier * fx
-            cost += float(trade["commission_usd"])
+            cost += float(effective_commission_usd(trade))
             # accrued_interest_usd is negative on a BUY (cash paid out), so subtracting
             # it increases cost, mirroring the closed_lot/open_lot proration convention.
             cost -= float(trade["accrued_interest_usd"] or 0)

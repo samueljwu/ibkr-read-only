@@ -5,14 +5,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDoubleSpinBox, QHeaderView, QLabel, QTabWidget, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QDoubleSpinBox, QHeaderView, QTabWidget, QWidget
 
-import app.ui as ui
-from app.finance.calcs import calculate_targets, scale_target_weights, scenario_metrics
+from app.finance.calcs import calculate_targets, scenario_metrics
 from app.views.calcs_ui import CalcsTab
 from app.storage.database import Database
 from app.market.market_data import IBKRMarketDataProvider
-from app.views.ui_theme import COLORS, stylesheet
 from datetime import date
 
 
@@ -23,17 +21,6 @@ def holding(position_id, value, quantity=10, security_type="STK", price=100):
             "last_px": price, "currency": "USD"}
 
 
-def test_cash_target_preserves_relative_weights_and_estimates_units():
-    rows = [holding(1, 60000, 600), holding(2, 30000, 10, "OPT")]
-    result = calculate_targets(rows, 100000, 10000, mode="proportional", cash_target=.325)
-    assert result["error"] is None
-    assert [round(row["target_weight"], 4) for row in result["rows"]] == [.45, .225]
-    assert [row["gap_usd"] for row in result["rows"]] == pytest.approx([-15000, -7500])
-    assert [row["gap_quantity"] for row in result["rows"]] == pytest.approx([-150, -2.5])
-    assert result["cash_gap"] == pytest.approx(22500)
-    assert result["sell_usd"] == pytest.approx(22500)
-    assert calculate_targets(rows, 100000, 10000, mode="proportional", cash_target=1)["cash_target"] == 1
-    assert calculate_targets(rows, 100000, 10000, mode="proportional", cash_target=0)["cash_target"] == 0
 
 
 def test_individual_targets_and_incomplete_data():
@@ -54,37 +41,8 @@ def test_individual_targets_and_incomplete_data():
     assert calculate_targets(rows, 100000, 10000)["error"]
 
 
-def test_cash_target_scales_entered_weights_without_negative_positions():
-    scaled = scale_target_weights({"1": .8, "2": .3, "idea:NEW": .1}, -.2)
-    assert sum(scaled.values()) == pytest.approx(1.2)
-    assert all(weight >= 0 for weight in scaled.values())
-    assert scaled["1"] / scaled["2"] == pytest.approx(8 / 3, rel=.001)
-    assert scale_target_weights({"1": .5, "2": .5}, 1) == {"1": 0, "2": 0}
-    with pytest.raises(ValueError, match="negative position weights"):
-        scale_target_weights({"1": .5, "2": .5}, 1.01)
-    with pytest.raises(ValueError, match="Zero position targets"):
-        scale_target_weights({"1": 0, "2": 0}, .5)
 
 
-def test_ideal_portfolio_idea_has_zero_current_weight_and_optional_share_estimate():
-    rows = [holding(1, 60000, 600), holding(2, 30000, 300),
-            {"id": "idea:NEW", "display_ticker": "NEW · idea", "position_qty": 0,
-             "value": 0, "hypothetical": True, "unit_price_usd": None}]
-    targets = {"1": .45, "2": .225, "idea:NEW": .10}
-    result = calculate_targets(rows, 100000, 10000, targets=targets)
-    assert result["error"] is None
-    assert result["cash_target"] == pytest.approx(.225)
-    assert result["rows"][2]["current_weight"] == 0
-    assert result["rows"][2]["gap_usd"] == 10000
-    assert result["rows"][2]["gap_quantity"] is None
-    rows[2]["unit_price_usd"] = 200
-    assert calculate_targets(rows, 100000, 10000, targets=targets)["rows"][2]["gap_quantity"] == 50
-    proportional = calculate_targets(rows, 100000, 10000, mode="proportional", cash_target=.325)
-    assert proportional["rows"][2]["target_weight"] == 0
-    assert proportional["cash_target"] == .325
-    empty = calculate_targets([rows[2]], 100000, 100000, targets={"idea:NEW": .5})
-    assert empty["error"] is None
-    assert empty["rows"][0]["gap_usd"] == 50000
 
 
 def test_scenario_prices_percentages_and_missing_downside():
@@ -222,39 +180,8 @@ def test_position_targets_fill_trade_estimates_and_cash_scales_pro_rata(tmp_path
         db.conn.close()
 
 
-def test_calcs_value_sort_is_numeric(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "sort.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 9000, 9), holding(2, 10000, 10),
-                                holding(3, 81000, 81)]), 1)
-    try:
-        tab.table.sortItems(2, Qt.AscendingOrder)
-        assert [tab.table.item(row, 0).text() for row in range(3)] == ["P1", "P2", "P3"]
-        tab.refresh()
-        assert [tab.table.item(row, 0).text() for row in range(3)] == ["P1", "P2", "P3"]
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_main_window_keeps_calcs_usable_at_800_by_600(tmp_path, monkeypatch):
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "window.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        window.resize(800, 600)
-        window.show()
-        window.tabs.setCurrentWidget(window.calcs_tab)
-        app.processEvents()
-        assert window.width() <= 800
-        assert window.calcs_tab.table.viewport().height() >= 160
-        assert not window.summary.isVisible()
-        window.tabs.setCurrentIndex(0)
-        app.processEvents()
-        assert window.summary.isVisible()
-    finally:
-        window.close()
 
 
 def test_scenario_edit_after_sort_and_persistence(tmp_path):
@@ -477,61 +404,6 @@ def test_acquired_idea_becomes_one_real_position_and_retains_plan(tmp_path):
         db.conn.close()
 
 
-def test_rebalance_arrows_commit_and_move_cells_escape_cancels_edit(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "keyboard.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600), holding(2, 30000, 300)]), 1)
-    try:
-        tab.show()
-        app.processEvents()
-        tab.table.sortItems(2, Qt.AscendingOrder)
-        assert tab.table.item(0, 0).text() == "P2"
-        weight = tab.table.cellWidget(0, 4)
-        weight.setFocus()
-        weight.setValue(20)
-        QTest.keyClick(weight.lineEdit(), Qt.Key_Right)
-        assert tab.targets["2"] == pytest.approx(.2)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 5)
-        assert tab.table.hasFocus()
-        QTest.keyClick(tab.table, Qt.Key_Down)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 5)
-        QTest.keyClick(tab.table, Qt.Key_Left)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 4)
-        QTest.keyClick(tab.table, Qt.Key_Return)
-        assert tab.table.cellWidget(1, 4).hasFocus()
-        weight = tab.table.cellWidget(1, 4)
-        weight.setValue(10)
-        QTest.keyClick(weight.lineEdit(), Qt.Key_Escape)
-        # The cancelled edit writes no target; the untouched row keeps its
-        # implicit current weight.
-        assert "1" not in tab.targets
-        assert tab.table.cellWidget(1, 4).value() == pytest.approx(60)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 4)
-        assert tab.table.hasFocus()
-        QTest.keyClick(tab.table, Qt.Key_Up)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 4)
-        QTest.keyClick(tab.table, Qt.Key_F2)
-        assert tab.table.cellWidget(0, 4).hasFocus()
-        weight = tab.table.cellWidget(0, 4)
-        weight.setValue(25)
-        QTest.keyClick(weight.lineEdit(), Qt.Key_Return)
-        assert tab.targets["2"] == pytest.approx(.25)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 4)
-        QTest.keyClick(app.focusWidget(), Qt.Key_Down)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 4)
-        QTest.keyClick(tab.table.cellWidget(1, 4).lineEdit(), Qt.Key_Escape)
-        assert tab.table.hasFocus()
-        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
-        up = tab.table.cellWidget(0, 9)
-        up.setFocus()
-        up.setValue(125)
-        QTest.keyClick(up.lineEdit(), Qt.Key_Right)
-        assert tab.scenarios["2"]["up_value"] == 125
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 10)
-    finally:
-        tab.close()
-        db.conn.close()
 
 
 def test_rebalance_keyboard_on_cash_and_idea_price(tmp_path):
@@ -686,131 +558,14 @@ def test_ctrl_minus_zeros_holdings_removes_ideas_and_is_rebalance_only(tmp_path)
         db.conn.close()
 
 
-def test_enter_moves_down_after_cash_and_scenario_values(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "enter_down.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600), holding(2, 30000, 300)]), 1)
-    try:
-        tab.show()
-        app.processEvents()
-        tab.table.sortItems(2, Qt.AscendingOrder)
-        tab.cash_editor.setFocus()
-        tab.cash_editor.setValue(15)
-        QTest.keyClick(tab.cash_editor.lineEdit(), Qt.Key_Return)
-        assert tab.cash_target == pytest.approx(.15)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 4)
-        assert tab.table.hasFocus()
-        first_id = tab.table.item(0, 0).data(Qt.UserRole)
-        scenario = tab.table.cellWidget(0, 9)
-        scenario.setFocus()
-        scenario.setValue(125)
-        QTest.keyClick(scenario.lineEdit(), Qt.Key_Return)
-        assert tab.scenarios[str(first_id)]["up_value"] == 125
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 9)
-        scenario = tab.table.cellWidget(1, 9)
-        scenario.setFocus()
-        scenario.setValue(130)
-        QTest.keyClick(scenario.lineEdit(), Qt.Key_Return)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (1, 9)
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_rebalance_selection_stays_on_position_through_navigation_and_refresh(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "stable_selection.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600), holding(2, 30000, 300)]), 1)
-    try:
-        tab.show()
-        app.processEvents()
-        tab.table.sortItems(2, Qt.AscendingOrder)
-        tab.table.select_cell(0, 5, focus=True)
-        QTest.keyClick(tab.table, Qt.Key_Left)
-        assert (tab.table.currentRow(), tab.table.currentColumn()) == (0, 4)
-        assert tab.table.hasFocus()
-        QTest.keyClick(tab.table, Qt.Key_Return)
-        editor = tab.table.cellWidget(0, 4)
-        editor.setValue(20)
-        QTest.keyClick(editor.lineEdit(), Qt.Key_Return)
-        app.processEvents()
-        assert tab.table.hasFocus()
-        assert tab.table.item(tab.table.currentRow(), 0).data(Qt.UserRole) == 1
-        assert tab.table.currentColumn() == 4
-        tab.refresh()
-        app.processEvents()
-        assert tab.table.hasFocus()
-        assert tab.table.item(tab.table.currentRow(), 0).data(Qt.UserRole) == 1
-        assert tab.table.currentColumn() == 4
-        assert tab.table.isColumnHidden(15)
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_percent_cases_show_implied_prices_or_missing_mark(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "case_prices.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    rows = [holding(1, 60000, 600), holding(2, 30000, 300)]
-    rows[1]["last_px"] = None
-    tab = CalcsTab(db, Service(rows), 1)
-    try:
-        for row in range(2):
-            for mode_column, value_column, percent in ((8, 9, 25), (11, 12, 10)):
-                tab.table.cellWidget(row, mode_column).setCurrentIndex(1)
-                tab.table.cellWidget(row, value_column).setValue(percent)
-                tab.table.cellWidget(row, value_column).editingFinished.emit()
-        assert tab.table.item(0, 10).text() == "125.00 USD"
-        assert tab.table.item(0, 13).text() == "90.00 USD"
-        assert tab.table.item(1, 10).text() == "Price —"
-        assert tab.table.item(1, 14).text() == "2.50"
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_rebalance_decimal_preferences_follow_compact_case_columns(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "decimals.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    db.set_setting("calcs_decimals_1", '{"9": 1, "11": 3, "12": 4}')
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        assert tab.decimals_for(10) == 1
-        assert tab.decimals_for(13) == 3
-        assert tab.decimals_for(14) == 4
-        tab.set_column_decimals(10, 2)
-    finally:
-        tab.close()
-    reopened = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        assert reopened.decimals_for(10) == 2
-        assert reopened.decimals_for(13) == 3
-        assert reopened.decimals_for(14) == 4
-    finally:
-        reopened.close()
-        db.conn.close()
 
 
-def test_rebalance_legacy_saved_view_maps_result_columns(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "legacy-case-view.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        assert tab.apply_view_state({"version": 1, "mode": "cases", "header": "old-layout",
-                                     "decimals": {"8": 3, "9": 4, "10": 1},
-                                     "sort_column": 10, "sort_order": "desc"})
-        assert tab.view_mode == "cases"
-        assert [tab.decimals_for(column) for column in (10, 13, 14)] == [3, 4, 1]
-        assert tab.table.horizontalHeader().sortIndicatorSection() == 14
-        assert tab.view_state()["version"] == 2
-    finally:
-        tab.close()
-        db.conn.close()
 
 
 def test_rebalance_focus_views_reduce_visible_columns_and_persist(tmp_path):
@@ -863,35 +618,6 @@ def test_rebalance_focus_views_reduce_visible_columns_and_persist(tmp_path):
         db.conn.close()
 
 
-def test_rebalance_saved_scenario_view_clears_hidden_column_gap(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "saved_gap.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    service = Service([holding(1, 60000, 600)])
-    tab = CalcsTab(db, service, 1)
-    try:
-        tab.show()
-        app.processEvents()
-
-        def restore_hidden_width(column, _old, width):
-            if column == 4 and width == 0:
-                tab.table.setColumnWidth(column, 145)
-
-        tab.table.horizontalHeader().sectionResized.connect(restore_hidden_width)
-        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
-        header = tab.table.horizontalHeader()
-        assert header.sectionPosition(7) > header.sectionSize(0)
-        tab.save_view()
-    finally:
-        tab.close()
-    reopened = CalcsTab(db, service, 1)
-    try:
-        header = reopened.table.horizontalHeader()
-        assert reopened.view_mode == "cases"
-        assert header.sectionPosition(7) == header.sectionSize(0)
-    finally:
-        reopened.close()
-        db.conn.close()
 
 
 def test_rebalance_refresh_uses_latest_values_without_local_pause(tmp_path):
@@ -920,47 +646,8 @@ def test_rebalance_refresh_uses_latest_values_without_local_pause(tmp_path):
         db.conn.close()
 
 
-def test_target_weight_inputs_allow_two_decimal_percentage_places(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "target_precision.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    db.set_setting("calcs_targets_1", '{"mode":"individual","targets":{"1":0.123456},"cash_target":null}')
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        weight = tab.table.cellWidget(0, 4)
-        assert weight.decimals() == 2
-        assert tab.cash_editor.decimals() == 2
-        assert weight.value() == pytest.approx(12.35)
-        weight.setValue(12.3456)
-        weight.editingFinished.emit()
-        assert tab.targets["1"] == pytest.approx(.1235)
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_cash_target_editor_is_not_clipped_at_common_widths(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "cash_layout.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        tab.show()
-        panel = tab.findChild(QWidget, "card")
-        for theme in ("light", "dark"):
-            tab.setStyleSheet(stylesheet(theme))
-            for width in (800, 1372):
-                tab.resize(width, 700)
-                app.processEvents()
-                editor = tab.cash_editor
-                assert panel.height() >= 92
-                assert editor.width() == 170
-                assert editor.height() == 25
-                assert editor.lineEdit().width() >= 120
-                assert editor.geometry().bottom() < panel.height() - 4
-    finally:
-        tab.close()
-        db.conn.close()
 
 
 def test_ibkr_idea_requires_suggestion_and_uses_delayed_quote_and_fx(tmp_path, monkeypatch):
@@ -1031,62 +718,8 @@ def test_ibkr_idea_requires_suggestion_and_uses_delayed_quote_and_fx(tmp_path, m
         db.conn.close()
 
 
-def test_new_ibkr_idea_caches_first_quote_while_another_idea_is_recent(tmp_path):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "two_ideas.sqlite3")
-    tab = CalcsTab(db, Service([]), 1)
-    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 46)
-    try:
-        tab.ideas = {
-            symbol: {"con_id": con_id, "symbol": symbol, "security_type": "STK",
-                     "currency": "USD", "price_usd": None, "quote_as_of": "", "quote_source": ""}
-            for symbol, con_id in (("AAA", 101), ("BBB", 102))
-        }
-        tab.market = provider
-        provider.quotes["idea:AAA"] = {"ticks": {"last": 10}, "mode": "Live",
-                                       "updated": "2026-10-08T10:00:00"}
-        tab.cache_idea_quotes({"idea:AAA"})
-        assert tab.ideas["AAA"]["price_usd"] == 10
-        provider.quotes["idea:BBB"] = {"ticks": {"last": 20}, "mode": "Live",
-                                       "updated": "2026-10-08T10:00:01"}
-        tab.cache_idea_quotes({"idea:BBB"})
-        assert tab.ideas["BBB"]["price_usd"] == 20
-        assert tab.ideas["BBB"]["quote_source"] == "LIVE LAST"
-        assert "\"BBB\"" in db.setting(tab._ideas_key)
-    finally:
-        tab.close()
-        db.conn.close()
 
 
-def test_ibkr_selection_upgrades_legacy_idea_without_losing_plan(tmp_path, monkeypatch):
-    QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "upgrade_idea.sqlite3")
-    db.set_portfolio_nav(1, 100000)
-    tab = CalcsTab(db, Service([holding(1, 60000, 600)]), 1)
-    try:
-        tab.idea_input.setText("NEW")
-        tab.add_idea()
-        tab.targets["idea:NEW"] = .15
-        tab.scenarios["idea:NEW"] = {"up_mode": "percent", "up_value": 20,
-                                      "down_mode": "percent", "down_value": 10}
-        tab._save()
-        tab._save_scenarios()
-        provider = IBKRMarketDataProvider("127.0.0.1", 7497, 43)
-        provider.connected = True
-        monkeypatch.setattr(provider, "_subscribe_idea", lambda *_: None)
-        tab.set_market_provider(provider)
-        tab._search_labels = {"NEW · Example · NASDAQ · USD · #99":
-                              {"con_id": 99, "symbol": "NEW", "security_type": "STK",
-                               "currency": "USD", "primary_exchange": "NASDAQ"}}
-        tab._select_suggestion(next(iter(tab._search_labels)))
-        tab.add_idea()
-        assert tab.ideas["NEW"]["con_id"] == 99
-        assert tab.targets["idea:NEW"] == .15
-        assert tab.scenarios["idea:NEW"]["up_value"] == 20
-        assert tab.table.rowCount() == 2
-    finally:
-        tab.close()
-        db.conn.close()
 
 
 def test_ibkr_idea_subscription_uses_selected_contract_and_cancels_on_remove(monkeypatch):

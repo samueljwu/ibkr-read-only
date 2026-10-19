@@ -32,6 +32,10 @@ TRADE_FIELDS = ("trade_id", "trade_date", "display_ticker", "ib_symbol", "side",
                 "accrued_interest_usd", "notes")
 
 
+class MissingSelectedDatabase(FileNotFoundError):
+    """The saved portfolio selection no longer points to a database."""
+
+
 class Database:
     def __init__(self, path=None, *, recovery_key=None):
         new_default = path is None and not local_config_path().is_file()
@@ -60,8 +64,39 @@ class Database:
             raise ValueError(f"No portfolio directory in {config_path}")
         database = Path(directory) / "portfolio.sqlite3"
         if not database.is_file():
-            raise FileNotFoundError(f"Configured portfolio database is missing: {database}")
+            raise MissingSelectedDatabase(f"Configured portfolio database is missing: {database}")
         return database
+
+    @staticmethod
+    def saved_databases():
+        """Return saved portfolio files, including unavailable ones, newest first."""
+        config_path = local_config_path()
+        if not config_path.is_file():
+            return []
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        directories = [config.get("data_directory"), *config.get("portfolio_directories", [])]
+        return list(dict.fromkeys(Path(directory) / "portfolio.sqlite3"
+                                  for directory in directories if directory))
+
+    @staticmethod
+    def select_database(path):
+        """Remember an already opened portfolio for the next launch."""
+        path = Path(path)
+        if path.name != "portfolio.sqlite3" or not path.is_file():
+            raise ValueError("Select an existing portfolio.sqlite3 database")
+        config_path = local_config_path()
+        temporary = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
+        try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config = (json.loads(config_path.read_text(encoding="utf-8"))
+                      if config_path.is_file() else {})
+            directories = [str(path.parent), *(str(saved.parent) for saved in Database.saved_databases())]
+            config["data_directory"] = str(path.parent)
+            config["portfolio_directories"] = list(dict.fromkeys(directories))
+            temporary.write_text(json.dumps(config), encoding="utf-8")
+            os.replace(temporary, config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @classmethod
     def _default_path(cls):
@@ -76,7 +111,8 @@ class Database:
                 pass
             config_path.parent.mkdir(parents=True, exist_ok=True)
             with config_path.open("x", encoding="utf-8") as config:
-                json.dump({"data_directory": str(folder)}, config)
+                json.dump({"data_directory": str(folder),
+                           "portfolio_directories": [str(folder)]}, config)
         except FileExistsError:
             target.unlink(missing_ok=True)
             folder.rmdir()
@@ -916,16 +952,11 @@ class Database:
                 target.unlink(missing_ok=True)
             target_dir.rmdir()
             raise
-        config_path = local_config_path()
-        config_temp = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
         try:
-            config_path.parent.mkdir(parents=True, exist_ok=True)
             if self.encrypted:
                 secret_store.save_database_key(target, self._key)
-            config_temp.write_text(json.dumps({"data_directory": str(target_dir)}), encoding="utf-8")
-            os.replace(config_temp, config_path)
+            self.select_database(target)
         except Exception:
-            config_temp.unlink(missing_ok=True)
             if created:
                 target.unlink(missing_ok=True)
                 target_dir.rmdir()

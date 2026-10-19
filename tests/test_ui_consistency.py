@@ -1181,6 +1181,8 @@ def test_no_stray_stylesheets_or_hardcoded_colors_outside_theme_module():
             offenders.append(f"{path.name}: hardcoded hex color")
         for match in style_pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
+            if path.name == "ui_theme.py":
+                continue
             if path.name == "ui.py" and "stylesheet(self.theme, self.zoom_percent)" in text.splitlines()[line - 1]:
                 continue
             offenders.append(f"{path.name}:{line}: setStyleSheet(...)")

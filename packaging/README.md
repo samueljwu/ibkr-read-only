@@ -39,6 +39,10 @@ sh packaging/macos/build_dmg.sh dist/IBKRDashboard.app "dist/installers/IBKRDash
 - Test a synthetic portfolio, including exports and background sync.
 - Review bundled `licenses` and [third-party notices](../THIRD_PARTY_NOTICES.md).
 - Distribute the matching source tree and [LICENSE](../LICENSE).
+- Publish the native installers as assets of a stable GitHub release tagged
+  `v<version>` (or `<version>`), with their build filenames unchanged. The
+  in-app updater selects the highest versioned stable release and requires
+  each asset's GitHub SHA-256 digest before installation.
 
 Versions come from `app/version.py`. Install, upgrade, and uninstall leave
 portfolio files untouched. The renamed app uses `IBKRDashboard` for new data;

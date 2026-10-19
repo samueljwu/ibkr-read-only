@@ -1,4 +1,5 @@
 import pytest
+from datetime import date
 
 from app.broker.broker_sync import BrokerIngestor, parse_flex_xml
 from app.storage.database import Database
@@ -64,11 +65,83 @@ def test_missing_fee_stays_pending_until_zero_fee_arrives(tmp_path):
         service = PortfolioService(db, market)
         assert service.matching.trade_rows()[0]["commission_usd"] is None
         assert service.portfolio_rows()[0]["data_status"] == "FEE PENDING"
-        assert service.lots_rows()[0]["net_unrealized"] is None
+        assert service.lots_rows()[0]["net_unrealized"] is not None
+        assert service.lots_rows()[0]["buy_commission"] is None
         assert ingestor.ingest_many([execution(commission=0)], "tws").updated == 1
         assert db.conn.execute("SELECT status FROM broker_executions").fetchone()[0] == "complete"
         assert service.matching.trade_rows()[0]["commission_usd"] == 0
         assert service.lots_rows()[0]["net_unrealized"] is not None
+    finally:
+        db.conn.close()
+
+
+def test_pending_fee_keeps_cost_and_pnl_available_then_reprices(tmp_path):
+    db = Database(tmp_path / "provisional-fee.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        trade = execution(trade_date=date.today().isoformat())
+        assert ingestor.ingest_many([trade], "tws").inserted == 1
+        position = db.rows("positions", 1)[0]
+        market = MockMarketDataProvider()
+        market.quotes[position["id"]] = {
+            "mode": "Mock", "ticks": {"last": 12, "close": 9}, "status": "MOCK"}
+        service = PortfolioService(db, market)
+        service._as_of = lambda _position: date.today()
+
+        pending = service.portfolio_rows()[0]
+        assert pending["average_cost"] == pytest.approx(10)
+        assert pending["daily_pnl"] == pytest.approx(10)
+        assert pending["unrealized_pnl"] == pytest.approx(10)
+        assert pending["daily_pnl_fee_pending"]
+        assert pending["open_pnl_fee_pending"]
+        lot = service.lots_rows([pending])[0]
+        assert lot["net_unrealized"] == pytest.approx(10)
+        assert lot["buy_commission"] is None
+
+        assert ingestor.ingest_many([dict(trade, commission=0.5)], "tws").updated == 1
+        complete = service.portfolio_rows()[0]
+        assert complete["average_cost"] == pytest.approx(10.1)
+        assert complete["daily_pnl"] == pytest.approx(9.5)
+        assert complete["unrealized_pnl"] == pytest.approx(9.5)
+        assert not complete["daily_pnl_fee_pending"]
+        assert not complete["open_pnl_fee_pending"]
+    finally:
+        db.conn.close()
+
+
+def test_pending_sale_fee_keeps_open_cost_and_realized_pnl(tmp_path):
+    db = Database(tmp_path / "provisional-sale.sqlite3")
+    try:
+        ingestor = BrokerIngestor(db, ACCOUNT)
+        ingestor.ingest_many([execution(source_id="BUY.01", ib_exec_id="BUY.01",
+                                        quantity=10, commission=1)], "tws")
+        position_id = db.rows("positions", 1)[0]["id"]
+        trade = execution(source_id="SALE.01", ib_exec_id="SALE.01",
+                          trade_date=date.today().isoformat(), side="SELL", quantity=5, price=11)
+        assert ingestor.ingest_many([trade], "tws").inserted == 1
+        service = PortfolioService(db, MockMarketDataProvider())
+        service._as_of = lambda _position: date.today()
+        service.matching.rebuild_auto([position_id])
+        market = service.market
+        market.quotes[position_id] = {
+            "mode": "Mock", "ticks": {"last": 12, "close": 10}, "status": "MOCK"}
+
+        pending = service.portfolio_rows()[0]
+        assert pending["average_cost"] == pytest.approx(10.1)
+        assert pending["daily_pnl"] == pytest.approx(15)
+        closed = next(lot for lot in service.lots_rows([pending]) if lot["lot_state"] == "Closed")
+        assert closed["realized_net"] == pytest.approx(4.5)
+        assert closed["sell_commission"] is None
+        assert closed["fee_pending"]
+        assert service.trade_rows()[0]["realized_net"] == pytest.approx(4.5)
+
+        assert ingestor.ingest_many([dict(trade, commission=0.5)], "tws").updated == 1
+        complete = service.portfolio_rows()[0]
+        assert complete["daily_pnl"] == pytest.approx(14.5)
+        closed = next(lot for lot in service.lots_rows([complete]) if lot["lot_state"] == "Closed")
+        assert closed["realized_net"] == pytest.approx(4)
+        assert closed["sell_commission"] == pytest.approx(0.5)
+        assert not closed["fee_pending"]
     finally:
         db.conn.close()
 
