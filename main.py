@@ -178,7 +178,16 @@ def main(argv=None):
             return
         activate(created.path, code)
 
-    chooser = DatabaseSelectionWindow(activate, create_new)
+    def remove_saved(path):
+        try:
+            Database.remove_saved_database(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(chooser, "Remove saved portfolio", str(exc))
+            return
+        chooser.refresh(Database.saved_databases(),
+                        current=switch_from.db.path if switch_from is not None else None)
+
+    chooser = DatabaseSelectionWindow(activate, create_new, remove_saved)
     try:
         window = open_window(database_path)
     except MissingSelectedDatabase:

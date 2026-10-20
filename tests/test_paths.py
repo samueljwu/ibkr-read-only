@@ -139,6 +139,66 @@ def test_saved_portfolio_files_remain_selectable(tmp_path, monkeypatch):
     assert Database.saved_databases() == [first, second]
 
 
+def test_remove_saved_portfolio_forgets_entry_but_keeps_database(tmp_path, monkeypatch):
+    _isolate_app_data(monkeypatch, tmp_path)
+    first = tmp_path / "first" / "portfolio.sqlite3"
+    second = tmp_path / "second" / "portfolio.sqlite3"
+    for path in (first, second):
+        db = Database(path)
+        db.conn.close()
+    Database.select_database(first)
+    Database.select_database(second)
+
+    with pytest.raises(ValueError, match="active"):
+        Database.remove_saved_database(second)
+    Database.remove_saved_database(first)
+
+    assert Database.saved_databases() == [second]
+    assert first.is_file()
+    reopened = Database()
+    try:
+        assert reopened.path == second
+    finally:
+        reopened.conn.close()
+    Database.select_database(first)
+    assert Database.saved_databases() == [first, second]
+
+
+def test_portfolio_chooser_removes_selected_entry_with_confirmation(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from app.views.database_selection import DatabaseSelectionWindow
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    _isolate_app_data(monkeypatch, tmp_path)
+    active = tmp_path / "active" / "portfolio.sqlite3"
+    missing = tmp_path / "missing" / "portfolio.sqlite3"
+    db = Database(active)
+    db.conn.close()
+    Database.select_database(active)
+    config = paths.local_config_path()
+    saved = json.loads(config.read_text(encoding="utf-8"))
+    saved["portfolio_directories"].append(str(missing.parent))
+    config.write_text(json.dumps(saved), encoding="utf-8")
+    app = QApplication.instance() or QApplication([])
+    chooser = DatabaseSelectionWindow(lambda _path: None, lambda: None,
+                                      Database.remove_saved_database)
+    chooser.refresh(Database.saved_databases(), current=active)
+    try:
+        assert not chooser.remove_selected_button.isEnabled()
+        chooser.saved_list.setCurrentRow(1)
+        assert chooser.remove_selected_button.isEnabled()
+        assert not chooser.open_selected_button.isEnabled()
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.No)
+        chooser.remove_selected_button.click()
+        assert missing in Database.saved_databases()
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+        chooser.remove_selected_button.click()
+        assert Database.saved_databases() == [active]
+        assert active.is_file()
+    finally:
+        chooser.close()
+
+
 def test_missing_active_database_can_switch_to_saved_portfolio(tmp_path, monkeypatch):
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication

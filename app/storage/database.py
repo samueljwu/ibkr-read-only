@@ -98,6 +98,27 @@ class Database:
         finally:
             temporary.unlink(missing_ok=True)
 
+    @staticmethod
+    def remove_saved_database(path):
+        """Forget a portfolio in the chooser without deleting its database file."""
+        path = Path(path)
+        config_path = local_config_path()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        active = config.get("data_directory")
+        if active and path.resolve() == (Path(active) / "portfolio.sqlite3").resolve():
+            raise ValueError("The selected portfolio is active. Open another portfolio first.")
+        saved = Database.saved_databases()
+        if path.resolve() not in {item.resolve() for item in saved}:
+            raise ValueError("The selected portfolio is not in the saved list.")
+        config["portfolio_directories"] = [str(item.parent) for item in saved
+                                           if item.resolve() != path.resolve()]
+        temporary = config_path.with_name(f".{config_path.name}-{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(config), encoding="utf-8")
+            os.replace(temporary, config_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     @classmethod
     def _default_path(cls):
         config_path = local_config_path()
