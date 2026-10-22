@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from types import SimpleNamespace
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,6 +15,38 @@ import app.ui as ui
 from app.storage.database import Database
 from app.views.ui_theme import COLORS, TOOLBAR_GROUP_SPACING
 from app.views.shortcuts import native_text, shortcut
+
+
+def test_grid_filter_reuses_sorted_source_until_data_or_order_changes(tmp_path, monkeypatch):
+    db = Database(tmp_path / "grid-filter-cache.sqlite3")
+    rows = [{"id": 1, "display_ticker": "ALFA", "position_qty": 10},
+            {"id": 2, "display_ticker": "BETA", "position_qty": 0}]
+    model = ui.GridModel("Portfolio", db, SimpleNamespace(portfolio_rows=lambda: rows))
+    calls = []
+    original_sort = model._sorted_rows
+
+    def counted_sort(source):
+        calls.append(True)
+        return original_sort(source)
+
+    monkeypatch.setattr(model, "_sorted_rows", counted_sort)
+    try:
+        model.set_filter("B")
+        model.set_filter("BE")
+        model.set_hide_closed(True)
+        assert calls == []
+        assert model.rows == []
+        model.sort(1, Qt.DescendingOrder)
+        assert len(calls) == 1
+        model.set_filter("")
+        assert [row["id"] for row in model.rows] == [1]
+        assert len(calls) == 1
+        model.update_positions({1}, [{**rows[0], "position_qty": 20}])
+        model.set_filter("AL")
+        assert len(calls) == 2
+        assert model.rows[0]["position_qty"] == 20
+    finally:
+        db.conn.close()
 
 
 def test_trade_fee_refreshes_after_another_process_updates_shared_database(tmp_path, monkeypatch):
@@ -64,7 +97,12 @@ def test_live_quote_refreshes_grid_pnl_when_tab_is_accessed(tmp_path, monkeypatc
         window.market.events.put(("quote", [position_id], "last", 12, "Mock"))
         window._poll()
         assert window.lots_refresh_timer.isActive()
-        window.lots_refresh_timer.timeout.emit()
+        def unexpected_lot_projection(*_args):
+            raise AssertionError("Hidden lots tab rebuilt on a quote")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(window.service, "lots_rows", unexpected_lot_projection)
+            window.lots_refresh_timer.timeout.emit()
         assert window.metric_values["open"].text() == "$20.00"
         assert window.models["Trades"].rows[0]["net_unrealized"] == pytest.approx(10)
         window.tabs.setCurrentWidget(window.grid_tabs["Trades"])
@@ -356,6 +394,44 @@ def test_rebalance_quote_refresh_waits_for_editor_focus_to_leave(tmp_path, monke
         row = tab._row_for_position("idea:NEW")
         assert tab.table.item(row, 7).text() == "123.00 USD"
     finally:
+        window.close()
+
+
+def test_special_tab_switch_reuses_current_portfolio_projection(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "tab-switch-cache.sqlite3"))
+    window = ui.MainWindow()
+    original_projection = window.service.portfolio_rows
+    try:
+        window.tabs.setCurrentWidget(window.grid_tabs["Portfolio"])
+        window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.exposure_page)
+        assert window._stream_rows is not None
+
+        def unexpected_projection(*_args, **_kwargs):
+            raise AssertionError("Tab switch recomputed portfolio rows")
+
+        monkeypatch.setattr(window.service, "portfolio_rows", unexpected_projection)
+        window.tabs.setCurrentWidget(window.calcs_tab)
+        window.tabs.setCurrentWidget(window.analytics_tab)
+    finally:
+        monkeypatch.setattr(window.service, "portfolio_rows", original_projection)
+        window.close()
+
+
+def test_special_tab_switch_reads_external_changes_before_periodic_refresh(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    db_path = tmp_path / "tab-switch-external.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    writer = Database(db_path)
+    try:
+        position_id = writer.add_position({"display_ticker": "SYNTH", "ib_symbol": "SYNTH"})
+        writer.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
+                          "side": "BUY", "quantity": 1, "price": 10})
+        window.tabs.setCurrentWidget(window.calcs_tab)
+        assert window.calcs_tab.table.item(0, 0).text() == "SYNTH"
+    finally:
+        writer.conn.close()
         window.close()
 
 

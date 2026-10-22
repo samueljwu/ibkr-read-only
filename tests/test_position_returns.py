@@ -5,13 +5,23 @@ import os
 
 import pytest
 
-from app.finance.position_returns import position_return_rows
+from app.finance.position_returns import _cash_coverage, _cash_covered, position_return_rows
 from app.finance.services import PortfolioService
 from app.flex.cash_flex import run_cash_flex_sync
 from app.market.market_data import MockMarketDataProvider
 from app.storage.database import Database
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def test_cash_coverage_merges_adjacent_windows_but_preserves_gaps():
+    coverage = _cash_coverage([
+        ("2026-01-01", "2026-01-03"), ("2026-01-03", "2026-01-06"),
+        ("2026-01-07", "2026-01-08"), ("2026-01-10", "2026-01-12")])
+    assert _cash_covered(coverage, "2026-01-02", "2026-01-08")
+    assert not _cash_covered(coverage, "2026-01-02", "2026-01-10")
+    assert _cash_covered(coverage, "2026-01-10", "2026-01-12")
+    assert not _cash_covered(coverage, "2025-12-31", "2026-01-01")
 
 
 def _income(db, key, day, kind, amount, *, con_id=None, symbol="", fx="1",

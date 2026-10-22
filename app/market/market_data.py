@@ -1,8 +1,10 @@
 """One read-only market-data provider per application, with UI-safe event polling."""
 
+import json
 import math
 import queue
 import threading
+from collections import deque
 from datetime import date, datetime, timedelta
 
 from app.finance.calculations import choose_price, looks_like_option_ticker, valid_price
@@ -37,6 +39,42 @@ try:
 except ImportError:  # Mock mode works without TWS/API installed.
     EClient = Contract = ExecutionFilter = EWrapper = None
 
+try:
+    from ibapi.common import WshEventData
+except ImportError:  # Older ibapi builds do not provide WSH events.
+    WshEventData = None
+
+
+def _next_earnings(data_json, today=None):
+    """Extract the earliest upcoming earnings date from a WSH event response."""
+    today = today or date.today()
+    try:
+        payload = json.loads(data_json)
+    except (TypeError, ValueError):
+        return None
+    candidates = []
+    pending = [payload]
+    while pending:
+        details = pending.pop()
+        if isinstance(details, list):
+            pending.extend(details)
+            continue
+        if not isinstance(details, dict):
+            continue
+        pending.extend(value for value in details.values() if isinstance(value, (dict, list)))
+        raw = str(details.get("earnings_date") or "")[:10]
+        try:
+            day = date.fromisoformat(raw if "-" in raw else f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
+        except ValueError:
+            continue
+        if day >= today:
+            candidates.append((day, str(details.get("time_of_day") or ""),
+                               str(details.get("wshe_earnings_date_status") or "")))
+    if not candidates:
+        return None
+    day, timing, status = min(candidates)
+    return {"date": day.isoformat(), "time_of_day": timing, "status": status}
+
 
 class MarketDataProvider:
     def __init__(self):
@@ -47,12 +85,16 @@ class MarketDataProvider:
         self.other_events = []
         self.search_results = {}
         self.search_errors = {}
+        self.earnings = {}
+        self.earnings_position_ids = {}
+        self.earnings_changed = set()
 
     def quote(self, position_id):
         return self.quotes.get(position_id, {})
 
     def drain(self):
         changes = set()
+        self.earnings_changed = set()
         # A busy streaming feed must not keep the Qt timer callback running forever.
         for _ in range(500):
             try:
@@ -96,6 +138,10 @@ class MarketDataProvider:
                 self.search_results[event[1]] = event[2]
             elif kind == "search_error":
                 self.search_errors[event[1]] = event[2]
+            elif kind == "earnings":
+                _, con_id, result = event
+                self.earnings[con_id] = result
+                self.earnings_changed.update(self.earnings_position_ids.get(con_id, ()))
             else:
                 self.other_events.append(event)
         return changes
@@ -180,6 +226,13 @@ if EWrapper is not None:
             self.pnl_account = None
             self.managed_account = None
             self.ready = False
+            self.wsh_metadata_id = None
+            self.wsh_event_id = None
+            self.wsh_event_con_id = None
+            self.wsh_queue = deque()
+            self.wsh_requested = set()
+            self.wsh_filter = None
+            self.wsh_metadata_day = None
 
         def nextValidId(self, orderId):  # callback name is fixed by ibapi
             self.ready = True
@@ -212,16 +265,22 @@ if EWrapper is not None:
             except Exception as exc:
                 self.owner.events.put(("execution_error", str(exc)))
 
-        def commissionReport(self, commissionReport):
-            exec_id = str(commissionReport.execId or "")
+        def commissionAndFeesReport(self, report):
+            self._record_commission(report.execId, report.commissionAndFees, report.currency)
+
+        def commissionReport(self, report):
+            self._record_commission(report.execId, report.commission, report.currency)
+
+        def _record_commission(self, exec_id, value, currency):
+            exec_id = str(exec_id or "")
             try:
-                amount = float(commissionReport.commission)
+                amount = float(value)
             except (TypeError, ValueError, OverflowError):
                 return
             if not -1e12 < amount < 1e12:
                 return
             commission = {"commission": amount,
-                          "commission_currency": str(commissionReport.currency or "").upper()}
+                          "commission_currency": str(currency or "").upper()}
             self.commission_reports[exec_id] = commission
             record = self.execution_records.get(exec_id)
             if record:
@@ -297,6 +356,32 @@ if EWrapper is not None:
         def connectionClosed(self):
             self.owner.events.put(("connected", False))
             self.owner.events.put(("status", list(self.owner.positions), "DISCONNECTED"))
+
+        def wshMetaData(self, reqId, dataJson):
+            if reqId != self.wsh_metadata_id:
+                return
+            self.wsh_metadata_id = None
+            try:
+                metadata = json.loads(dataJson)
+                event_types = metadata.get("event_types", [])
+                available = json.dumps(event_types).lower()
+                self.wsh_filter = ("wshe_ed" if "wshe_ed" in available else
+                                   "wsh_ed" if "wsh_ed" in available else None)
+            except (TypeError, ValueError, AttributeError):
+                self.wsh_filter = None
+            if self.wsh_filter:
+                self.owner._request_next_earnings()
+            else:
+                self.owner._fail_earnings("Earnings events unavailable from Wall Street Horizon")
+
+        def wshEventData(self, reqId, dataJson):
+            if reqId != self.wsh_event_id:
+                return
+            con_id = self.wsh_event_con_id
+            self.wsh_event_id = self.wsh_event_con_id = None
+            self.owner.events.put(("earnings", con_id, {
+                "result": _next_earnings(dataJson), "checked": date.today().isoformat()}))
+            self.owner._request_next_earnings()
 
         def contractDetails(self, reqId, contractDetails):
             if reqId in self.exposure_details or reqId in self.exposure_underlying:
@@ -573,6 +658,18 @@ if EWrapper is not None:
                         self.reqMktData(ticker_id, contract, "", False, False, [])
                 self.owner.refresh_live()
                 return
+            if reqId == self.wsh_metadata_id:
+                self.wsh_metadata_id = None
+                self.owner._fail_earnings(f"Wall Street Horizon unavailable (IBKR {errorCode}: {errorString})")
+                return
+            if reqId == self.wsh_event_id:
+                con_id = self.wsh_event_con_id
+                self.wsh_event_id = self.wsh_event_con_id = None
+                self.owner.events.put(("earnings", con_id, {
+                    "error": f"Wall Street Horizon unavailable (IBKR {errorCode}: {errorString})",
+                    "checked": date.today().isoformat()}))
+                self.owner._request_next_earnings()
+                return
             calculation = self.exposure_calculations.pop(reqId, None)
             if calculation:
                 self.owner.events.put(("exposure_calculation_error", calculation[0],
@@ -673,6 +770,63 @@ class IBKRMarketDataProvider(MarketDataProvider):
     def _new_id(self):
         self.client.next_id += 1
         return self.client.next_id
+
+    def request_earnings(self, stocks):
+        """Queue one daily WSH lookup per distinct stock contract shown in Rebalance."""
+        today = date.today().isoformat()
+        if self.client.wsh_metadata_day != today:
+            self.client.wsh_metadata_day = today
+            self.client.wsh_filter = None
+            self.client.wsh_requested.clear()
+        for position_id, raw_con_id in stocks:
+            try:
+                con_id = int(raw_con_id)
+            except (TypeError, ValueError):
+                continue
+            if con_id <= 0:
+                continue
+            self.earnings_position_ids.setdefault(con_id, set()).add(position_id)
+            if (self.earnings.get(con_id, {}).get("checked") == today or
+                    con_id in self.client.wsh_requested):
+                continue
+            self.client.wsh_requested.add(con_id)
+            self.client.wsh_queue.append(con_id)
+        if not self.client.wsh_queue:
+            return
+        if (WshEventData is None or not hasattr(self.client, "reqWshMetaData") or
+                not hasattr(self.client, "reqWshEventData")):
+            self._fail_earnings("Update ibapi to load earnings dates")
+        elif not self.connected:
+            return
+        elif self.client.wsh_filter is False:
+            self._fail_earnings("Wall Street Horizon unavailable")
+        elif self.client.wsh_filter:
+            self._request_next_earnings()
+        elif self.client.wsh_metadata_id is None:
+            self.client.wsh_metadata_id = self._new_id()
+            self.client.reqWshMetaData(self.client.wsh_metadata_id)
+
+    def _fail_earnings(self, message):
+        self.client.wsh_filter = False
+        for con_id in self.client.wsh_queue:
+            self.events.put(("earnings", con_id, {"error": message,
+                                                  "checked": date.today().isoformat()}))
+        self.client.wsh_queue.clear()
+
+    def _request_next_earnings(self):
+        if self.client.wsh_event_id is not None or not self.client.wsh_queue or not self.connected:
+            return
+        con_id = self.client.wsh_queue.popleft()
+        request_id = self._new_id()
+        request = WshEventData()
+        request.startDate = date.today().strftime("%Y%m%d")
+        request.endDate = (date.today() + timedelta(days=366)).strftime("%Y%m%d")
+        request.filter = json.dumps({"country": "All", "watchlist": [str(con_id)],
+                                     "limit_region": 10, "limit": 10,
+                                     self.client.wsh_filter: "true"})
+        self.client.wsh_event_id = request_id
+        self.client.wsh_event_con_id = con_id
+        self.client.reqWshEventData(request_id, request)
 
     def refresh_live(self):
         """Request current account state on the existing socket."""

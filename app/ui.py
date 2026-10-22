@@ -127,6 +127,7 @@ class GridModel(QAbstractTableModel):
         self.columns = COLUMNS[name]
         self.rows = []
         self.source_rows = []
+        self._sorted_source_rows = None
         self.bar_scales = {key: 0.0 for key in BAR_COLUMNS[name]}
         self.column_decimals = {}
         self.filter_text = ""
@@ -156,22 +157,28 @@ class GridModel(QAbstractTableModel):
         self.refresh()
 
     def refresh(self, all_rows=None):
-        self.beginResetModel()
         if all_rows is None:
             all_rows = (self.service.portfolio_rows() if self.name == "Portfolio" else
                         self.service.trade_rows() if self.name == "Trades" else
                         self.service.lots_rows())
         self.source_rows = list(all_rows)
+        self._sorted_source_rows = None
+        self._refilter()
+
+    def _refilter(self):
+        self.beginResetModel()
+        if self._sorted_source_rows is None:
+            self._sorted_source_rows = self._sorted_rows(self.source_rows)
         needle = self.filter_text.casefold()
-        self.rows = [row for row in self.source_rows if not needle or needle in str(
-            row.get("display_ticker") or row.get("ticker") or "").casefold()]
-        if self.name == "Trades" and self.side_filter != "All":
-            self.rows = [row for row in self.rows if row.get("side") == self.side_filter]
-        if self.name == "Portfolio" and self.hide_closed:
-            self.rows = [row for row in self.rows if abs(float(row.get("position_qty") or 0)) > 1e-9]
-        if self.name == "Lots" and self.lot_filter != "All":
-            self.rows = [row for row in self.rows if row.get("lot_state", "").startswith(self.lot_filter)]
-        self._apply_sort()
+        self.rows = [row for row in self._sorted_source_rows
+                     if (not needle or needle in str(row.get("display_ticker") or
+                                                  row.get("ticker") or "").casefold())
+                     and (self.name != "Trades" or self.side_filter == "All" or
+                          row.get("side") == self.side_filter)
+                     and (self.name != "Portfolio" or not self.hide_closed or
+                          abs(float(row.get("position_qty") or 0)) > 1e-9)
+                     and (self.name != "Lots" or self.lot_filter == "All" or
+                          row.get("lot_state", "").startswith(self.lot_filter))]
         self._update_bar_scales()
         self.endResetModel()
 
@@ -185,22 +192,22 @@ class GridModel(QAbstractTableModel):
 
     def set_filter(self, value):
         self.filter_text = value.strip()
-        self.refresh(self.source_rows)
+        self._refilter()
 
     def set_side_filter(self, value):
         if self.name == "Trades":
             self.side_filter = value if value in ("All", "BUY", "SELL") else "All"
-            self.refresh(self.source_rows)
+            self._refilter()
 
     def set_hide_closed(self, checked):
         if self.name == "Portfolio":
             self.hide_closed = bool(checked)
             self.db.set_setting("hide_closed_positions", "1" if checked else "0")
-            self.refresh(self.source_rows)
+            self._refilter()
 
     def set_lot_filter(self, value):
         self.lot_filter = value
-        self.refresh(self.source_rows)
+        self._refilter()
 
     def decimals_for(self, column):
         return self.column_decimals.get(self.columns[column][0], DEFAULT_DECIMALS)
@@ -237,6 +244,7 @@ class GridModel(QAbstractTableModel):
             return
         updated = {row["id"]: row for row in
                    (rows if rows is not None else self.service.portfolio_rows())}
+        self._sorted_source_rows = None
         for number, row in enumerate(self.source_rows):
             if row["id"] in ids and row["id"] in updated:
                 self.source_rows[number] = updated[row["id"]]
@@ -362,23 +370,25 @@ class GridModel(QAbstractTableModel):
         self.layoutAboutToBeChanged.emit()
         old_indexes = self.persistentIndexList()
         identities = [id(self.rows[index.row()]) for index in old_indexes]
-        self._apply_sort()
+        self._sorted_source_rows = self._sorted_rows(self.source_rows)
+        visible_ids = {id(row) for row in self.rows}
+        self.rows = [row for row in self._sorted_source_rows if id(row) in visible_ids]
         new_positions = {id(row): number for number, row in enumerate(self.rows)}
         self.changePersistentIndexList(old_indexes, [self.index(new_positions[key], old.column())
                                                      for old, key in zip(old_indexes, identities)])
         self.layoutChanged.emit()
         self.headerDataChanged.emit(Qt.Vertical, 0, max(0, len(self.rows) - 1))
 
-    def _apply_sort(self):
+    def _sorted_rows(self, rows):
         if self.sort_column >= len(self.columns):
             self.sort_column = 0
         key = self.columns[self.sort_column][0]
         _, _, kind = self.columns[self.sort_column]
-        populated = [row for row in self.rows if row.get(key) is not None and row.get(key) != ""]
-        missing = [row for row in self.rows if row.get(key) is None or row.get(key) == ""]
+        populated = [row for row in rows if row.get(key) is not None and row.get(key) != ""]
+        missing = [row for row in rows if row.get(key) is None or row.get(key) == ""]
         populated.sort(key=lambda row: float(row[key]) if kind in NUMERIC_KINDS
                        else str(row[key]).casefold(), reverse=self.sort_order == Qt.DescendingOrder)
-        self.rows = populated + missing
+        return populated + missing
 
 
 class SignedBarDelegate(QStyledItemDelegate):
@@ -710,7 +720,15 @@ class MainWindow(QMainWindow):
             else:
                 self.lots_refresh_timer.stop()
                 self._refresh_lots_and_summary()
-        if widget is self.calcs_tab or widget is self.cash_tab or widget is self.analytics_tab:
+        if widget is self.calcs_tab or widget is self.analytics_tab:
+            rows = self._stream_rows
+            if rows is not None and self.db.conn.execute("PRAGMA data_version").fetchone()[0] != self._last_db_data_version:
+                rows = None
+            if widget is self.calcs_tab:
+                widget.refresh(source_rows=rows)
+            else:
+                widget.refresh(portfolio_rows=rows)
+        elif widget is self.cash_tab:
             widget.refresh()
 
     def _step_tab(self, direction):
@@ -770,11 +788,12 @@ class MainWindow(QMainWindow):
     def _refresh_calcs_live(self):
         if self.tabs.currentWidget() is self.calcs_tab and not self._sync_paused:
             focus = QApplication.focusWidget()
-            editors = (self.calcs_tab.findChildren(QDoubleSpinBox) +
-                       self.calcs_tab.findChildren(QComboBox))
-            editing = any(editor is not None and
-                          focus is not None and (focus is editor or editor.isAncestorOf(focus))
-                          for editor in editors)
+            editing = False
+            while focus is not None and focus is not self.calcs_tab:
+                if isinstance(focus, (QDoubleSpinBox, QComboBox)) and self.calcs_tab.isAncestorOf(focus):
+                    editing = True
+                    break
+                focus = focus.parentWidget()
             if editing:
                 # Keep the pending quote refresh until the user leaves the input.
                 self.calcs_refresh_timer.start(1000)
@@ -2249,7 +2268,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             return None
         if name in ("Analytics", "Rebalance"):
-            valid_versions = (1, 2) if name in ("Analytics", "Rebalance") else (1,)
+            valid_versions = (1, 2, 3) if name == "Rebalance" else (1, 2)
             return state if isinstance(state, dict) and state.get("version") in valid_versions else None
         if name == "Cash":
             if not isinstance(state, dict):
@@ -2687,8 +2706,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_lots_and_summary(self):
         rows = self._stream_rows if self._stream_rows is not None else self.service.portfolio_rows()
-        lots = self.service.lots_rows(rows)
         current = self.tabs.currentWidget()
+        if current is self.grid_tabs["Lots"] or current is self.grid_tabs["Trades"]:
+            lots = self.service.lots_rows(rows)
+        else:
+            # Quotes change open valuations, but not closed-lot realized P&L.
+            # The overview gets live open P&L from rows, so reuse closed lots.
+            lots = self.models["Lots"].source_rows
         if current is self.grid_tabs["Lots"]:
             self._refresh_model("Lots", lots)
             self._quote_dirty_tabs.discard("Lots")
@@ -3290,6 +3314,9 @@ class MainWindow(QMainWindow):
         was_connected = self.market.connected
         was_sync_pending = self._live_sync_pending
         ids = self.market.drain()
+        if (self.market.earnings_changed and self.tabs.currentWidget() is self.calcs_tab and
+                not self.calcs_refresh_timer.isActive()):
+            self.calcs_refresh_timer.start(1000)
         quote_issue_changed = False
         for position_id in (key for key in ids if isinstance(key, int)):
             status = str(self.market.quote(position_id).get("status") or "")

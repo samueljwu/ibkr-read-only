@@ -23,7 +23,11 @@ def _execution(exec_id="EX.01", account=ACCOUNT):
                            price=10, time="20261006 10:15:00 US/Eastern")
 
 
-def test_tws_read_only_execution_capture_fee_and_reconnect_replay(tmp_path):
+@pytest.mark.parametrize("callback,field,amount", [
+    ("commissionAndFeesReport", "commissionAndFees", 0.5),
+    ("commissionReport", "commission", -0.2),
+])
+def test_tws_read_only_execution_capture_fee_and_reconnect_replay(tmp_path, callback, field, amount):
     try:
         provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17, account_id=ACCOUNT)
     except RuntimeError:
@@ -41,12 +45,12 @@ def test_tws_read_only_execution_capture_fee_and_reconnect_replay(tmp_path):
         ingestor = BrokerIngestor(db, ACCOUNT)
         assert ingestor.ingest_many([first[1]], "tws").inserted == 1
         assert db.conn.execute("SELECT status FROM broker_executions").fetchone()[0] == "pending commission"
-        client.commissionReport(SimpleNamespace(execId="EX.01", commission=0.5,
-                                                currency="USD"))
+        getattr(client, callback)(SimpleNamespace(execId="EX.01", currency="USD",
+                                                  **{field: amount}))
         update = provider.events.get_nowait()
         assert update[0] == "execution"
         assert ingestor.ingest_many([update[1]], "tws").updated == 1
-        assert db.conn.execute("SELECT commission_usd FROM trades").fetchone()[0] == pytest.approx(0.5)
+        assert db.conn.execute("SELECT commission_usd FROM trades").fetchone()[0] == pytest.approx(amount)
         client.execDetails(1001, _contract(), _execution())
         replay = provider.events.get_nowait()
         assert ingestor.ingest_many([replay[1]], "tws").duplicates == 1

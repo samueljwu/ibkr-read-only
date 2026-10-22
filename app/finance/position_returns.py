@@ -1,5 +1,6 @@
 """Cumulative, auditable USD results for every recorded security position."""
 
+from bisect import bisect_right
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -11,20 +12,22 @@ from app.finance.calculations import effective_commission_usd, valid_multiplier,
 INCOME_KINDS = {"Dividend", "Payment in lieu", "Withholding tax", "Bond interest"}
 
 
-def _cash_covered(windows, first, last):
-    """Whether complete Cash Flex windows cover every calendar day in the period."""
-    cursor = date.fromisoformat(first)
-    end = date.fromisoformat(last)
+def _cash_coverage(windows):
+    """Merge sorted Cash Flex periods once for position coverage lookups."""
+    merged = []
     for start, stop in windows:
-        left, right = date.fromisoformat(start), date.fromisoformat(stop)
-        if right < cursor:
-            continue
-        if left > cursor:
-            return False
-        cursor = max(cursor, right + timedelta(days=1))
-        if cursor > end:
-            return True
-    return cursor > end
+        if not merged or start > (date.fromisoformat(merged[-1][1]) + timedelta(days=1)).isoformat():
+            merged.append([start, stop])
+        elif stop > merged[-1][1]:
+            merged[-1][1] = stop
+    return ([start for start, _ in merged], [stop for _, stop in merged])
+
+
+def _cash_covered(coverage, first, last):
+    """Whether one merged Cash Flex period covers the requested dates."""
+    starts, stops = coverage
+    index = bisect_right(starts, first) - 1
+    return index >= 0 and stops[index] >= last
 
 
 def _trade_accrued_cash(movement):
@@ -67,7 +70,7 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
                      for match in db.rows("trade_matches", portfolio_id)}
     fx_cache = {}
     account_id = db.setting("ib_account_id")
-    cash_windows = db.completed_flex_windows(account_id)["cash"]
+    cash_coverage = _cash_coverage(db.completed_flex_windows(account_id)["cash"])
 
     by_con_id, by_symbol = defaultdict(set), defaultdict(set)
     for position in positions.values():
@@ -154,7 +157,7 @@ def position_return_rows(db, portfolio_id, portfolio_rows, lots):
         cash_from = ((date.fromisoformat(estimated_baseline) + timedelta(days=1)).isoformat()
                      if estimated_baseline else first_trade)
         cash_complete = bool(cash_from and cash_through and
-                             _cash_covered(cash_windows, cash_from, cash_through))
+                             _cash_covered(cash_coverage, cash_from, cash_through))
         if not cash_complete:
             issues.append("Cash history incomplete")
 

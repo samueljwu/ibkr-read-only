@@ -646,6 +646,87 @@ def test_rebalance_refresh_uses_latest_values_without_local_pause(tmp_path):
         db.conn.close()
 
 
+def test_rebalance_sorted_quote_refresh_keeps_each_instrument_on_one_row(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "sorted_rebalance.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    service = Service([holding(i, i * 1000, 10, price=i * 100) for i in range(1, 5)])
+    tab = CalcsTab(db, service, 1)
+    try:
+        tab.table.sortItems(2, Qt.AscendingOrder)
+        service.rows[0]["value"] = 5000
+        service.rows[0]["last_px"] = 500
+        tab.refresh()
+        assert [(tab.table.item(row, 0).data(Qt.UserRole),
+                 tab.table.item(row, 0).text(),
+                 tab.table.item(row, 2).sort_value)
+                for row in range(tab.table.rowCount())] == [
+                    (2, "P2", 2000), (3, "P3", 3000), (4, "P4", 4000), (1, "P1", 5000)]
+        assert tab._table_matches(service.rows)
+        tab.table.item(0, 0).setData(Qt.UserRole, 3)
+        assert not tab._table_matches(service.rows)
+        tab.refresh()
+        assert [tab.table.item(row, 0).data(Qt.UserRole)
+                for row in range(tab.table.rowCount())] == [2, 3, 4, 1]
+    finally:
+        tab.close()
+        db.conn.close()
+
+
+def test_rebalance_earnings_column_shows_stock_date_and_explains_missing_values(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "earnings_rebalance.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    stock = holding(1, 60000, 600)
+    stock["con_id"] = 101
+    option = holding(2, 10000, 1, security_type="OPT")
+    service = Service([stock, option])
+    tab = CalcsTab(db, service, 1)
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17)
+    requested = []
+    monkeypatch.setattr(provider, "request_earnings", lambda stocks: requested.extend(stocks))
+    provider.earnings[101] = {"result": {"date": "2026-11-03", "time_of_day": "AFTER MARKET",
+                                        "status": "CONFIRMED"}, "checked": date.today().isoformat()}
+    try:
+        tab.market = provider
+        tab.refresh()
+        assert tab.table.horizontalHeaderItem(16).text() == "Next earnings"
+        assert requested == [(1, 101)]
+        stock_row = tab._row_for_position(1)
+        option_row = tab._row_for_position(2)
+        assert tab.table.item(stock_row, 16).text() == "2026-11-03"
+        assert "AFTER MARKET" in tab.table.item(stock_row, 16).toolTip()
+        assert tab.table.item(option_row, 16).text() == "—"
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("allocation"))
+        assert not tab.table.isColumnHidden(16)
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
+        assert tab.table.isColumnHidden(16)
+    finally:
+        tab.close()
+        db.conn.close()
+
+
+def test_rebalance_previous_header_layout_keeps_order_with_new_column(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "earnings_header.sqlite3")
+    service = Service([holding(1, 100, 1)])
+    from app.views.calcs_ui import CalcsTable
+    legacy = CalcsTable(0, 16)
+    legacy_header = legacy.horizontalHeader()
+    legacy_header.moveSection(legacy_header.visualIndex(4), 2)
+    legacy.setColumnWidth(0, 205)
+    db.set_setting("calcs_header_v5_1", bytes(legacy_header.saveState().toBase64()).decode("ascii"))
+    reopened = CalcsTab(db, service, 1)
+    try:
+        header = reopened.table.horizontalHeader()
+        assert header.visualIndex(4) == 2
+        assert reopened.table.columnWidth(0) == 205
+        assert header.visualIndex(16) == 16
+    finally:
+        reopened.close()
+        db.conn.close()
+
+
 
 
 

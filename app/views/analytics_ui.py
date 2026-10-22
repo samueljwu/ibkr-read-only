@@ -1043,8 +1043,6 @@ class AnalyticsTab(QWidget):
     @staticmethod
     def _fill_table(table, rows):
         sorting = table.isSortingEnabled()
-        header = table.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         if sorting:
             table.setSortingEnabled(False)
         table.setUpdatesEnabled(False)
@@ -1059,7 +1057,6 @@ class AnalyticsTab(QWidget):
             table.setUpdatesEnabled(True)
             if sorting:
                 table.setSortingEnabled(True)
-                table.sortItems(sort_column, sort_order)
 
     def refresh(self, *_, portfolio_rows=None, lots=None, trade_rows=None):
         selected = self.sections.currentWidget()

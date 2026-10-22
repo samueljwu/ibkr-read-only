@@ -169,8 +169,6 @@ class ReturnPanel(QWidget):
                    (mode == "All" or mode == "Closed" and row["status"] == "Closed" or
                     mode == "Currently held" and row["status"] != "Closed")]
         selected = self._selected_id() or self._preferred_id
-        sort_column = self.table.horizontalHeader().sortIndicatorSection()
-        sort_order = self.table.horizontalHeader().sortIndicatorOrder()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(visible))
         for index, row in enumerate(visible):
@@ -200,8 +198,6 @@ class ReturnPanel(QWidget):
                                       if row["status"] != "Closed" else ""))
             self.table.setItem(index, 7, item)
         self.table.setSortingEnabled(True)
-        self.table.sortItems(sort_column if 0 <= sort_column < self.table.columnCount() else 5,
-                             sort_order)
         target = selected if any(r["position_id"] == selected for r in visible) else (
             visible[0]["position_id"] if visible else None)
         if target is not None:
@@ -267,8 +263,6 @@ class ReturnPanel(QWidget):
         lots = row["lots"] if row else []
         income = row["income_details"] if row else []
         table = self.details_table
-        header = table.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         table.setSortingEnabled(False)
         table.setRowCount(len(lots) + len(income))
         for index, lot in enumerate(lots):
@@ -304,8 +298,6 @@ class ReturnPanel(QWidget):
             self._color_item(income_item, movement["amount_usd"])
             table.setItem(index, 9, income_item)
         table.setSortingEnabled(True)
-        table.sortItems(sort_column if 0 <= sort_column < table.columnCount() else 1,
-                        sort_order)
 
     def _split_state_key(self, horizontal):
         return f"{self._split_key}_horizontal" if horizontal else self._split_key

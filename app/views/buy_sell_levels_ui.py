@@ -250,8 +250,6 @@ class BuySellLevelsPanel(QWidget):
         trades = sorted((row for row in self._trades if row["position_id"] == position["id"]),
                         key=lambda row: (row["trade_date"], row["executed_at"], row["id"]))
         sorting = self.table.isSortingEnabled()
-        header = self.table.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(trades))
         for index, row in enumerate(reversed(trades)):
@@ -267,7 +265,6 @@ class BuySellLevelsPanel(QWidget):
                 self.table.setItem(index, column, item)
         if sorting:
             self.table.setSortingEnabled(True)
-            self.table.sortItems(sort_column, sort_order)
 
         con_id = position.get("con_id")
         prices = self.db.history(int(con_id)) if con_id else []

@@ -47,7 +47,8 @@ class CalcsTab(QWidget):
     HEADERS = ("Position", "Quantity", "Value USD", "Current weight",
                "Target weight", "Buy / Sell USD", "Est. units",
                "Current price", "Upside type", "Upside value", "Upside result",
-               "Downside type", "Downside value", "Downside result", "Upside / downside", "Idea")
+               "Downside type", "Downside value", "Downside result", "Upside / downside", "Idea",
+               "Next earnings")
     NUMERIC_COLUMNS = (1, 2, 3, 5, 6, 7, 10, 13, 14)
     DEFAULT_DECIMALS = {1: 4, 2: 2, 3: 4, 5: 2, 6: 4, 7: 2, 10: 2, 13: 2, 14: 2}
 
@@ -192,16 +193,20 @@ class CalcsTab(QWidget):
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(self._header_menu)
         for column, width in enumerate((155, 90, 110, 112, 145, 138, 150,
-                                        118, 100, 180, 115, 110, 180, 115, 135, 80)):
+                                        118, 100, 180, 115, 110, 180, 115, 135, 80, 125)):
             header.setSectionResizeMode(column, QHeaderView.Interactive)
             self.table.setColumnWidth(column, width)
-        saved_header = self.db.setting(f"calcs_header_v5_{portfolio_id}")
+        saved_header = self.db.setting(f"calcs_header_v6_{portfolio_id}")
         if saved_header:
             header.restoreState(QByteArray.fromBase64(saved_header.encode("ascii")))
         else:
-            legacy_header = self.db.setting(f"calcs_header_v4_{portfolio_id}")
-            if legacy_header:
-                self._restore_legacy_header(legacy_header)
+            previous_header = self.db.setting(f"calcs_header_v5_{portfolio_id}")
+            if previous_header:
+                self._restore_previous_header(previous_header)
+            else:
+                legacy_header = self.db.setting(f"calcs_header_v4_{portfolio_id}")
+                if legacy_header:
+                    self._restore_legacy_header(legacy_header)
         header.setSectionsMovable(True)
         for column, minimum in ((4, 145), (8, 100), (9, 180), (11, 110), (12, 180)):
             self.table.setColumnWidth(column, max(minimum, self.table.columnWidth(column)))
@@ -225,7 +230,7 @@ class CalcsTab(QWidget):
         self._apply_view_mode()
 
     def _apply_view_mode(self):
-        visible = ({0, 1, 2, 3, 4, 5, 6, 15} if self.view_mode == "allocation" else
+        visible = ({0, 1, 2, 3, 4, 5, 6, 15, 16} if self.view_mode == "allocation" else
                    {0, 7, 8, 9, 10, 11, 12, 13, 14, 15} if self.view_mode == "cases" else
                    set(range(self.table.columnCount())))
         for column in range(self.table.columnCount()):
@@ -331,6 +336,7 @@ class CalcsTab(QWidget):
                          "ib_symbol": ticker, "position_qty": 0.0, "value": 0.0,
                          "unit_price_usd": price * fx if price is not None and fx is not None else None,
                          "last_px": price, "currency": currency, "security_type": "STK",
+                         "con_id": details.get("con_id"),
                          "hypothetical": True, "verified_idea": bool(details.get("con_id")),
                          "contract_tooltip": (f"IBKR #{details['con_id']} · {details.get('description', '')} · "
                                               f"{details.get('primary_exchange', '')} · {currency}\n{source}"
@@ -554,8 +560,19 @@ class CalcsTab(QWidget):
             self._last_idea_quote_cache_at = time.monotonic()
 
     def save_view(self):
-        self.db.set_setting(f"calcs_header_v5_{self.portfolio_id}",
+        self.db.set_setting(f"calcs_header_v6_{self.portfolio_id}",
                             bytes(self.table.horizontalHeader().saveState().toBase64()).decode("ascii"))
+
+    def _restore_previous_header(self, encoded):
+        previous_table = CalcsTable(0, 16)
+        previous = previous_table.horizontalHeader()
+        if not previous.restoreState(QByteArray.fromBase64(encoded.encode("ascii", "ignore"))):
+            return
+        current = self.table.horizontalHeader()
+        for visual, logical in enumerate(sorted(range(16), key=previous.visualIndex)):
+            current.moveSection(current.visualIndex(logical), visual)
+            if previous.sectionSize(logical) > 0:
+                self.table.setColumnWidth(logical, previous.sectionSize(logical))
 
     def _restore_legacy_header(self, encoded):
         previous_table = CalcsTable(0, 12)
@@ -575,7 +592,7 @@ class CalcsTab(QWidget):
     def view_state(self):
         header = self.table.horizontalHeader()
         return {
-            "version": 2,
+            "version": 3,
             "mode": self.view_mode,
             "header": bytes(header.saveState().toBase64()).decode("ascii"),
             "sort_column": header.sortIndicatorSection(),
@@ -584,7 +601,7 @@ class CalcsTab(QWidget):
         }
 
     def apply_view_state(self, state):
-        if not isinstance(state, dict) or state.get("version") not in (1, 2):
+        if not isinstance(state, dict) or state.get("version") not in (1, 2, 3):
             return False
         legacy = state["version"] == 1
         remap = {8: 10, 9: 13, 10: 14, 11: 15} if legacy else {}
@@ -607,8 +624,11 @@ class CalcsTab(QWidget):
             self.refresh()
         saved = state.get("header")
         if isinstance(saved, str) and not legacy:
-            self.table.horizontalHeader().restoreState(
-                QByteArray.fromBase64(saved.encode("ascii", "ignore")))
+            if state["version"] == 2:
+                self._restore_previous_header(saved)
+            else:
+                self.table.horizontalHeader().restoreState(
+                    QByteArray.fromBase64(saved.encode("ascii", "ignore")))
         column = state.get("sort_column")
         if isinstance(column, int) and not isinstance(column, bool):
             column = remap.get(column, column)
@@ -1025,12 +1045,18 @@ class CalcsTab(QWidget):
         """True when the table already shows exactly this set of instruments."""
         if self.table.rowCount() != len(rows):
             return False
-        identifiers = {str(row["id"]) for row in rows}
+        remaining = {str(row["id"]) for row in rows}
+        if len(remaining) != len(rows):
+            return False
         for number in range(self.table.rowCount()):
             item = self.table.item(number, 0)
-            if item is None or str(item.data(Qt.UserRole)) not in identifiers:
+            if item is None:
                 return False
-        return True
+            identifier = str(item.data(Qt.UserRole))
+            if identifier not in remaining:
+                return False
+            remaining.remove(identifier)
+        return not remaining
 
     def refresh(self, *_, source_rows=None):
         current_row = self.table.currentRow()
@@ -1050,14 +1076,17 @@ class CalcsTab(QWidget):
             self._keyboard_controls = {}
             self._scenario_controls = {}
             self.table.clear_input_bindings()
-            header = self.table.horizontalHeader()
-            sort_column = header.sortIndicatorSection() if self.table.isSortingEnabled() else 0
-            sort_order = header.sortIndicatorOrder() if self.table.isSortingEnabled() else Qt.AscendingOrder
+            if not self.table.isSortingEnabled():
+                self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
             rows = [row for row in (source_rows if source_rows is not None
                                    else self.service.portfolio_rows())
                     if abs(float(row.get("position_qty") or 0)) > 1e-9]
             self._reconcile_acquired_ideas(rows)
             rows.extend(self._idea_rows())
+            if isinstance(self.market, IBKRMarketDataProvider):
+                self.market.request_earnings(
+                    (row["id"], row.get("con_id")) for row in rows
+                    if row.get("security_type") == "STK" and row.get("con_id"))
             nav = self.db.effective_nav(self.portfolio_id)
             cash_record = self.db.account_value(self.portfolio_id, "TotalCashValue")
             if cash_record and cash_record["currency"] == "USD":
@@ -1078,13 +1107,15 @@ class CalcsTab(QWidget):
             # a periodic price refresh then only rewrites text and values instead
             # of rebuilding every cell widget.
             in_place = self._table_matches(rows)
+            # Qt can move a row when its active sort column is edited. Keep row
+            # indices stable while every cell and editor is updated, then sort.
+            self.table.setSortingEnabled(False)
             if in_place:
                 by_id = {str(row["id"]): row for row in rows}
                 order = [self.table.item(number, 0).data(Qt.UserRole)
                          for number in range(self.table.rowCount())]
                 work = [(number, by_id[str(identifier)]) for number, identifier in enumerate(order)]
             else:
-                self.table.setSortingEnabled(False)
                 self.table.setRowCount(len(rows))
                 work = list(enumerate(rows))
             for index, row in work:
@@ -1149,12 +1180,30 @@ class CalcsTab(QWidget):
                     self._cell(index, 15, "")
                     if self.table.cellWidget(index, 15) is not None:
                         self.table.setCellWidget(index, 15, None)
+                earnings = (self.market.earnings.get(int(row["con_id"]), {})
+                            if isinstance(self.market, IBKRMarketDataProvider) and
+                            row.get("security_type") == "STK" and row.get("con_id") else {})
+                earnings_result = earnings.get("result") or {}
+                if row.get("security_type") != "STK":
+                    note = "Earnings dates apply to stocks"
+                elif not row.get("con_id"):
+                    note = "IBKR stock contract ID unavailable"
+                elif earnings_result:
+                    note = " · ".join(part for part in
+                                      (earnings_result.get("time_of_day"),
+                                       earnings_result.get("status")) if part)
+                elif earnings.get("error"):
+                    note = earnings["error"]
+                elif earnings.get("checked"):
+                    note = "No upcoming earnings date available"
+                elif isinstance(self.market, IBKRMarketDataProvider) and self.market.connected:
+                    note = "Loading earnings date from Wall Street Horizon"
+                else:
+                    note = "Connect to IBKR with Wall Street Horizon access"
+                self._cell(index, 16, earnings_result.get("date", "—"), tip=note,
+                           sort_value=earnings_result.get("date"))
             self.table.setColumnHidden(15, not bool(self.ideas))
-            if not in_place:
-                self.table.setSortingEnabled(True)
-                self.table.sortItems(sort_column, sort_order)
-            elif not self.table.isSortingEnabled():
-                self.table.setSortingEnabled(True)
+            self.table.setSortingEnabled(True)
             if selected_id is not None:
                 selected_row = self._row_for_position(selected_id)
                 if selected_row >= 0 and 0 <= selected_column < self.table.columnCount():

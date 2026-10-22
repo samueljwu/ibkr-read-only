@@ -1,7 +1,7 @@
 """Current portfolio exposure, with broker-sourced option and company facts."""
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import math
 
 
@@ -120,6 +120,8 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
     nav = db.effective_nav(portfolio_id)
     positions = []
     issues = []
+    fx_rates = {}
+    today = date.today().isoformat()
     source_rows = list(portfolio_rows if portfolio_rows is not None else service.portfolio_rows())
     stock_marks = {row.get("con_id"): row for row in source_rows
                    if row.get("security_type") == "STK" and row.get("con_id")}
@@ -154,8 +156,9 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
                     underlying_mode = f"Holding quote: {stock.get('price_source', 'IBKR')}"
                     underlying_currency = stock.get("currency") or underlying_currency
             multiplier = _valid(row.get("multiplier"), positive=True)
-            fx = (db.fx_rate(underlying_currency, datetime.now().date().isoformat())
-                  if underlying_currency else None)
+            if underlying_currency and underlying_currency not in fx_rates:
+                fx_rates[underlying_currency] = db.fx_rate(underlying_currency, today)
+            fx = fx_rates.get(underlying_currency)
             delta_recent = delta is not None and _recent(fact.get("delta_as_of"))
             price_recent = price is not None and _recent(underlying_as_of)
             if not delta_recent or not price_recent or multiplier is None or _valid(fx, positive=True) is None:

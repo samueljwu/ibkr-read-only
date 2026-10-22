@@ -373,20 +373,23 @@ class ExposurePanel(QWidget):
             "Share of gross absolute security exposure · cash excluded"
             + (f" · {mix['missing']} unavailable" if mix["missing"] else ""))
         gross_by_category = dict(mix["slices"])
-        missing_by_category = {name: sum(row[group_field] == name and row[value_field] is None
-                                         for row in positions) for name in categories}
-        known_by_category = {name: any(row[group_field] == name and row[value_field] is not None
-                                       for row in positions) for name in categories}
+        missing_by_category = {}
+        known_by_category = set()
+        for row in positions:
+            category = row[group_field]
+            if row[value_field] is None:
+                missing_by_category[category] = missing_by_category.get(category, 0) + 1
+            else:
+                known_by_category.add(category)
         categories.sort(key=lambda name: (-gross_by_category.get(name, 0), name))
         self._rendering = True
-        header = self.groups.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         self.groups.setSortingEnabled(False)
         try:
             self.groups.setRowCount(len(categories))
             for index, category in enumerate(categories):
+                missing_count = missing_by_category.get(category, 0)
                 gross = (gross_by_category.get(category, 0.0)
-                         if known_by_category[category] else None)
+                         if category in known_by_category else None)
                 share = (gross / mix["gross"] * 100
                          if gross is not None and mix["gross"] else None)
                 label = SortItem(f"● {category}", category.casefold())
@@ -396,12 +399,10 @@ class ExposurePanel(QWidget):
                 share_item = self.groups.numeric_item(2, share)
                 for column, item in enumerate((label, gross_item, share_item)):
                     item.setToolTip((f"{category} · {_money(gross)} gross"
-                                     + (f" · {missing_by_category[category]} unavailable"
-                                        if missing_by_category[category] else "")))
+                                     + (f" · {missing_count} unavailable"
+                                        if missing_count else "")))
                     self.groups.setItem(index, column, item)
             self.groups.setSortingEnabled(True)
-            self.groups.sortItems(sort_column if 0 <= sort_column < self.groups.columnCount() else 1,
-                                  sort_order)
             self.groups.clearSelection()
             matched = self.groups.row_for_key(self.category_filter)
             if matched >= 0:
@@ -422,8 +423,6 @@ class ExposurePanel(QWidget):
             f"Positions · {self.category_filter}" if self.category_filter else "Positions · All categories")
         self.clear_filter_button.setVisible(self.category_filter is not None)
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
-        header = self.positions.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         selected = self.positions.selectedItems()
         selected_under_id = (self.positions.item(selected[0].row(), 0).data(Qt.UserRole)
                              if selected and self.positions.item(selected[0].row(), 0) else None)
@@ -453,7 +452,6 @@ class ExposurePanel(QWidget):
                 item.setToolTip(detail)
                 self.positions.setItem(index, column, item)
         self.positions.setSortingEnabled(True)
-        self.positions.sortItems(sort_column, sort_order)
         if selected_under_id:
             for index in range(self.positions.rowCount()):
                 if self.positions.item(index, 0).data(Qt.UserRole) == selected_under_id:

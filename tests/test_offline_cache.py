@@ -1,7 +1,8 @@
 """Offline quotes stay identifiable and never turn into current-session returns."""
 
 import os
-from datetime import timedelta
+import json
+from datetime import date, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,7 +12,7 @@ import app.ui as ui
 import app.market.market_data as market_data
 from app.storage.database import Database
 from app.storage.encryption import open_database
-from app.market.market_data import MarketDataProvider
+from app.market.market_data import MarketDataProvider, _next_earnings
 from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today
 
@@ -75,6 +76,48 @@ def test_market_data_mode_does_not_clear_subscription_error_without_a_price():
     market.events.put(("quote", [1], "last", 13, "Live"))
     market.drain()
     assert market.quote(1)["status"] == "OK"
+
+
+def test_next_earnings_picks_earliest_upcoming_nested_event():
+    today = date(2026, 10, 22)
+    payload = json.dumps({"data": [{"details": {"earnings_date": "20261021"}},
+                                   {"details": {"earnings_date": "20261103",
+                                                "time_of_day": "AFTER MARKET",
+                                                "wshe_earnings_date_status": "CONFIRMED"}},
+                                   {"details": {"earnings_date": "20261028"}}]})
+    assert _next_earnings(payload, today) == {
+        "date": "2026-10-28", "time_of_day": "", "status": ""}
+    assert _next_earnings("not JSON", today) is None
+
+
+def test_wsh_requests_are_sequential_and_update_rebalance_ids(monkeypatch):
+    from app.market.market_data import IBKRMarketDataProvider
+
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17)
+    provider.connected = True
+    client = provider.client
+    metadata = []
+    requests = []
+    monkeypatch.setattr(client, "reqWshMetaData", metadata.append)
+    monkeypatch.setattr(client, "reqWshEventData", lambda req_id, request: requests.append((req_id, request)))
+    provider.request_earnings([(1, 101), (2, 202), (3, 101)])
+    assert len(metadata) == 1
+    assert requests == []
+    client.wshMetaData(metadata[0], json.dumps({"event_types": [{"name": "wshe_ed"}]}))
+    assert len(requests) == 1
+    assert json.loads(requests[0][1].filter)["watchlist"] == ["101"]
+    next_day = (date.today() + timedelta(days=2)).strftime("%Y%m%d")
+    client.wshEventData(requests[0][0], json.dumps({"data": [{"earnings_date": next_day,
+                                                                "time_of_day": "BEFORE MARKET"}]}))
+    assert len(requests) == 2
+    assert json.loads(requests[1][1].filter)["watchlist"] == ["202"]
+    client.wshEventData(requests[1][0], json.dumps({"data": []}))
+    assert provider.drain() == set()
+    assert provider.earnings_changed == {1, 2, 3}
+    assert provider.earnings[101]["result"]["date"] == (date.today() + timedelta(days=2)).isoformat()
+    assert provider.earnings[202]["result"] is None
+    provider.request_earnings([(1, 101), (2, 202)])
+    assert len(metadata) == 1 and len(requests) == 2
 
 
 def test_stock_and_underlying_price_requests_do_not_require_fundamentals(monkeypatch):

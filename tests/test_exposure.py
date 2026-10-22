@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -55,6 +55,31 @@ def test_missing_delta_keeps_adjusted_total_unavailable(tmp_path):
     assert grouped_exposure(snapshot["positions"], "sector", "adjusted") == [
         ("Unclassified", None, None, 1)]
     assert not save_broker_fact(db, 1, ("exposure_delta", 401, 1.2, "Live"))
+
+
+def test_options_share_one_fx_lookup_per_currency_on_exposure_refresh(tmp_path, monkeypatch):
+    db = Database(tmp_path / "exposure-fx-cache.sqlite3")
+    today = date.today().isoformat()
+    db.set_fx_rate("EUR", today, 1.1)
+    rows = [_row(401, "CALL A", "OPT", 1, 50, 100),
+            _row(402, "CALL B", "OPT", 2, 70, 100)]
+    for row in rows:
+        row["currency"] = "EUR"
+        save_broker_fact(db, 1, ("exposure_delta", row["con_id"], .5, "Live"))
+        save_broker_fact(db, 1, ("exposure_underlying_price", row["con_id"],
+                                 100, "EUR", "Live"))
+    calls = []
+    original = db.fx_rate
+
+    def counted_fx(currency, day):
+        calls.append((currency, day))
+        return original(currency, day)
+
+    monkeypatch.setattr(db, "fx_rate", counted_fx)
+    snapshot = exposure_snapshot(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
+    assert [row["adjusted"] for row in snapshot["positions"]] == pytest.approx([5500, 11000])
+    assert calls == [("EUR", today)]
+    db.conn.close()
 
 
 def test_option_can_use_recent_underlying_holding_quote(tmp_path):

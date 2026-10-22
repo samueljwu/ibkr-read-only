@@ -402,7 +402,7 @@ class ReportTable(QTableWidget):
                 self.setItem(row_index, column_index, item)
         if sorting:
             self.setSortingEnabled(True)
-        if 0 <= sort_column < self.columnCount():
+        elif 0 <= sort_column < self.columnCount():
             self.sortItems(sort_column, sort_order)
         if selected_text:
             self.clearSelection()
