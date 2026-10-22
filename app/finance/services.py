@@ -400,9 +400,29 @@ class MatchingService:
     def trade_rows(self, *, trades=None, remaining=None):
         trades = trades if trades is not None else self.db.rows("trades", self.portfolio_id)
         remaining = remaining if remaining is not None else self.remaining(trades=trades)
+        openings = self.db.legacy_opening_quantities(self.portfolio_id)
+        position_qty = defaultdict(float)
+        anchored = set()
+        traded_pct = {}
+        for trade in sorted(trades, key=lambda item: (
+                item["trade_date"], item.get("executed_at") or "", item["id"])):
+            if trade["security_type"] == "CASH":
+                traded_pct[trade["id"]] = None
+                continue
+            position_id = trade["position_id"]
+            opening = openings.get(position_id)
+            if opening and trade["trade_date"] > opening["as_of"] and position_id not in anchored:
+                position_qty[position_id] = float(opening["quantity"])
+                anchored.add(position_id)
+            prior = position_qty[position_id]
+            traded_pct[trade["id"]] = (float(trade["quantity"]) / abs(prior)
+                                        if abs(prior) > 1e-9 else None)
+            position_qty[position_id] = prior + float(trade["quantity"]) * (
+                1 if trade["side"] == "BUY" else -1)
         result = []
         for trade in trades:
             row = dict(trade)
+            row["traded_pct"] = traded_pct[trade["id"]]
             if not trade["commission_complete"]:
                 row["commission_usd"] = None
             multiplier = valid_multiplier(trade["multiplier"])

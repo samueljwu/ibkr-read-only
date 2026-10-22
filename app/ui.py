@@ -79,6 +79,8 @@ TRADES = [
     col("realized_pct", "Realized P&L %", "pct"),
     col("net_unrealized", "Open P&L USD", "money"),
     col("unrealized_pct", "Open P&L %", "pct"),
+    # Append logical columns to preserve saved sort indices and header layouts.
+    col("traded_pct", "Position traded %", "pct"),
 ]
 LOTS = [
     col("lot_state", "Status"), col("ticker", "Instrument"), col("buy_date", "Bought", "date"),
@@ -300,6 +302,9 @@ class GridModel(QAbstractTableModel):
                             f"price is {quote} per {base}. Value USD is the USD leg "
                             "before the separately shown fee when the pair contains USD.")
             if value is None:
+                if key == "traded_pct":
+                    return ("FX cash activity has no security position." if row.get("security_type") == "CASH" else
+                            "No position existed immediately before this trade; percentage is undefined.")
                 return (self.rows[index.row()].get("valuation_status") or
                         self.rows[index.row()].get("lot_note") or
                         self.rows[index.row()].get("data_status") or "Data unavailable")
@@ -311,6 +316,7 @@ class GridModel(QAbstractTableModel):
             if self.name in ("Lots", "Trades") and key in ("realized_net", "realized_pct", "net_unrealized", "unrealized_pct") and row.get("fee_pending"):
                 return "Estimated without pending fees or rebates; this value will update when they arrive."
             return {"gross_usd": "Gross trade value in USD, before commission.",
+                    "traded_pct": "Trade quantity divided by the absolute position quantity immediately before this execution.",
                     "one_day": "Price change from the prior session close in the instrument's currency. Excludes FX, trades, fees and position direction.",
                     "daily_pnl": "Security-position P&L in USD since the prior session, including today's trades, their commissions and FX changes. Excludes cash income, bond accrued interest and standalone FX effects.",
                     "accrued_interest_usd": "Bond accrued interest transferred at trade settlement; "
@@ -329,7 +335,8 @@ class GridModel(QAbstractTableModel):
             if value is None or value == "":
                 if value is None and key in (
                     "gross_usd", "value", "daily_pnl", "unrealized_pnl", "portfolio_pct",
-                    "realized_net", "realized_pct", "net_unrealized", "unrealized_pct"):
+                    "realized_net", "realized_pct", "net_unrealized", "unrealized_pct",
+                    "traded_pct"):
                     return "—"
                 return ""
             if kind == "pct":
@@ -2225,6 +2232,9 @@ class MainWindow(QMainWindow):
                                    self.db.setting("lots_pnl_percentages_version") != "1"):
                 self._place_lot_pnl_percentages()
                 self.db.set_setting("lots_pnl_percentages_version", "1")
+            if name == "Trades" and self.db.setting("trades_position_pct_version") != "1":
+                self._place_trade_position_pct()
+                self.db.set_setting("trades_position_pct_version", "1")
             if name == "Portfolio" and self.db.setting("price_move_bars_intro_applied") != "1":
                 for column in (9, 10, 11):
                     view.showColumn(column)
@@ -2246,6 +2256,17 @@ class MainWindow(QMainWindow):
             header.moveSection(source, target + (source > target))
             view.setColumnWidth(column, 125)
             view.showColumn(column)
+
+    def _place_trade_position_pct(self):
+        view = self.views["Trades"]
+        header = view.horizontalHeader()
+        columns = {key: index for index, (key, _, _) in enumerate(TRADES)}
+        column = columns["traded_pct"]
+        source = header.visualIndex(column)
+        target = header.visualIndex(columns["quantity"])
+        header.moveSection(source, target + (source > target))
+        view.setColumnWidth(column, 145)
+        view.showColumn(column)
 
     def _current_table_name(self):
         name = self.tabs.tabBar().tabData(self.tabs.currentIndex())

@@ -114,6 +114,11 @@ try {
     if ($setup.ExitCode -ne 0) {
         throw "Installer exited with code $($setup.ExitCode)."
     }
+    $app = Join-Path $Destination 'IBKRDashboard.exe'
+    if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
+        throw "The updated application was not found at $app."
+    }
+    Start-Process -FilePath $app -WorkingDirectory $Destination
     Remove-Item -LiteralPath $Installer -Force
 } catch {
     Add-Type -AssemblyName System.Windows.Forms

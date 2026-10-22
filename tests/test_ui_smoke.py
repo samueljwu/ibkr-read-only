@@ -49,6 +49,20 @@ def test_grid_filter_reuses_sorted_source_until_data_or_order_changes(tmp_path, 
         db.conn.close()
 
 
+def test_trades_grid_displays_position_traded_percent(tmp_path):
+    db = Database(tmp_path / "traded-percent.sqlite3")
+    try:
+        rows = [{"id": 1, "display_ticker": "AAPL", "traded_pct": .2},
+                {"id": 2, "display_ticker": "AAPL", "traded_pct": None}]
+        model = ui.GridModel("Trades", db, SimpleNamespace(trade_rows=lambda: rows))
+        column = next(i for i, (key, _, _) in enumerate(ui.TRADES) if key == "traded_pct")
+        assert model.headerData(column, Qt.Horizontal) == "Position traded %"
+        assert model.data(model.index(0, column)) == "20.00%"
+        assert model.data(model.index(1, column)) == "—"
+    finally:
+        db.conn.close()
+
+
 def test_trade_fee_refreshes_after_another_process_updates_shared_database(tmp_path, monkeypatch):
     QApplication.instance() or QApplication([])
     db_path = tmp_path / "shared-fee.sqlite3"
@@ -1231,7 +1245,8 @@ def test_displayed_financial_numbers_use_commas_and_two_decimals(tmp_path, monke
             "Trades": {"id": 1, "display_ticker": "AAPL", "quantity": 12345.6789,
                        "price": 1234.5678, "commission_usd": -12.3456,
                        "realized_net": 123.456, "realized_pct": 0.1234,
-                       "net_unrealized": -45.678, "unrealized_pct": -0.0567},
+                       "net_unrealized": -45.678, "unrealized_pct": -0.0567,
+                       "traded_pct": .2},
             "Lots": {"buy_trade_id": 1, "ticker": "AAPL", "buy_qty": 12345.6789,
                      "buy_price": 1234.5678, "realized_net": 9876543.219},
         }
@@ -1253,13 +1268,16 @@ def test_displayed_financial_numbers_use_commas_and_two_decimals(tmp_path, monke
         trades, lots = window.models["Trades"], window.models["Lots"]
         assert trades.data(trades.index(0, 3), Qt.DisplayRole) == "12,345.68"
         assert trades.data(trades.index(0, 5), Qt.DisplayRole) == "-12.35"
-        assert [label for _, label, _ in trades.columns[-4:]] == [
-            "Realized P&L USD", "Realized P&L %", "Open P&L USD", "Open P&L %"]
+        assert [label for _, label, _ in trades.columns[-5:]] == [
+            "Realized P&L USD", "Realized P&L %", "Open P&L USD", "Open P&L %",
+            "Position traded %"]
+        header = window.views["Trades"].horizontalHeader()
+        assert header.visualIndex(trades.columnCount() - 1) == header.visualIndex(3) + 1
         assert all(not window.views["Trades"].isColumnHidden(column)
-                   for column in range(trades.columnCount() - 4, trades.columnCount()))
+                   for column in range(trades.columnCount() - 5, trades.columnCount()))
         assert [trades.data(trades.index(0, column), Qt.DisplayRole)
-                for column in range(trades.columnCount() - 4, trades.columnCount())] == [
-                    "123.46", "12.34%", "-45.68", "-5.67%"]
+                for column in range(trades.columnCount() - 5, trades.columnCount())] == [
+                    "123.46", "12.34%", "-45.68", "-5.67%", "20.00%"]
         assert lots.data(lots.index(0, 3), Qt.DisplayRole) == "12,345.68"
         assert lots.data(lots.index(0, 7), Qt.DisplayRole) == "9,876,543.22"
         assert "number_decimals" not in window.settings_fields

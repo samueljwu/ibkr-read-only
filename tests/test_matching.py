@@ -91,6 +91,59 @@ def test_fx_execution_is_activity_instead_of_security_holding(db):
 
 
 
+def test_traded_percent_uses_position_before_each_execution(db):
+    position = db.add_position({"display_ticker": "AAPL", "ib_symbol": "AAPL"})
+    other = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ"})
+    later = db.add_trade({"position_id": position, "trade_date": "2026-01-03",
+                          "side": "SELL", "quantity": 100, "price": 12})
+    opening = db.add_trade({"position_id": position, "trade_date": "2026-01-01",
+                            "side": "BUY", "quantity": 500, "price": 10})
+    addition = db.add_trade({"position_id": position, "trade_date": "2026-01-04",
+                             "side": "BUY", "quantity": 100, "price": 11})
+    unrelated = db.add_trade({"position_id": other, "trade_date": "2026-01-02",
+                              "side": "BUY", "quantity": 50, "price": 10})
+    close = db.add_trade({"position_id": position, "trade_date": "2026-01-05",
+                          "side": "SELL", "quantity": 500, "price": 12})
+    new_opening = db.add_trade({"position_id": position, "trade_date": "2026-01-06",
+                                "side": "BUY", "quantity": 25, "price": 10})
+
+    rows = {row["id"]: row for row in MatchingService(db).trade_rows()}
+    assert rows[opening]["traded_pct"] is None
+    assert rows[later]["traded_pct"] == pytest.approx(.20)
+    assert rows[addition]["traded_pct"] == pytest.approx(.25)
+    assert rows[unrelated]["traded_pct"] is None
+    assert rows[close]["traded_pct"] == pytest.approx(1.0)
+    assert rows[new_opening]["traded_pct"] is None
+
+
+def test_traded_percent_uses_execution_time_and_absolute_short_position(db):
+    position = db.add_position({"display_ticker": "XYZ", "ib_symbol": "XYZ"})
+    cover = db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                          "executed_at": "2026-01-02 10:00:00", "side": "BUY",
+                          "quantity": 10, "price": 9})
+    short = db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                          "executed_at": "2026-01-02 09:00:00", "side": "SELL",
+                          "quantity": 50, "price": 10})
+
+    rows = {row["id"]: row for row in MatchingService(db).trade_rows()}
+    assert rows[short]["traded_pct"] is None
+    assert rows[cover]["traded_pct"] == pytest.approx(.20)
+
+
+def test_traded_percent_uses_imported_position_opening(db):
+    position = db.add_position({"display_ticker": "AAPL", "ib_symbol": "AAPL"})
+    db.set_setting("ib_account_id", "U-SYNTHETIC")
+    with db.conn:
+        db.conn.execute("""INSERT INTO legacy_position_openings
+            (portfolio_id,account_id,position_id,as_of,symbol,currency,quantity,source_hash)
+            VALUES (1,'U-SYNTHETIC',?,'2026-01-02','AAPL','USD','500','synthetic')""",
+            (position,))
+    sale = db.add_trade({"position_id": position, "trade_date": "2026-01-03",
+                         "side": "SELL", "quantity": 100, "price": 12})
+    row = next(row for row in MatchingService(db).trade_rows() if row["id"] == sale)
+    assert row["traded_pct"] == pytest.approx(.20)
+
+
 def test_trade_pnl_shows_realized_on_both_trades_and_open_on_remaining_buy(db):
     buy = trade(db, "BUY", 100, 10, commission=2)
     sell = trade(db, "SELL", 40, 12, "2026-01-05", commission=1)

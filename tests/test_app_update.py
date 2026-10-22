@@ -99,7 +99,13 @@ def test_windows_launcher_targets_existing_install_folder(tmp_path, monkeypatch)
     assert command[:2] == ["powershell.exe", "-NoProfile"]
     assert str(installer) in command
     assert str(installed.parent) in command
-    assert "Get-Process" in (tmp_path / "apply-update.ps1").read_text(encoding="utf-8")
+    helper = (tmp_path / "apply-update.ps1").read_text(encoding="utf-8")
+    assert "Get-Process" in helper
+    assert "if ($setup.ExitCode -ne 0)" in helper
+    assert "Join-Path $Destination 'IBKRDashboard.exe'" in helper
+    assert "Test-Path -LiteralPath $app -PathType Leaf" in helper
+    assert helper.index("Start-Process -FilePath $app -WorkingDirectory $Destination") > helper.index(
+        "if ($setup.ExitCode -ne 0)")
     assert options["close_fds"] is True
 
 
