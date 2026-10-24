@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QBoxLayou
                                QComboBox, QHBoxLayout, QHeaderView, QInputDialog,
                                QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
-from app.finance.exposure import add_custom_set, custom_sets, exposure_mix, exposure_snapshot
+from app.finance.exposure import CASH_CATEGORY, add_custom_set, custom_sets, exposure_mix, exposure_snapshot
 from app.views import widgets
 from app.views.exposure_custom_ui import CustomSetDialog
 from app.views.metric_summary import MetricInfoButton, MetricSummary, MetricValue
@@ -308,11 +308,15 @@ class ExposurePanel(QWidget):
         no_custom_set = group_field == "custom" and not self._selected_custom_set()
         if no_custom_set:
             positions = []
-        mix = exposure_mix(positions, group_field, value_field)
+        cash = None if no_custom_set else self.snapshot["cash"]
+        mix = exposure_mix(positions, group_field, value_field, cash)
         categories = sorted({row[group_field] for row in positions}, key=str.casefold)
+        if cash is not None and abs(cash) > 0:
+            categories.append(CASH_CATEGORY)
         colors = COLORS[self.palette_name]
         palette = colors["series"]
-        color_by_category = {name: (colors["unclassified"] if name == "Unclassified" else
+        color_by_category = {name: (colors["zero"] if name == CASH_CATEGORY else
+                                    colors["unclassified"] if name == "Unclassified" else
                                     palette[index % len(palette)])
                              for index, name in enumerate(categories)}
         chart = QChart()
@@ -324,7 +328,7 @@ class ExposurePanel(QWidget):
         series.setHoleSize(.57)
         series.setPieSize(.84)
         for category, gross in mix["slices"]:
-            pie_slice = series.append(category, gross)
+            pie_slice = series.append("Cash" if category == CASH_CATEGORY else category, gross)
             pie_slice.setColor(QColor(color_by_category[category]))
             pie_slice.setBorderColor(QColor(colors["surface"]))
             pie_slice.setBorderWidth(2)
@@ -339,10 +343,12 @@ class ExposurePanel(QWidget):
         self.chart_view.setFrameShape(QChartView.NoFrame)
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         self.chart_view.setChart(chart)
-        self.mix_info.set_detail(
-            "Use Create set to name categories and assign underlyings." if no_custom_set else
-            "Share of gross absolute security exposure · cash excluded"
-            + (f" · {mix['missing']} unavailable" if mix["missing"] else ""))
+        mix_detail = ("Use Create set to name categories and assign underlyings." if no_custom_set else
+                      "Share of gross absolute exposure including cash" if cash is not None else
+                      "Share of gross absolute security exposure · cash unavailable")
+        if mix["missing"]:
+            mix_detail += f" · {mix['missing']} unavailable"
+        self.mix_info.set_detail(mix_detail)
         gross_by_category = dict(mix["slices"])
         missing_by_category = {}
         known_by_category = set()
@@ -352,7 +358,9 @@ class ExposurePanel(QWidget):
                 missing_by_category[category] = missing_by_category.get(category, 0) + 1
             else:
                 known_by_category.add(category)
-        categories.sort(key=lambda name: (-gross_by_category.get(name, 0), name))
+        if cash is not None and abs(cash) > 0:
+            known_by_category.add(CASH_CATEGORY)
+        categories.sort(key=lambda name: (-gross_by_category.get(name, 0), name or ""))
         self._rendering = True
         self.groups.setSortingEnabled(False)
         try:
@@ -363,19 +371,20 @@ class ExposurePanel(QWidget):
                          if category in known_by_category else None)
                 share = (gross / mix["gross"] * 100
                          if gross is not None and mix["gross"] else None)
-                label = SortItem(f"● {category}", category.casefold())
+                label = SortItem(f"● {'Cash' if category == CASH_CATEGORY else category}",
+                                 "Cash" if category == CASH_CATEGORY else category.casefold())
                 label.setForeground(QColor(color_by_category[category]))
                 label.setData(Qt.UserRole, category)
                 gross_item = self.groups.numeric_item(1, gross)
                 share_item = self.groups.numeric_item(2, share)
                 for column, item in enumerate((label, gross_item, share_item)):
-                    item.setToolTip((f"{category} · {_money(gross)} gross"
+                    item.setToolTip((f"{'Cash' if category == CASH_CATEGORY else category} · {_money(gross)} gross"
                                      + (f" · {missing_count} unavailable"
                                         if missing_count else "")))
                     self.groups.setItem(index, column, item)
             self.groups.setSortingEnabled(True)
             self.groups.clearSelection()
-            matched = self.groups.row_for_key(self.category_filter)
+            matched = self.groups.row_for_key(self.category_filter) if self.category_filter is not None else -1
             if matched >= 0:
                 self.groups.selectRow(matched)
             else:
@@ -391,7 +400,8 @@ class ExposurePanel(QWidget):
         if self.snapshot is None:
             return
         self.positions_heading.setText(
-            f"Positions · {self.category_filter}" if self.category_filter else "Positions · All categories")
+            f"Positions · {'Cash' if self.category_filter == CASH_CATEGORY else self.category_filter}"
+            if self.category_filter else "Positions · All categories")
         self.clear_filter_button.setVisible(self.category_filter is not None)
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
         selected = self.positions.selectedItems()

@@ -5,6 +5,9 @@ from datetime import date, datetime, timedelta
 import math
 
 
+CASH_CATEGORY = "__cash_balance__"
+
+
 def _valid(value, *, positive=False):
     try:
         number = float(value)
@@ -206,7 +209,14 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
         values = [item[field] for item in positions]
         totals[field] = sum(values) if all(v is not None for v in values) else None
         totals[field + "_gross"] = sum(abs(v) for v in values) if all(v is not None for v in values) else None
-    return {"nav": nav, "positions": positions, "totals": totals, "issues": issues,
+    cash_record = db.account_value(portfolio_id, "TotalCashValue")
+    if cash_record and cash_record["currency"] == "USD":
+        cash = _valid(cash_record["value"])
+    elif nav is not None and nav > 0 and totals["value"] is not None:
+        cash = _valid(nav - totals["value"])
+    else:
+        cash = None
+    return {"nav": nav, "cash": cash, "positions": positions, "totals": totals, "issues": issues,
             "as_of": max((item["mark_as_of"] for item in positions), default="")}
 
 
@@ -226,7 +236,7 @@ def grouped_exposure(positions, group_field, value_field):
     return sorted(rows, key=lambda item: (item[2] is None, -(item[2] or 0), item[0]))
 
 
-def exposure_mix(positions, group_field, value_field):
+def exposure_mix(positions, group_field, value_field, cash=None):
     """Gross absolute slices with explicit coverage for unavailable valuations."""
     buckets = defaultdict(float)
     known_net = 0.0
@@ -238,7 +248,9 @@ def exposure_mix(positions, group_field, value_field):
             continue
         buckets[position[group_field]] += abs(value)
         known_net += value
+    if cash is not None:
+        buckets[CASH_CATEGORY] = abs(cash)
     slices = sorted(((name, amount) for name, amount in buckets.items() if amount > 0),
-                    key=lambda item: (-item[1], item[0]))
+                    key=lambda item: (-item[1], item[0] or ""))
     return {"slices": slices, "gross": sum(buckets.values()), "known_net": known_net,
             "missing": missing}

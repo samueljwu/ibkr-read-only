@@ -37,7 +37,7 @@ from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, M
 from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today, oldest_flex_date
 from app.sync.sync_service import trade_sync_paused
-from app.views.table_ui import (TABLE_ROW_HEIGHT, ReportTable, SortItem, TableClickAwayFilter,
+from app.views.table_ui import (TABLE_ROW_HEIGHT, ColumnMenu, ReportTable, SortItem, TableClickAwayFilter,
                                 copy_table_selection, display_number, handle_table_shortcut)
 from app.views.ui_theme import (COLORS, PAGE_MARGINS, PAGE_SPACING, SUMMARY_BORDER_GRADIENTS,
                                 SUMMARY_BORDER_SOLIDS, TOOLBAR_GROUP_SPACING,
@@ -1681,8 +1681,7 @@ class MainWindow(QMainWindow):
         if name == "Portfolio":
             column_controls.addWidget(QLabel("Show"))
         columns_button = self._button(column_controls, "Columns", lambda: None)
-        column_menu = QMenu(columns_button)
-        column_menu.setObjectName("columnsMenu")
+        column_menu = ColumnMenu(columns_button)
         column_menu.aboutToShow.connect(lambda table=name, menu=column_menu: self._populate_columns_menu(table, menu))
         columns_button.setMenu(column_menu)
         style_toolbar_dropdown(columns_button)
@@ -2781,12 +2780,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Show all columns", lambda checked=False, table=name: self._show_all_columns(table))
         menu.addSeparator()
         view = self.views[name]
-        for column, (_, label, _) in enumerate(COLUMNS[name]):
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(not view.isColumnHidden(column))
-            action.toggled.connect(lambda checked, table=name, number=column:
-                                   self.views[table].setColumnHidden(number, not checked))
+        menu.add_columns(view.horizontalHeader(), [label for _, label, _ in COLUMNS[name]])
 
     def _select_column(self, name, column):
         view = self.views[name]

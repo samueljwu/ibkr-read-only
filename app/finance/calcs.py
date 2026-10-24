@@ -142,3 +142,15 @@ def scenario_metrics(current_price, up_mode=None, up_value=None,
             "downside_price": current * (1 - down) if current is not None and current > 0 and down is not None else None,
             "risk_reward": up / down if up is not None and down is not None and down > 0 else None,
             "upside_reason": up_reason, "downside_reason": down_reason}
+
+
+def weighted_risk_reward(weighted_ratios):
+    """Average position ratios by target weight, excluding missing ratios."""
+    weighted_sum = 0.0
+    included_weight = 0.0
+    for weight, ratio in weighted_ratios:
+        weight, ratio = _finite(weight), _finite(ratio)
+        if weight is not None and weight > 0 and ratio is not None and ratio >= 0:
+            weighted_sum += weight * ratio
+            included_weight += weight
+    return weighted_sum / included_weight if included_weight else None

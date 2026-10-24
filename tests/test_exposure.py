@@ -4,8 +4,8 @@ from datetime import date, datetime
 import pytest
 
 from app.storage.database import Database
-from app.finance.exposure import (add_custom_set, custom_labels, delete_custom_set,
-                          exposure_snapshot, grouped_exposure, rename_custom_set,
+from app.finance.exposure import (CASH_CATEGORY, add_custom_set, custom_labels, delete_custom_set,
+                          exposure_mix, exposure_snapshot, grouped_exposure, rename_custom_set,
                           save_broker_fact, set_custom_label)
 
 
@@ -41,6 +41,21 @@ def test_stock_and_option_exposure_with_signed_delta_and_custom_underlying(tmp_p
     assert {item["custom"] for item in snapshot["positions"]} == {"AI"}
     assert grouped_exposure(snapshot["positions"], "sector", "adjusted") == [
         ("Technology", 21000, 27000, 3)]
+
+
+def test_cash_is_included_in_exposure_mix(tmp_path):
+    db = Database(tmp_path / "cash-mix.sqlite3")
+    db.set_portfolio_nav(1, 1000)
+    rows = [_row(301, "ABC", "STK", 5, 500)]
+    service = SimpleNamespace(portfolio_rows=lambda: rows)
+    snapshot = exposure_snapshot(db, service, 1)
+    assert snapshot["cash"] == 500
+    assert dict(exposure_mix(snapshot["positions"], "sector", "value", snapshot["cash"])["slices"]) == {
+        CASH_CATEGORY: 500, "Unclassified": 500}
+    db.set_account_value(1, "TotalCashValue", 250, "USD", datetime.now().isoformat())
+    snapshot = exposure_snapshot(db, service, 1)
+    assert snapshot["cash"] == 250
+    assert exposure_mix(snapshot["positions"], "sector", "value", snapshot["cash"])["gross"] == 750
 
 
 def test_missing_delta_keeps_adjusted_total_unavailable(tmp_path):
@@ -229,20 +244,27 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     assert panel.exposure_page.market_metric.value.text() == "+20.00%"
     assert "$200.00" in panel.exposure_page.market_metric.info.toolTip()
     market_slices = panel.exposure_page.chart_view.chart().series()[0].slices()
-    assert {slice_.label() for slice_ in market_slices} == {"Technology", "Healthcare"}
-    selected_category = market_slices[0].label()
-    market_slices[0].clicked.emit()
+    assert {slice_.label() for slice_ in market_slices} == {"Technology", "Healthcare", "Cash"}
+    selected_category = next(slice_ for slice_ in market_slices if slice_.label() == "Technology")
+    selected_category.clicked.emit()
+    selected_category = selected_category.label()
     assert panel.exposure_page.positions.rowCount() == 1
     panel.exposure_page.groups.sortItems(0, Qt.AscendingOrder)
     panel.exposure_page.render()
     selected_row = panel.exposure_page.groups.selectedItems()[0].row()
     assert panel.exposure_page.groups.item(selected_row, 0).data(Qt.UserRole) == selected_category
     panel.exposure_page._select_category(selected_category)
-    assert panel.exposure_page.groups.rowCount() == 2
+    assert panel.exposure_page.groups.rowCount() == 3
     assert panel.exposure_page.groups.horizontalHeaderItem(2).text() == "Mix %"
     assert {panel.exposure_page.groups.item(index, 2).text()
-            for index in range(2)} == {"+60.0%", "+40.0%"}
-    panel.exposure_page.groups.selectRow(0)
+            for index in range(3)} == {"+80.0%", "+12.0%", "+8.0%"}
+    cash_row = next(index for index in range(panel.exposure_page.groups.rowCount())
+                    if panel.exposure_page.groups.item(index, 0).data(Qt.UserRole) == CASH_CATEGORY)
+    panel.exposure_page.groups.selectRow(cash_row)
+    assert panel.exposure_page.positions.rowCount() == 0
+    security_row = next(index for index in range(panel.exposure_page.groups.rowCount())
+                        if panel.exposure_page.groups.item(index, 0).data(Qt.UserRole) == "Healthcare")
+    panel.exposure_page.groups.selectRow(security_row)
     assert panel.exposure_page.positions.rowCount() == 1
     add_custom_set(db, 1, "Theme")
     set_custom_label(db, 1, "Theme", 101, "Core")
@@ -250,7 +272,8 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     panel.exposure_page.group_combo.setCurrentText("Custom")
     panel.exposure_page._group_changed()
     assert {panel.exposure_page.groups.item(index, 0).data(Qt.UserRole)
-            for index in range(panel.exposure_page.groups.rowCount())} == {"Core", "Unclassified"}
+            for index in range(panel.exposure_page.groups.rowCount())} == {
+                "Core", "Unclassified", CASH_CATEGORY}
     assert panel.exposure_page.custom_set_combo.currentText() == "Theme"
     panel.resize(650, 550)
     panel.show()

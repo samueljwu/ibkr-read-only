@@ -83,6 +83,9 @@ def test_windows_launcher_targets_existing_install_folder(tmp_path, monkeypatch)
     assert "if ($setup.ExitCode -ne 0)" in helper
     assert "Join-Path $Destination 'IBKRDashboard.exe'" in helper
     assert "Test-Path -LiteralPath $app -PathType Leaf" in helper
+    assert helper.index("$env:PYINSTALLER_RESET_ENVIRONMENT = '1'") < helper.index(
+        "Start-Process -FilePath $app -WorkingDirectory $Destination -WindowStyle Normal -PassThru")
+    assert "if ($launched.WaitForExit(2000))" in helper
     assert helper.index("Start-Process -FilePath $app -WorkingDirectory $Destination") > helper.index(
         "if ($setup.ExitCode -ne 0)")
     assert options["close_fds"] is True

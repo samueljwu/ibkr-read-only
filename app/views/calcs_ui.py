@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QComp
                                QHeaderView, QLabel, QLineEdit, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from app.finance.calcs import calculate_targets, scale_target_weights, scenario_metrics
+from app.finance.calcs import (calculate_targets, scale_target_weights, scenario_metrics,
+                               weighted_risk_reward)
 from app.finance.calculations import choose_price, valid_price
 from app.market.market_data import IBKRMarketDataProvider
 from app.views import widgets
@@ -151,8 +152,9 @@ class CalcsTab(QWidget):
         cash_layout.setContentsMargins(14, 8, 14, 8)
         cash_layout.setHorizontalSpacing(18)
         title = widgets.section_title("Cash allocation")
-        cash_layout.addWidget(title, 0, 0, 1, 3)
-        for column, title in enumerate(("Current cash / weight", "Target weight · input", "Cash change")):
+        cash_layout.addWidget(title, 0, 0, 1, 4)
+        for column, title in enumerate(("Current cash / weight", "Target weight · input",
+                                        "Cash change", "Weighted risk / reward")):
             label = widgets.field_label(title)
             cash_layout.addWidget(label, 1, column)
         self.cash_value = QLabel("—")
@@ -164,7 +166,12 @@ class CalcsTab(QWidget):
             lambda: self._finish_spin_edit(self.cash_editor, self._cash_changed))
         self._watch_editor(self.cash_editor, None, 4)
         self.cash_gap = QLabel("—")
-        for column, widget in enumerate((self.cash_value, self.cash_editor, self.cash_gap)):
+        self.portfolio_risk_reward = QLabel("—")
+        self.portfolio_risk_reward.setToolTip(
+            "Average of position upside / downside ratios weighted by target allocation. "
+            "Positions without a valid ratio or with zero target weight are excluded.")
+        for column, widget in enumerate((self.cash_value, self.cash_editor, self.cash_gap,
+                                         self.portfolio_risk_reward)):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             cash_layout.addWidget(widget, 2, column)
@@ -173,7 +180,7 @@ class CalcsTab(QWidget):
         set_zoom_height(self.cash_editor, TABLE_ROW_HEIGHT)
         self.cash_editor.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         cash_layout.setAlignment(self.cash_editor, Qt.AlignLeft | Qt.AlignVCenter)
-        for column in range(3):
+        for column in range(4):
             label = cash_layout.itemAtPosition(1, column).widget()
             label.setMinimumWidth(0)
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -1144,6 +1151,7 @@ class CalcsTab(QWidget):
             else:
                 self.table.setRowCount(len(rows))
                 work = list(enumerate(rows))
+            weighted_ratios = []
             for index, row in work:
                 result = calculated.get(row["id"])
                 weight = row["value"] / nav if row.get("value") is not None and nav and nav > 0 else None
@@ -1190,6 +1198,8 @@ class CalcsTab(QWidget):
                 self._scenario_editor(index, row["id"], "up", scenario, metrics, currency, reuse=in_place)
                 self._scenario_editor(index, row["id"], "down", scenario, metrics, currency, reuse=in_place)
                 ratio = metrics["risk_reward"]
+                if result is not None:
+                    weighted_ratios.append((result["target_weight"], ratio))
                 reason = metrics["upside_reason"] or metrics["downside_reason"]
                 self._cell(index, 14, self._number(ratio, 14),
                            tip=reason or "Upside gain % divided by downside loss %",
@@ -1254,6 +1264,9 @@ class CalcsTab(QWidget):
             self.mode_label.setText(("Cash target scales position weights" if self.mode == "proportional"
                                      else "Individual targets") +
                                     (f"  ·  NAV ${nav:,.2f}" if nav is not None else ""))
+            portfolio_ratio = weighted_risk_reward(weighted_ratios)
+            self.portfolio_risk_reward.setText(
+                f"{portfolio_ratio:,.2f}" if portfolio_ratio is not None else "—")
             if calc["error"]:
                 self.status.setText(self._target_error or calc["error"])
                 self.totals.setText("Buy / sell estimates unavailable until the inputs reconcile.")

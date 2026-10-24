@@ -3,7 +3,7 @@
 import json
 from decimal import Decimal
 
-from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QObject, QPoint, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QObject, QPoint, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QActionGroup, QColor, QCursor, QKeySequence, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlider,
                                 QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox, QInputDialog,
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlid
                                QStyledItemDelegate, QStyleOptionViewItem, QTabBar,
                                QTableView, QTableWidget, QTableWidgetItem, QTextEdit, QWidget)
 
+from app.views.action_icons import action_icon
 from app.views.ui_theme import COLORS
 
 TABLE_ROW_HEIGHT = 30
@@ -33,6 +34,115 @@ def percent(value):
     if value is None:
         return "—"
     return f"{Decimal(str(value)):+,.2f}%"
+
+
+class ColumnMenu(QMenu):
+    """Column visibility menu whose entries can be dragged into table order."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.setObjectName("columnsMenu")
+        self._header = None
+        self._columns = {}
+        self._drag_action = None
+        self._drag_origin = None
+        self._dragging = False
+        self._drag_icon = None
+        self._drag_icon_color = None
+
+    def add_columns(self, header, labels):
+        self._header = header
+        self._columns = {}
+        hint = self.addAction("Drag columns to reorder")
+        hint.setEnabled(False)
+        for index in sorted(range(min(len(labels), header.count())), key=header.visualIndex):
+            action = self.addAction(labels[index])
+            action.setCheckable(True)
+            action.setChecked(not header.isSectionHidden(index))
+            action.toggled.connect(lambda checked, column=index: header.setSectionHidden(column, not checked))
+            self._columns[action] = index
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._columns:
+            return
+        # QAction icons use the checkmark slot, so draw handles at the trailing edge.
+        color = self.palette().color(QPalette.Text).name()
+        if color != self._drag_icon_color:
+            self._drag_icon = action_icon("drag_handle", color)
+            self._drag_icon_color = color
+        painter = QPainter(self)
+        if self._dragging and self._drag_action in self._columns:
+            rect = self.actionGeometry(self._drag_action).adjusted(2, 2, -2, -2)
+            theme = "dark" if self.palette().color(QPalette.Window).lightness() < 128 else "light"
+            accent = QColor(COLORS[theme]["selection_border"])
+            tint = QColor(accent)
+            tint.setAlpha(42)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(accent, 2))
+            painter.setBrush(tint)
+            painter.drawRoundedRect(QRectF(rect), 5, 5)
+            painter.fillRect(QRect(rect.left() + 3, rect.top() + 5, 3, rect.height() - 10), accent)
+        for action in self._columns:
+            rect = self.actionGeometry(action)
+            if rect.intersects(event.rect()):
+                self._drag_icon.paint(painter, QRect(rect.right() - 23, rect.center().y() - 8, 16, 16))
+        painter.end()
+
+    def mousePressEvent(self, event):
+        position = event.position().toPoint()
+        action = self.actionAt(position)
+        self._drag_action = action if event.button() == Qt.LeftButton and action in self._columns else None
+        self._drag_origin = position
+        self._dragging = False
+        if self._drag_action is not None:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_action is not None and event.buttons() & Qt.LeftButton:
+            position = event.position().toPoint()
+            if (position - self._drag_origin).manhattanLength() >= QApplication.startDragDistance():
+                self._dragging = True
+            if self._dragging:
+                self.setCursor(Qt.ClosedHandCursor)
+                target = self.actionAt(position)
+                if target in self._columns and target is not self._drag_action:
+                    source_visual = self._header.visualIndex(self._columns[self._drag_action])
+                    target_visual = self._header.visualIndex(self._columns[target])
+                    self._header.moveSection(source_visual, target_visual)
+                    self.removeAction(self._drag_action)
+                    actions = self.actions()
+                    target_position = actions.index(target) + (source_visual < target_visual)
+                    if target_position < len(actions):
+                        self.insertAction(actions[target_position], self._drag_action)
+                    else:
+                        self.addAction(self._drag_action)
+                self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        action = self._drag_action
+        dragging = self._dragging
+        self._drag_action = None
+        self._drag_origin = None
+        self._dragging = False
+        if action is not None:
+            self.unsetCursor()
+            self.update()
+        if action is not None:
+            if not dragging and self.actionAt(event.position().toPoint()) is action:
+                action.trigger()
+                menu = self
+                while isinstance(menu, QMenu):
+                    menu.hide()
+                    menu = menu.parentWidget()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 def build_header_menu(parent, header, column, *, sort, decimals, labels):
@@ -83,13 +193,9 @@ def build_header_menu(parent, header, column, *, sort, decimals, labels):
         custom.triggered.connect(_choose_custom)
     menu.addSeparator()
     menu.addAction("Hide column", lambda: header.hideSection(column))
-    columns_menu = QMenu("Columns", menu)
+    columns_menu = ColumnMenu("Columns", menu)
     menu.addMenu(columns_menu)
-    for index, label in enumerate(labels):
-        action = columns_menu.addAction(label)
-        action.setCheckable(True)
-        action.setChecked(not header.isSectionHidden(index))
-        action.toggled.connect(lambda checked, number=index: header.setSectionHidden(number, not checked))
+    columns_menu.add_columns(header, labels)
     menu.addAction("Show all columns",
                    lambda: [header.setSectionHidden(index, False) for index in range(header.count())])
     return menu

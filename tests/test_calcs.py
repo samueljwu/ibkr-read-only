@@ -106,6 +106,44 @@ def test_calcs_tab_saves_cash_and_position_targets_by_portfolio(tmp_path):
 
 
 
+def test_portfolio_risk_reward_uses_target_weights_and_skips_missing_cases(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "weighted_risk_reward.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    tab = CalcsTab(db, Service([holding(1, 60000, 600), holding(2, 30000, 300)]), 1)
+    try:
+        cash_layout = tab.portfolio_risk_reward.parentWidget().layout()
+        assert cash_layout.itemAtPosition(2, 2).widget() is tab.cash_gap
+        assert cash_layout.itemAtPosition(2, 3).widget() is tab.portfolio_risk_reward
+        assert tab.portfolio_risk_reward.text().endswith("—")
+        tab.scenarios["1"] = {"up_mode": "percent", "up_value": 30,
+                              "down_mode": "percent", "down_value": 10}
+        tab.refresh()
+        assert tab.portfolio_risk_reward.text().endswith("3.00")
+
+        tab.scenarios["2"] = {"up_mode": "percent", "up_value": 10,
+                              "down_mode": "percent", "down_value": 10}
+        tab.refresh()
+        assert tab.portfolio_risk_reward.text().endswith("2.33")
+
+        first_row = tab._row_for_position(1)
+        tab.table.cellWidget(first_row, 4).setValue(30)
+        tab.table.cellWidget(first_row, 4).editingFinished.emit()
+        assert tab.portfolio_risk_reward.text().endswith("2.00")
+
+        first_row = tab._row_for_position(1)
+        tab.table.cellWidget(first_row, 4).setValue(0)
+        tab.table.cellWidget(first_row, 4).editingFinished.emit()
+        assert tab.portfolio_risk_reward.text().endswith("1.00")
+
+        tab.scenarios.pop("2")
+        tab.refresh()
+        assert tab.portfolio_risk_reward.text().endswith("—")
+    finally:
+        tab.close()
+        db.conn.close()
+
+
 def test_scenario_arrows_move_between_mode_value_and_rows(tmp_path):
     app = QApplication.instance() or QApplication([])
     db = Database(tmp_path / "scenario_arrows.sqlite3")

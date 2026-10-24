@@ -441,7 +441,7 @@ QMenu#columnsMenu {
     border-radius: 8px; padding: 6px;
 }
 QMenu#columnsMenu::item {
-    border: 2px solid transparent; border-radius: 6px; padding: 6px 16px 6px 24px;
+    border: 2px solid transparent; border-radius: 6px; padding: 6px 32px 6px 24px;
 }
 QMenu#columnsMenu::item:selected {
     background: ${selection}; color: ${selection_text}; border: 2px solid ${selection_border};

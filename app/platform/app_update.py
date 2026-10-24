@@ -118,12 +118,18 @@ try {
     if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
         throw "The updated application was not found at $app."
     }
-    Start-Process -FilePath $app -WorkingDirectory $Destination
+    # The helper inherits the old PyInstaller process environment. Start the
+    # installed executable as a fresh application after the old process exits.
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    $launched = Start-Process -FilePath $app -WorkingDirectory $Destination -WindowStyle Normal -PassThru
+    if ($launched.WaitForExit(2000)) {
+        throw "The updated application exited immediately with code $($launched.ExitCode)."
+    }
     Remove-Item -LiteralPath $Installer -Force
 } catch {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
-        "The update could not be installed. The installer remains at:`n$Installer`n`n$_",
+        "The update or restart could not be completed. The installer remains at:`n$Installer`n`n$_",
         'IBKR Dashboard update') | Out-Null
 }
 """, encoding="utf-8")
