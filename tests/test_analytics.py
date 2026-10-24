@@ -457,6 +457,26 @@ def test_weekend_flow_keeps_its_date_and_does_not_count_as_gain():
     assert rows[-1]["adjusted_change"] == 0
 
 
+def test_range_adjusted_values_are_cumulative_while_daily_pnl_is_one_period():
+    snapshots = [
+        {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-05", "nav_usd": 1650, "source": "flex", "flow_covered": 1},
+        {"day": "2026-01-06", "nav_usd": 1760, "source": "flex", "flow_covered": 1},
+    ]
+    rows, complete = performance_window_rows(
+        snapshots, [{"day": "2026-01-05", "amount_usd": 500}],
+        date(2026, 1, 2), date(2026, 1, 6))
+
+    assert complete
+    assert [row["daily_pnl"] for row in rows] == [None, 150, 110]
+    assert [row["daily_return"] for row in rows] == pytest.approx(
+        [None, 150 / 1500, 110 / 1650])
+    assert [row["adjusted_change"] for row in rows] == [0, 150, 260]
+    assert rows[1]["performance"] == pytest.approx(10)
+    assert rows[2]["performance"] == pytest.approx(
+        ((1 + 150 / 1500) * (1 + 110 / 1650) - 1) * 100)
+
+
 
 
 
@@ -753,6 +773,13 @@ def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
         window.analytics_tab.refresh()
         assert window.tabs.tabText(window.tabs.indexOf(window.analytics_tab)) == "Analytics"
         assert window.analytics_tab.pnl_table.rowCount() == 3
+        table = window.analytics_tab.pnl_table
+        assert table.horizontalHeaderItem(3).text() == "Cumulative adjusted NAV change"
+        assert table.horizontalHeaderItem(4).text() == "Cumulative adjusted performance"
+        assert table.horizontalHeaderItem(7).text() == "Daily adjusted P&L %"
+        assert not table.isColumnHidden(7)
+        assert table.item(1, 7).raw_value == pytest.approx(10 / 1500)
+        assert table.item(1, 7).text() == "+0.67%"
         assert window.analytics_tab.stats["NAV"].text() == "$1,310.00"
         assert window.analytics_tab.stats["Adjusted NAV change"].text() == "$10.00"
         assert window.analytics_tab.stats["NAV change"].text() == "$310.00"

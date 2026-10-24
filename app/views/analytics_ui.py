@@ -529,18 +529,21 @@ class AnalyticsTab(QWidget):
         self.stats["NAV change"].setToolTip(
             "Change in account NAV from the closing value before this range, including external flows")
         self.stats["Adjusted NAV change"].setToolTip(
-            "NAV change after removing deposits, withdrawals and asset transfers")
+            "Cumulative NAV change over the selected range after removing deposits, "
+            "withdrawals and asset transfers")
         self.stats["Adjusted performance"].setToolTip(
-            "Compounded daily account returns using IBKR's published TWR formula: "
+            "Cumulative return over the selected range, compounding daily account "
+            "returns using IBKR's published TWR formula: "
             "ending NAV / (previous NAV + external flow) - 1")
         for name, button in self.metric_buttons.items():
             button.setToolTip(f"{self.stats[name].toolTip()}\nClick to chart {name.lower()}.")
         self.pnl_navigator = TimeRangeNavigator()
-        self.pnl_table = self._table(("Date", "NAV", "NAV change", "Adjusted NAV change",
-                                      "Adjusted performance", "External flow",
-                                      "Daily adjusted P&L"), "analytics_pnl_decimals",
+        self.pnl_table = self._table(("Date", "NAV", "NAV change", "Cumulative adjusted NAV change",
+                                      "Cumulative adjusted performance", "External flow",
+                                      "Daily adjusted P&L", "Daily adjusted P&L %"), "analytics_pnl_decimals",
                                      {1: (2, "usd"), 2: (2, "usd"), 3: (2, "usd"),
-                                      4: (2, "percent"), 5: (2, "usd"), 6: (2, "usd")})
+                                      4: (2, "percent"), 5: (2, "usd"), 6: (2, "usd"),
+                                      7: (2, "ratio_percent")})
         self.pnl_views = QStackedWidget()
         self.pnl_views.setMinimumWidth(0)
         self.pnl_views.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
@@ -950,7 +953,8 @@ class AnalyticsTab(QWidget):
              row["adjusted_change"] if complete else None,
              row["performance"] if complete else None,
              row["external_flow"],
-             row["daily_pnl"] if complete else None) for row in pnl_rows])
+             row["daily_pnl"] if complete else None,
+             row["daily_return"] if complete else None) for row in pnl_rows])
 
     def refresh_exposure(self, portfolio_rows=None):
         self.exposure_page.refresh(portfolio_rows)
