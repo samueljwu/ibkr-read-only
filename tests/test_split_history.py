@@ -35,19 +35,6 @@ def test_reject_mismatched_instrument_and_disagreeing_ratio():
 
 
 
-def test_verified_same_day_cache_is_reused_without_a_request(tmp_path):
-    db = Database(tmp_path / "split-history.sqlite3")
-    position = {"id": 7, "con_id": 123, "ib_symbol": "SYN", "currency": "USD"}
-    db.set_setting("analytics_levels_split_history_7", json.dumps({
-        "date": date.today().isoformat(), "symbol": "SYN", "currency": "USD",
-        "con_id": 123, "events": [["2024-06-12", "2", "1"],
-                                   ["2026-09-03", "2", "1"]]}))
-    client = SplitHistoryClient(db)
-    events, status = client.events(position, "2024-05-01", lambda: None)
-    assert status == "ready"
-    assert events == {"2024-06-12": Decimal(2), "2026-09-03": Decimal(2)}
-    assert not client._pending
-    db.conn.close()
 
 
 

@@ -225,8 +225,9 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     panel.sections.setCurrentWidget(panel.exposure_page)
     panel.refresh()
     assert panel.sections.tabText(3) == "Exposure"
-    assert panel.range_combo.isHidden()
-    assert "$200.00" in panel.exposure_page.net_summary.text()
+    assert panel.sections.currentWidget() is panel.exposure_page
+    assert panel.exposure_page.market_metric.value.text() == "+20.00%"
+    assert "$200.00" in panel.exposure_page.market_metric.info.toolTip()
     market_slices = panel.exposure_page.chart_view.chart().series()[0].slices()
     assert {slice_.label() for slice_ in market_slices} == {"Technology", "Healthcare"}
     selected_category = market_slices[0].label()

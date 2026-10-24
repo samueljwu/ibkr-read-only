@@ -3,12 +3,14 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QSizePolicy, QSplitter, QToolButton,
+                               QLabel, QLineEdit,
                                QVBoxLayout, QWidget)
 
 from app.finance.position_returns import position_return_rows
 from app.views import widgets
+from app.views.metric_summary import MetricInfoButton, MetricSummary, MetricValue
 from app.views.table_ui import ReportTable, SortItem, money
+from app.views.toolbar import Toolbar
 from app.views.ui_theme import COLORS, style_toolbar_dropdown
 
 
@@ -21,75 +23,56 @@ class ReturnPanel(QWidget):
         self.unattributed = []
         self._preferred_id = None
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 0)
+        widgets.apply_layout(layout, "subpage")
         layout.setSpacing(8)
 
-        toolbar = QHBoxLayout()
-        toolbar.addWidget(QLabel("Search"))
+        self.toolbar = toolbar = Toolbar()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Name, ticker or contract")
         self.search.setClearButtonEnabled(True)
         self.search.setMaximumWidth(290)
         self.search.textChanged.connect(self._filter)
-        toolbar.addWidget(self.search)
-        toolbar.addWidget(QLabel("Show"))
+        self.search.setMinimumWidth(180)
+        toolbar.add_control(self.search, "Search")
         self.show = QComboBox()
         style_toolbar_dropdown(self.show)
         self.show.addItems(("All", "Currently held", "Closed"))
         self.show.currentIndexChanged.connect(self._filter)
-        toolbar.addWidget(self.show)
-        toolbar.addWidget(QLabel("Type"))
+        toolbar.add_control(self.show, "Show")
         self.type_filter = QComboBox()
         style_toolbar_dropdown(self.type_filter)
         for label, security_type in (("All", "All"), ("Stocks", "STK"),
                                      ("Options", "OPT"), ("Bonds", "BOND")):
             self.type_filter.addItem(label, security_type)
         self.type_filter.currentIndexChanged.connect(self._filter)
-        toolbar.addWidget(self.type_filter)
-        toolbar.addStretch()
-        toolbar.addWidget(QLabel("Tables"))
-        self.layout_combo = QComboBox()
-        style_toolbar_dropdown(self.layout_combo)
-        self.layout_combo.addItems(("Top and bottom", "Side by side"))
+        toolbar.add_control(self.type_filter, "Type")
+        self.layout_combo = widgets.layout_choice("Returns tables")
         self._split_key = f"position_return_splitter_{portfolio_id}"
-        horizontal = db.setting(f"{self._split_key}_orientation") == "horizontal"
-        self.layout_combo.setCurrentIndex(1 if horizontal else 0)
-        toolbar.addWidget(self.layout_combo)
-        self.notes_button = QToolButton()
-        self.notes_button.setObjectName("returnNotesButton")
-        self.notes_button.setText("Return notes")
-        self.notes_button.setToolTip("Show coverage and calculation notes")
-        self.notes_button.setCheckable(True)
-        self.notes_button.setArrowType(Qt.RightArrow)
-        self.notes_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        toolbar.addWidget(self.notes_button)
-        layout.addLayout(toolbar)
+        toolbar.add_control(self.layout_combo, "Layout", trailing=True)
+        self.notes_button = MetricInfoButton("Return notes")
+        layout.addWidget(toolbar)
 
-        summary = QHBoxLayout()
+        summary = MetricSummary(framed=False)
         self.stats = {}
-        for label in ("Realized P&L", "Unrealized P&L", "Income and accruals", "Total return"):
-            block = QVBoxLayout()
-            caption = QLabel(label)
-            caption.setObjectName("metricLabel")
-            value = QLabel("—")
-            value.setObjectName("metricValue")
-            block.addWidget(caption)
-            block.addWidget(value)
-            summary.addLayout(block, 1)
-            self.stats[label] = value
-        layout.addLayout(summary)
-        self.note = QLabel()
+        blocks = []
+        for label in ("Total return", "Realized P&L", "Unrealized P&L", "Income and accruals"):
+            block = MetricValue(label)
+            blocks.append(block)
+            self.stats[label] = block.value
+        summary.set_blocks(blocks)
+        layout.addWidget(summary)
+        footer = QHBoxLayout()
+        self.scope = QLabel()
+        self.scope.setObjectName("hint")
+        footer.addWidget(self.scope)
+        footer.addWidget(self.notes_button)
+        footer.addStretch()
+        layout.addLayout(footer)
+        self.note = QLabel(self)
         self.note.setObjectName("hint")
         self.note.setWordWrap(True)
         self.note.hide()
-        self.notes_button.toggled.connect(self._toggle_notes)
-        layout.addWidget(self.note)
 
-        self.splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(11)
-        self.splitter.setMinimumWidth(0)
-        self.splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.table = ReportTable(0, 8)
         self.table.setHorizontalHeaderLabels(("Name", "Status", "Realized USD", "Unrealized USD",
                                               "Income and accruals USD", "Total return USD", "Return on cash cost %",
@@ -106,8 +89,8 @@ class ReturnPanel(QWidget):
         self.table.setColumnWidth(7, 210)
         self.table.itemSelectionChanged.connect(self._selected)
         self.table.sortItems(5, Qt.DescendingOrder)
+        self.table.fit_header_widths()
         self.table.remember_layout(db, f"position_return_layout_{portfolio_id}")
-        self.splitter.addWidget(self.table)
 
         details = QWidget()
         detail_layout = QVBoxLayout(details)
@@ -132,14 +115,12 @@ class ReturnPanel(QWidget):
         self.details_table.setColumnWidth(4, 135)
         self.details_table.setColumnWidth(13, 170)
         self.details_table.sortItems(1, Qt.DescendingOrder)
+        self.details_table.fit_header_widths()
         self.details_table.remember_layout(db, f"position_return_detail_layout_{portfolio_id}")
         detail_layout.addWidget(self.details_table, 1)
-        self.splitter.addWidget(details)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
-        self._splitter_save = None
-        self._wire_splitter(horizontal)
-        self.layout_combo.currentIndexChanged.connect(self._set_layout)
+        self.splitter = widgets.pane_splitter(
+            db, self._split_key, self.table, details, layout_combo=self.layout_combo,
+            description="returns and details")
         layout.addWidget(self.splitter, 1)
         self.table.horizontalHeaderItem(6).setToolTip(
             "Total return divided by all purchase cash outflows, including commissions "
@@ -152,10 +133,6 @@ class ReturnPanel(QWidget):
         self.rows, self.unattributed = position_return_rows(
             self.db, self.portfolio_id, portfolio_rows, lots)
         self._filter()
-
-    def _toggle_notes(self, expanded):
-        self.notes_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self.note.setVisible(expanded)
 
     def _filter(self, *_):
         query = self.search.text().strip().casefold()
@@ -223,6 +200,7 @@ class ReturnPanel(QWidget):
                 if key == "total" and value.startswith("≈") else "")
         incomplete = sum(bool(row["issues"]) for row in visible)
         missing_income_fx = sum("Income FX missing" in row["issues"] for row in visible)
+        self.scope.setText(f"{len(visible)} instruments · cumulative return in USD")
         if visible:
             notes = [
                 "Scope · Since first recorded trade or estimated opening, in USD.",
@@ -245,6 +223,7 @@ class ReturnPanel(QWidget):
             self.note.setText("\n".join(notes))
         else:
             self.note.setText("No instruments match this filter.")
+        self.notes_button.set_detail(self.note.text())
 
     def _selected_id(self):
         selected = self.table.selectedItems()
@@ -298,27 +277,6 @@ class ReturnPanel(QWidget):
             self._color_item(income_item, movement["amount_usd"])
             table.setItem(index, 9, income_item)
         table.setSortingEnabled(True)
-
-    def _split_state_key(self, horizontal):
-        return f"{self._split_key}_horizontal" if horizontal else self._split_key
-
-    def _wire_splitter(self, horizontal):
-        key = self._split_state_key(horizontal)
-        if self._splitter_save is not None:
-            self.splitter.splitterMoved.disconnect(self._splitter_save)
-        had_saved = bool(self.db.setting(key))
-        self._splitter_save = widgets.remember_splitter(self.splitter, self.db, key)
-        if not had_saved:
-            self.splitter.setSizes((3, 2))
-
-    def _set_layout(self, index):
-        horizontal = index == 1
-        if (self.splitter.orientation() == Qt.Horizontal) == horizontal:
-            return
-        self.splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
-        self._wire_splitter(horizontal)
-        self.db.set_setting(f"{self._split_key}_orientation",
-                            "horizontal" if horizontal else "vertical")
 
     def _color_item(self, item, value):
         if value is not None and value != 0:

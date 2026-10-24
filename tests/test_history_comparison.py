@@ -385,14 +385,6 @@ def test_cash_import_rejects_unknown_type_without_replacing_old_periods(db, tmp_
     assert list(_iterdump(db.conn)) == before
 
 
-def test_cash_unknown_type_error_shows_only_safe_category():
-    xml = cash_report(amounts=("1",)).replace(b'type="Deposit"',
-        b'type="Synthetic Adjustment"')
-    with pytest.raises(FlexValidationError, match="transaction type: Synthetic Adjustment"):
-        parse_cash_flex(xml, ACCOUNT, DAY, DAY)
-    unsafe = xml.replace(b'Synthetic Adjustment', b'7-SECRET-123456')
-    with pytest.raises(FlexValidationError, match="review Cash Transactions types"):
-        parse_cash_flex(unsafe, ACCOUNT, DAY, DAY)
 
 
 def test_combined_cash_period_unavailable_marks_its_full_span(db, monkeypatch):

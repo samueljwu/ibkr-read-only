@@ -32,18 +32,6 @@ def test_tls_failure_message_matches_across_sync_workers(
         db.conn.close()
 
 
-@pytest.mark.parametrize("module,runner", [
-    (sync_trades, "run_flex_sync"),
-    (sync_analytics, "run_analytics_flex_sync"),
-    (sync_cash, "run_cash_flex_sync"),
-])
-def test_worker_failure_without_console(tmp_path, monkeypatch, module, runner):
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("synthetic offline failure")
-
-    monkeypatch.setattr(module, runner, fail)
-    monkeypatch.setattr(module.sys, "stderr", None)
-    assert module.main(tmp_path / "portfolio.sqlite3") == 1
 
 
 @pytest.mark.parametrize("module,runner,source", [

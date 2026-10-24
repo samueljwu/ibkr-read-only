@@ -8,6 +8,62 @@ from app.storage.database import Database
 from app.market.market_data import IBKRMarketDataProvider
 
 
+def test_chart_colors_recolor_series_and_persist(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    import app.ui as ui
+
+    QApplication.instance() or QApplication([])
+    path = tmp_path / "chart-colors.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(path))
+    window = ui.MainWindow()
+    try:
+        for day, nav in (("2026-01-02", 1000), ("2026-01-05", 1100)):
+            window.db.save_account_history(1, day, nav, 100, flow_covered=True)
+        monkeypatch.setattr(window.service.matching, "trade_rows", lambda: [
+            {"trade_date": "2026-01-05", "security_type": "STK", "side": "BUY",
+             "gross_usd": 100, "remaining_qty": 0},
+            {"trade_date": "2026-01-05", "security_type": "STK", "side": "SELL",
+             "gross_usd": 60, "remaining_qty": 0},
+        ])
+        tab = window.analytics_tab
+        tab._set_dates(date(2026, 1, 2), date(2026, 1, 5))
+        tab.range_combo.setCurrentText("Custom")
+        tab.benchmark_toggle.setChecked(False)
+        tab.sections.setCurrentWidget(tab.pnl_page)
+        tab.refresh()
+        tab.chart_colors.pickers["pnl"].swatch_buttons["#b87b31"].click()
+        assert tab.pnl_chart.chart().series()[0].pen().color().name() == "#b87b31"
+
+        tab.sections.setCurrentWidget(tab.capital_page)
+        tab.capital_combo.setCurrentText("Buy / sell activity")
+        assert set(tab.chart_colors.pickers["bought"].preset_actions) == {"default"}
+        tab.chart_colors.pickers["bought"].swatch_buttons["#2a9293"].click()
+        tab.chart_colors.pickers["sold"].hex_input.setText("#ab42cd")
+        tab.chart_colors.pickers["sold"].hex_input.returnPressed.emit()
+        bought = next(series for series in tab.capital_chart.chart().series()
+                      if series.name().startswith("Bought "))
+        sold = next(series for series in tab.capital_chart.chart().series()
+                    if series.name().startswith("Sold "))
+        assert bought.pen().color().name() == "#2a9293"
+        assert sold.pen().color().name() == "#ab42cd"
+        assert window.db.setting("analytics_chart_color_1_bought_palette") == "solid"
+        window.db.set_setting("analytics_chart_color_1_cash_share_palette", "ocean")
+    finally:
+        window.close()
+
+    reopened = ui.MainWindow()
+    try:
+        assert reopened.analytics_tab.chart_colors._selection["pnl"] == ("solid", "#b87b31")
+        assert reopened.analytics_tab.chart_colors._selection["bought"] == ("solid", "#2a9293")
+        assert reopened.analytics_tab.chart_colors._selection["sold"] == ("solid", "#ab42cd")
+        assert reopened.analytics_tab.chart_colors._selection["cash_share"][0] == "default"
+        assert reopened.db.setting("analytics_chart_color_1_cash_share_palette") == "default"
+    finally:
+        reopened.close()
+
+
 def test_pnl_calendar_intervals_use_covered_days_and_selected_range():
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -36,15 +92,17 @@ def test_pnl_calendar_intervals_use_covered_days_and_selected_range():
     assert navigator.next_button.accessibleName() == "Next period"
     assert not navigator.previous_button.icon().isNull()
     assert not navigator.next_button.icon().isNull()
-    assert calendar.usd_decimals.parentWidget() is toolbar
-    assert calendar.percent_decimals.parentWidget() is toolbar
-    assert toolbar.interval_combo.geometry().right() < calendar.usd_decimals.geometry().left()
-    assert calendar.usd_decimals.geometry().right() < calendar.percent_decimals.geometry().left()
+    assert toolbar.isAncestorOf(calendar.usd_decimals)
+    assert toolbar.isAncestorOf(calendar.percent_decimals)
+    controls = (toolbar.interval_combo, calendar.usd_decimals, calendar.percent_decimals)
+    positions = [widget.mapTo(toolbar, widget.rect().topLeft()) for widget in controls]
+    assert [(point.y(), point.x()) for point in positions] == sorted(
+        (point.y(), point.x()) for point in positions)
+    assert all(point.x() + widget.width() <= toolbar.width()
+               for widget, point in zip(controls, positions))
     assert calendar.usd_decimals.caption.text() == "USD decimals"
     assert calendar.percent_decimals.caption.text() == "P&L % decimals"
-    assert navigator.geometry().center().y() > toolbar.geometry().center().y()
-    assert abs(toolbar.interval_combo.geometry().center().y() -
-               calendar.percent_decimals.geometry().center().y()) < 5
+    assert navigator.geometry().top() >= toolbar.geometry().bottom()
     rows = [
         {"day": "2026-01-02", "daily_pnl": 12, "daily_return": .012, "source": "flex"},
         {"day": "2026-01-05", "daily_pnl": -4, "daily_return": -.009, "source": "flex"},
@@ -105,6 +163,151 @@ def test_pnl_calendar_daily_arrows_move_one_month():
 
 
 
+def test_pnl_metrics_select_charts_and_display_control_switches_views(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    import app.ui as ui
+    from app.views.metric_summary import MetricSummary
+    from app.views.typography import install_app_font
+
+    app = QApplication.instance() or QApplication([])
+    install_app_font(app)
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "pnl-controls.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        tab = window.analytics_tab
+        window.tabs.setCurrentWidget(tab)
+        window.resize(1400, 900)
+        window.show()
+        app.processEvents()
+        assert tab.pnl_summary_panel._columns == 6, tab.pnl_summary_panel.width()
+        assert tab.pnl_hint.isVisible()
+        assert (tab.pnl_hint.mapToGlobal(tab.pnl_hint.rect().topLeft()).y() ==
+                tab.date_summary.mapToGlobal(tab.date_summary.rect().topLeft()).y())
+        assert tab.pnl_summary_details.height() < 30
+        tab.as_of_label.setText("NAV close · 22 Oct 2026")
+        tab.sync_status.setText("History · 2026-10-24")
+        tab.pnl_hint.setText("Later live NAV is provisional.")
+        tab._show_pnl_hint(True)
+        app.processEvents()
+        assert len({label.mapToGlobal(label.rect().topLeft()).y() for label in (
+            tab.date_summary, tab.as_of_label, tab.sync_status, tab.pnl_hint)}) == 1
+        figure_to_detail_gaps = []
+        summary_heights = []
+        for page, detail in ((tab.pnl_page, tab.pnl_summary_details),
+                             (tab.return_page, tab.return_page.scope),
+                             (tab.capital_page, tab.capital_date_summary),
+                             (tab.exposure_page, tab.exposure_page.status)):
+            tab.sections.setCurrentWidget(page)
+            app.processEvents()
+            summary = page.findChild(MetricSummary)
+            value = summary._blocks[0].value
+            summary_heights.append(summary.height())
+            figure_to_detail_gaps.append(
+                detail.mapToGlobal(detail.rect().topLeft()).y() -
+                value.mapToGlobal(value.rect().bottomLeft()).y())
+        assert len(set(summary_heights)) == 1
+        assert len(set(figure_to_detail_gaps)) == 1
+        tab.sections.setCurrentWidget(tab.pnl_page)
+        window.resize(760, 900)
+        app.processEvents()
+        assert tab.pnl_summary_panel._columns == 2
+        grid = tab.pnl_summary_panel.grid
+        assert grid.itemAtPosition(0, 0).widget() is tab.metric_buttons["NAV"]
+        assert grid.itemAtPosition(0, 1).widget() is tab.metric_buttons["NAV change"]
+        assert grid.itemAtPosition(1, 0).widget() is tab.metric_buttons["Adjusted NAV change"]
+        assert grid.itemAtPosition(1, 1).widget() is tab.metric_buttons["Adjusted performance"]
+        window.resize(1400, 900)
+        app.processEvents()
+        assert tab.pnl_summary_panel._columns == 6
+        QTest.mouseClick(tab.metric_buttons["NAV"], Qt.LeftButton)
+        assert tab.pnl_metric == "NAV"
+        assert tab.metric_buttons["NAV"].caption.property("metricSelected") is True
+        button = tab.metric_buttons["Adjusted performance"]
+        button.setFocus()
+        QTest.keyClick(button, Qt.Key_Space)
+        assert tab.pnl_metric == "Adjusted performance"
+        assert sum(item.isChecked() for item in tab.metric_buttons.values()) == 1
+
+        tab.pnl_layout_combo.setCurrentIndex(tab.pnl_layout_combo.findData("horizontal"))
+        assert tab.pnl_splitter.orientation() == Qt.Horizontal
+        assert window.db.setting("analytics_pnl_splitter_orientation") == "horizontal"
+        tab.pnl_display_combo.setCurrentText("Calendar")
+        assert tab.pnl_views.currentWidget() is tab.pnl_calendar
+        assert tab.pnl_summary_panel.isHidden()
+        assert tab.pnl_summary_details.isHidden()
+        assert tab.pnl_hint.isHidden()
+        tab.pnl_display_combo.setCurrentText("Chart and table")
+        tab.pnl_layout_combo.setCurrentIndex(tab.pnl_layout_combo.findData("vertical"))
+        assert tab.pnl_splitter.orientation() == Qt.Vertical
+        assert not tab.pnl_summary_panel.isHidden()
+        assert not tab.pnl_summary_details.isHidden()
+        assert tab.pnl_hint.isVisible()
+
+        tab.sections.setCurrentWidget(tab.capital_page)
+        assert tab.pnl_page.isAncestorOf(tab.benchmark_toggle)
+        assert not tab.pnl_display_combo.isVisible()
+        assert tab.capital_caption.isHidden()
+        assert tab.capital_info.toolTip() == tab.capital_caption.text()
+        assert tab.capital_page.isAncestorOf(tab.capital_benchmark_toggle)
+        tab.capital_controls.range_combo.setCurrentText("1 month")
+        assert tab.range_combo.currentText() == "1 month"
+        assert tab.capital_controls.start_date.date() == tab.start_date.date()
+        tab.capital_controls.start_date.setDate(tab.start_date.date().addDays(1))
+        assert tab.range_combo.currentText() == "Custom"
+        assert tab.capital_controls.start_date.date() == tab.start_date.date()
+        tab.capital_benchmark_toggle.setChecked(False)
+        assert not tab.benchmark_toggle.isChecked()
+        tab.sections.setCurrentWidget(tab.pnl_page)
+        assert tab.pnl_page.isAncestorOf(tab.benchmark_toggle)
+        assert tab.pnl_display_combo.isVisible()
+        assert tab.pnl_metric == "Adjusted performance"
+    finally:
+        window.close()
+
+
+def test_pnl_metric_dropdown_text_and_selection_styling(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLabel
+    import app.ui as ui
+    from app.views.ui_theme import COLORS
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "pnl-metric-style.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        tab = window.analytics_tab
+        window.tabs.setCurrentWidget(tab)
+        window.resize(1400, 900)
+        window.show()
+        tab.set_pnl_metric("NAV")
+        for theme in ("light", "dark"):
+            window._apply_theme(theme)
+            app.processEvents()
+            values = [*tab.stats.values(), tab.max_daily_value, tab.sharpe_value]
+            assert len({(value.font().pixelSize(), value.font().weight()) for value in values}) == 1
+            captions = tab.pnl_summary_panel.findChildren(QLabel, "metricLabel")
+            caption_fonts = [tab.max_daily_combo.font(), *(caption.font() for caption in captions)]
+            assert len({(font.pixelSize(), font.weight()) for font in caption_fonts}) == 1
+            selected = tab.metric_buttons["NAV"].grab().toImage()
+            other = tab.metric_buttons["NAV change"].grab().toImage()
+            assert selected.pixelColor(1, selected.height() // 2).name() == COLORS[theme]["selection_border"]
+            assert other.pixelColor(1, other.height() // 2).name() != COLORS[theme]["selection_border"]
+            combo = tab.max_daily_combo
+            combo.showPopup()
+            app.processEvents()
+            text_width = max(combo.view().fontMetrics().horizontalAdvance(combo.itemText(index))
+                             for index in range(combo.count()))
+            assert combo.view().viewport().width() >= text_width + 16
+            combo.hidePopup()
+    finally:
+        window.close()
+
+
 def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeypatch):
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -122,20 +325,19 @@ def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeyp
         tab.range_combo.setCurrentText("Custom")
         tab._set_dates(date(2026, 1, 2), date(2026, 1, 5))
         tab.refresh()
-        tab.pnl_view_combo.setCurrentText("Calendar")
+        tab.pnl_display_combo.setCurrentText("Calendar")
         window.tabs.setCurrentWidget(tab)
         window.resize(1400, 900)
         window.show()
         app.processEvents()
-        assert not tab.pnl_calendar.toolbar.isHidden()
-        control_y = lambda widget: widget.mapTo(tab.pnl_page, widget.rect().center()).y()
-        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.interval_combo)) < 5
-        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.usd_decimals.dropdown)) < 5
-        assert abs(control_y(tab.pnl_view_combo) - control_y(tab.pnl_calendar.percent_decimals.dropdown)) < 5
-        assert tab.controls_panel.isHidden()
+        assert tab.pnl_calendar.interval_combo.isVisible()
+        for group in tab.pnl_calendar_controls:
+            assert group.isVisible()
+            assert group.geometry().right() < tab.pnl_controls.width()
+        assert tab.pnl_controls.isVisible()
         assert tab.pnl_summary_panel.isHidden()
-        assert tab.range_combo.isHidden()
-        assert tab.date_summary.isHidden()
+        assert not tab.range_combo.isVisible()
+        assert not tab.date_summary.isVisible()
         assert tab.pnl_calendar._first == date(2025, 12, 31)
         assert tab.pnl_calendar.previous_button.isEnabled()
         tab.pnl_calendar.interval_combo.setCurrentText("Weekly")
@@ -146,17 +348,17 @@ def test_pnl_calendar_switch_and_interval_restore_in_analytics(tmp_path, monkeyp
         tab.pnl_calendar.percent_decimals.setValue(3)
         assert "Net +$12 · P&L %: +1.200%" in tab.pnl_calendar.summary_label.text()
         state = tab.view_state()
-        tab.pnl_view_combo.setCurrentText("Chart and table")
-        assert tab.pnl_calendar.toolbar.isHidden()
-        assert not tab.controls_panel.isHidden()
+        tab.pnl_display_combo.setCurrentText("Chart and table")
+        assert not tab.pnl_calendar.interval_combo.isVisible()
+        assert tab.pnl_controls.isVisible()
         assert not tab.pnl_summary_panel.isHidden()
-        assert not tab.range_combo.isHidden()
+        assert tab.range_combo.isVisible()
         assert tab.range_combo.currentText() == "Custom"
         tab.pnl_calendar.interval_combo.setCurrentText("Daily")
         tab.pnl_calendar.usd_decimals.setValue(2)
         tab.pnl_calendar.percent_decimals.setValue(2)
         assert tab.apply_view_state(state)
-        assert tab.pnl_view_combo.currentText() == "Calendar"
+        assert tab.pnl_display_combo.currentText() == "Calendar"
         assert tab.pnl_calendar.interval_combo.currentText() == "Weekly"
         assert (tab.pnl_calendar.usd_decimals.value(),
                 tab.pnl_calendar.percent_decimals.value()) == (0, 3)
@@ -364,7 +566,7 @@ def test_spx_overlay_rebases_pnl_comparison_without_changing_capital_charts(tmp_
         tab.sections.setCurrentWidget(tab.pnl_page)
         assert not tab.benchmark_toggle.isHidden()
         for metric in ("NAV", "NAV change", "Adjusted NAV change", "Adjusted performance"):
-            tab.metric_combo.setCurrentText(metric)
+            tab.set_pnl_metric(metric)
             chart = tab.pnl_chart.chart()
             assert metric in tab.pnl_chart._hover_primary[-1][1]
             assert "S&P 500" in tab.pnl_chart._hover_benchmark[-1][1]
@@ -558,6 +760,10 @@ def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
         assert window.analytics_tab.max_daily_value.text() == "$10.00"
         assert window.analytics_tab.max_daily_detail.text() == "+0.67% · 05 Jan 2026"
         assert window.analytics_tab.sharpe_detail.text() == "Annualized · 2 daily returns"
+        assert window.analytics_tab.max_daily_detail.isHidden()
+        assert window.analytics_tab.sharpe_detail.isHidden()
+        assert window.analytics_tab.max_daily_info.toolTip() == window.analytics_tab.max_daily_detail.text()
+        assert window.analytics_tab.sharpe_info.toolTip() == window.analytics_tab.sharpe_detail.text()
         window.analytics_tab.max_daily_combo.setCurrentText("Max % gain")
         assert window.analytics_tab.max_daily_value.text() == "+0.67%"
         assert window.analytics_tab.max_daily_detail.text() == "$10.00 · 05 Jan 2026"
@@ -569,27 +775,27 @@ def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
         window.analytics_tab.max_daily_combo.setCurrentText("Max USD gain")
         assert window.analytics_tab.apply_view_state(saved_view)
         assert window.analytics_tab.max_daily_combo.currentText() == "Max % loss"
-        window.analytics_tab.metric_combo.setCurrentText("NAV")
+        window.analytics_tab.set_pnl_metric("NAV")
         chart = window.analytics_tab.pnl_chart.chart()
         assert chart.series()[0].name() == "NAV"
         assert [point.y() for point in chart.series()[0].points()] == [1000, 1510, 1310]
         assert len(chart.series()) == 3  # Deposits and withdrawals mark the raw NAV chart.
         assert chart.axes(Qt.Vertical)[0].min() > 0
-        window.analytics_tab.metric_combo.setCurrentText("NAV change")
+        window.analytics_tab.set_pnl_metric("NAV change")
         chart = window.analytics_tab.pnl_chart.chart()
         assert len(chart.series()) == 3
         for marker, day in zip(chart.series()[1:], ("2026-01-05", "2026-01-06")):
             assert day in marker.name()
             assert marker.points()[0].x() == marker.points()[1].x()
             assert marker.points()[0].y() < marker.points()[1].y()
-        window.analytics_tab.metric_combo.setCurrentText("Adjusted NAV change")
+        window.analytics_tab.set_pnl_metric("Adjusted NAV change")
         chart = window.analytics_tab.pnl_chart.chart()
         assert [series.name() for series in chart.series()] == ["Adjusted NAV change"]
         assert len(chart.axes(Qt.Vertical)) == 1
         assert chart.localizeNumbers()
         assert chart.locale().toString(10000.0, "f", 0) == "10,000"
         assert chart.axes(Qt.Vertical)[0].titleText() == "USD"
-        window.analytics_tab.metric_combo.setCurrentText("Adjusted performance")
+        window.analytics_tab.set_pnl_metric("Adjusted performance")
         chart = window.analytics_tab.pnl_chart.chart()
         assert [series.name() for series in chart.series()] == ["Adjusted performance"]
         assert len(chart.axes(Qt.Vertical)) == 1
@@ -617,7 +823,8 @@ def test_analytics_tab_shows_imported_history(tmp_path, monkeypatch):
 
 
 
-def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch):
+@pytest.mark.parametrize("section", ("pnl", "capital"))
+def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, section):
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QPoint, Qt
@@ -636,25 +843,85 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch):
             if day.weekday() < 5:
                 window.db.save_account_history(1, day.isoformat(), 1000 + offset * 10,
                                                100, "flex", True)
+        monkeypatch.setattr(window.service.matching, "trade_rows", lambda: [
+            {"trade_date": (first + timedelta(days=offset)).isoformat(),
+             "security_type": "STK", "side": "BUY", "gross_usd": 100,
+             "remaining_qty": 0}
+            for offset in range(41) if (first + timedelta(days=offset)).weekday() < 5
+        ])
+        tab = window.analytics_tab
         window.resize(1200, 800)
-        window.tabs.setCurrentWidget(window.analytics_tab)
-        window.analytics_tab.range_combo.setCurrentText("All")
-        window.analytics_tab.metric_combo.setCurrentText("NAV change")
+        window.tabs.setCurrentWidget(tab)
+        tab.range_combo.setCurrentText("All")
+        tab.set_pnl_metric("NAV change")
+        tab.sections.setCurrentWidget(getattr(tab, f"{section}_page"))
         window.show()
         app.processEvents()
-        view = window.analytics_tab.pnl_chart
+        navigation = getattr(tab, f"{section}_navigation")
+        navigation.select_dates.click()
+        app.processEvents()
+        active_controls = getattr(tab, f"{section}_controls")
+        assert navigation.select_dates.isChecked()
+        assert tab.range_combo.currentText() == "Custom"
+        assert active_controls.start_date.isVisible()
+        assert active_controls.end_date.isVisible()
+        assert tab.start_date.date().toPython() == first
+        assert tab.end_date.date().toPython() == today
+        view = getattr(tab, f"{section}_chart")
         area = view.chart().plotArea()
         assert area.width() > 100
         start = QPoint(int(area.left() + area.width() * .2), int(area.center().y()))
         end = QPoint(int(area.left() + area.width() * .7), int(area.center().y()))
+        if section == "capital":
+            start, end = end, start
         QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
         QTest.mouseMove(view.viewport(), end)
+        highlight = view._band.geometry()
         QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, end)
         app.processEvents()
-        assert window.analytics_tab.range_combo.currentText() == "Custom"
-        assert window.analytics_tab.start_date.date().toPython() > first
-        assert window.analytics_tab.end_date.date().toPython() < today
-        assert window.analytics_tab.pnl_table.rowCount() < 29
+        assert highlight.height() >= int(area.height())
+        assert highlight.width() >= abs(end.x() - start.x())
+        assert view.cursor().shape() == Qt.CrossCursor
+        assert not view._band.isVisible()
+        assert tab.range_combo.currentText() == "Custom"
+        assert tab.start_date.date().toPython() > first
+        assert tab.end_date.date().toPython() < today
+        assert tab.capital_controls.range_combo.currentText() == "Custom"
+        assert tab.capital_controls.start_date.date() == tab.start_date.date()
+        assert tab.capital_controls.end_date.date() == tab.end_date.date()
+        selected_first, selected_last = tab.start_date.date(), tab.end_date.date()
+        for page, table in ((tab.pnl_page, tab.pnl_table), (tab.capital_page, tab.capital_table)):
+            tab.sections.setCurrentWidget(page)
+            assert 0 < table.rowCount() < 29
+            for row in range(table.rowCount()):
+                assert (selected_first.toString(Qt.ISODate) <= table.item(row, 0).text()
+                        <= selected_last.toString(Qt.ISODate))
+        tab.sections.setCurrentWidget(getattr(tab, f"{section}_page"))
+        selected_span = tab.start_date.date().daysTo(tab.end_date.date())
+        if section == "capital":
+            navigation.select_dates.click()
+        modifiers = Qt.ShiftModifier if navigation.select_dates.isChecked() else Qt.NoModifier
+        app.processEvents()
+        area = view.chart().plotArea()
+        start = QPoint(int(area.center().x()), int(area.center().y()))
+        end = start - QPoint(int(area.width() * .1), 0)
+        QTest.mousePress(view.viewport(), Qt.LeftButton, modifiers, start)
+        QTest.mouseMove(view.viewport(), end)
+        assert view.cursor().shape() == Qt.ClosedHandCursor
+        assert not view._band.isVisible()
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, modifiers, end)
+        assert tab.start_date.date() > selected_first
+        assert tab.start_date.date().daysTo(tab.end_date.date()) == selected_span
+        navigation.zoom_in.click()
+        assert tab.start_date.date().daysTo(tab.end_date.date()) < selected_span
+        assert tab.capital_controls.start_date.date() == tab.start_date.date()
+        navigation.reset.click()
+        assert tab.range_combo.currentText() == "All"
+        assert tab.start_date.date().toPython() == first
+        assert tab.end_date.date().toPython() == today
+        if navigation.select_dates.isChecked():
+            navigation.select_dates.click()
+        assert view.cursor().shape() == Qt.ArrowCursor
     finally:
         window.close()
 

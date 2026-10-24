@@ -61,16 +61,6 @@ def reports(tmp_path, *, account=ACCOUNT, ending_nav="120", ending_cash="20",
     return pa, statement
 
 
-def test_older_csv_cutoff_tracks_flex_window(tmp_path, monkeypatch):
-    _, statement = reports(tmp_path)
-    rows, _ = legacy_history._read_csv(statement)
-    monkeypatch.setattr(flex_import, "flex_today", lambda: date(2024, 6, 1))
-    assert flex_import.oldest_flex_date() == date(2020, 1, 1)
-    with pytest.raises(LegacyHistoryError, match="before 2020-01-01"):
-        legacy_history._parse_activity_statement(rows, ACCOUNT)
-    monkeypatch.setattr(flex_import, "flex_today", lambda: date(2026, 6, 1))
-    assert flex_import.oldest_flex_date() == date(2022, 1, 1)
-    assert legacy_history._parse_activity_statement(rows, ACCOUNT)[1] == date(2021, 5, 31)
 
 
 

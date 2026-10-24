@@ -3,12 +3,17 @@
 import json
 from decimal import Decimal
 
-from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QObject, QTimer, Qt
-from PySide6.QtGui import QActionGroup, QKeySequence
+from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QItemSelectionModel, QObject, QPoint, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QActionGroup, QColor, QCursor, QKeySequence, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlider,
-                               QAbstractSpinBox, QApplication, QComboBox, QInputDialog,
-                               QLineEdit, QMenu, QMenuBar, QPlainTextEdit, QTabBar,
+                                QAbstractSpinBox, QApplication, QComboBox, QDoubleSpinBox, QInputDialog,
+                               QLineEdit, QMenu, QMenuBar, QPlainTextEdit, QStyle,
+                               QStyledItemDelegate, QStyleOptionViewItem, QTabBar,
                                QTableView, QTableWidget, QTableWidgetItem, QTextEdit, QWidget)
+
+from app.views.ui_theme import COLORS
+
+TABLE_ROW_HEIGHT = 30
 
 
 def display_number(value):
@@ -207,7 +212,7 @@ class ReportTable(QTableWidget):
         self.setAlternatingRowColors(False)
         self.setShowGrid(False)
         self.setWordWrap(False)
-        self.verticalHeader().setDefaultSectionSize(25)
+        self.verticalHeader().setDefaultSectionSize(TABLE_ROW_HEIGHT)
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionsMovable(True)
         self.selection_axis = "cell"
@@ -237,6 +242,18 @@ class ReportTable(QTableWidget):
     def setItem(self, row, column, item):
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         super().setItem(row, column, item)
+
+    def fit_header_widths(self):
+        """Readable initial widths in O(columns), before restoring saved widths."""
+        header = self.horizontalHeader()
+        metrics = header.fontMetrics()
+        for column in range(self.columnCount()):
+            item = self.horizontalHeaderItem(column)
+            if item is not None:
+                if not item.toolTip():
+                    item.setToolTip(item.text())
+                self.setColumnWidth(column, max(self.columnWidth(column),
+                                                metrics.horizontalAdvance(item.text()) + 42))
 
     def configure_numbers(self, db, setting_key, formats, *, allow_sort=True):
         """Enable numeric sorting and the common decimal menu for selected columns.
@@ -457,17 +474,153 @@ class ReportTable(QTableWidget):
         self._copy_menu(event.pos()).exec(event.globalPos())
 
 
+class _InputCellDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        if isinstance(self.parent().cellWidget(index.row(), index.column()),
+                      (QAbstractSpinBox, QComboBox, QLineEdit)):
+            option = QStyleOptionViewItem(option)
+            option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, option, index)
+
+
+class InputHoverOutline(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setCursor(Qt.ArrowCursor)
+        self.hide()
+
+    def paintEvent(self, event):
+        theme = "dark" if self.parentWidget().palette().color(QPalette.Base).lightness() < 128 else "light"
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(COLORS[theme]["selection_border"]), 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 4, 4)
+
+
+def keep_spinbox_arrow_cursor(widget, event):
+    if event.type() not in (QEvent.Enter, QEvent.HoverEnter, QEvent.MouseMove,
+                           QEvent.HoverMove, QEvent.MouseButtonPress,
+                           QEvent.MouseButtonRelease, QEvent.CursorChange):
+        return
+    if widget.cursor().shape() != Qt.ArrowCursor:
+        widget.setCursor(Qt.ArrowCursor)
+
+
+class _ArrowCursorLineEdit(QLineEdit):
+    def event(self, event):
+        handled = super().event(event)
+        # Keep the pointer an arrow after Qt handles movement in the text field.
+        if event.type() in (QEvent.Enter, QEvent.HoverEnter, QEvent.MouseMove,
+                            QEvent.HoverMove, QEvent.MouseButtonPress,
+                            QEvent.MouseButtonRelease):
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            keep_spinbox_arrow_cursor(self, event)
+        return handled
+
+
+class InputSpinBox(QDoubleSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setLineEdit(_ArrowCursorLineEdit(self))
+        self.setCursor(Qt.ArrowCursor)
+        self.lineEdit().setCursor(Qt.ArrowCursor)
+
+
+def select_spinbox_text_on_click(editor, event):
+    if event.type() == QEvent.FocusIn:
+        editor.setProperty("selectTextOnClick", True)
+    elif event.type() == QEvent.FocusOut:
+        editor.setProperty("selectTextOnClick", False)
+    elif (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton and
+          editor.property("selectTextOnClick")):
+        editor.setProperty("selectTextOnClick", False)
+        QTimer.singleShot(0, editor, editor.selectAll)
+
+
 class InputReportTable(ReportTable):
     """Shared keyboard behavior for tables with embedded input widgets."""
 
+    hoveredInputChanged = Signal(object)
     DIRECTIONS = {Qt.Key_Up: (-1, 0), Qt.Key_Down: (1, 0),
                   Qt.Key_Left: (0, -1), Qt.Key_Right: (0, 1)}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._input_bindings = {}
+        self.show_input_hover_outline = False
+        self._hovered_input = None
+        self._hover_outline = InputHoverOutline(self.viewport())
+        self.setItemDelegate(_InputCellDelegate(self))
+        self.viewport().installEventFilter(self)
+        self.model().layoutChanged.connect(lambda *_: self._set_hovered_input(None))
+        for scrollbar in (self.horizontalScrollBar(), self.verticalScrollBar()):
+            scrollbar.valueChanged.connect(lambda *_: self._set_hovered_input(None))
+        header = self.horizontalHeader()
+        header.sectionMoved.connect(lambda *_: self._set_hovered_input(None))
+        header.sectionResized.connect(lambda *_: self._set_hovered_input(None))
+
+    @staticmethod
+    def _set_editor_active(editor, active):
+        if (not isinstance(editor, (QAbstractSpinBox, QComboBox, QLineEdit)) or
+                editor.property("activeCell") == active):
+            return
+        editor.setProperty("activeCell", active)
+        editor.style().unpolish(editor)
+        editor.style().polish(editor)
+        editor.update()
+
+    def _update_active_editor(self, current, previous):
+        if previous.isValid():
+            self._set_editor_active(self.cellWidget(previous.row(), previous.column()), False)
+        if current.isValid():
+            self._set_editor_active(self.cellWidget(current.row(), current.column()), True)
+
+    def _position_hover_outline(self, editor):
+        self._hover_outline.setGeometry(editor.geometry())
+
+    def _set_hovered_input(self, editor):
+        if self._hovered_input is editor:
+            return
+        self._hover_outline.hide()
+        self._hovered_input = editor
+        if editor is not None:
+            self._position_hover_outline(editor)
+            self._hover_outline.raise_()
+            self._hover_outline.show()
+        self.hoveredInputChanged.emit(editor)
+
+    def _sync_input_hover(self):
+        position = self.viewport().mapFromGlobal(QCursor.pos())
+        index = self.indexAt(position)
+        editor = self.cellWidget(index.row(), index.column()) if index.isValid() else None
+        if editor not in self._input_bindings or not editor.geometry().contains(position):
+            editor = None
+        self._set_hovered_input(editor)
+
+    def currentChanged(self, current, previous):
+        super().currentChanged(current, previous)
+        self._update_active_editor(current, previous)
+
+    def edit(self, index, trigger=QAbstractItemView.AllEditTriggers, event=None):
+        # QAbstractItemView.mouseMoveEvent calls edit(NoEditTriggers). For
+        # setCellWidget editors, Qt focuses the widget BEFORE checking the
+        # trigger flags. Block that path so hover cannot move keyboard focus,
+        # clear selected text, or activate a caret in another cell.
+        if event is not None and event.type() == QEvent.MouseMove:
+            return False
+        return super().edit(index, trigger, event)
+
+    def setCellWidget(self, row, column, widget):
+        super().setCellWidget(row, column, widget)
+        if widget is not None and self.currentIndex() == self.model().index(row, column):
+            self._set_editor_active(widget, True)
 
     def clear_input_bindings(self):
+        self._set_hovered_input(None)
         self._input_bindings.clear()
 
     def register_input(self, editor, row_key, column, commit=None):
@@ -481,7 +634,10 @@ class InputReportTable(ReportTable):
         self._input_bindings[editor] = binding
         editor.installEventFilter(self)
         if isinstance(editor, QAbstractSpinBox):
+            editor.setCursor(Qt.ArrowCursor)
             line_edit = editor.lineEdit()
+            line_edit.setCursor(Qt.ArrowCursor)
+            line_edit.setMouseTracking(False)
             self._input_bindings[line_edit] = binding
             line_edit.installEventFilter(self)
         elif isinstance(editor, QComboBox) and editor.isEditable():
@@ -493,10 +649,12 @@ class InputReportTable(ReportTable):
         if focus:
             self.setFocus()
         index = self.model().index(row, column)
+        previous = self.currentIndex()
         selection = self.selectionModel()
         selection.blockSignals(True)
         selection.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
         selection.blockSignals(False)
+        self._update_active_editor(index, previous)
         self.selection_axis = "cell"
         self.scrollTo(index, QAbstractItemView.EnsureVisible)
         self.viewport().update()
@@ -544,6 +702,24 @@ class InputReportTable(ReportTable):
 
     def eventFilter(self, watched, event):
         binding = self._input_bindings.get(watched)
+        if (self.show_input_hover_outline and
+                (watched is self.viewport() or binding is not None) and
+                event.type() in (QEvent.Enter, QEvent.HoverEnter, QEvent.MouseMove,
+                                 QEvent.HoverMove, QEvent.Leave, QEvent.HoverLeave)):
+            self._sync_input_hover()
+        elif (binding is not None and watched is self._hovered_input and
+              event.type() in (QEvent.Move, QEvent.Resize)):
+            self._position_hover_outline(watched)
+        elif (binding is not None and watched is self._hovered_input and
+              event.type() == QEvent.Hide):
+            self._set_hovered_input(None)
+        if binding is not None and event.type() == QEvent.FocusIn:
+            _, row_key, column, _, _ = binding
+            row = self.row_for_key(row_key)
+            if row >= 0 and (self.currentRow(), self.currentColumn()) != (row, column):
+                self.select_cell(row, column)
+        if binding is not None and isinstance(binding[0], QAbstractSpinBox):
+            select_spinbox_text_on_click(binding[0], event)
         if binding is None or event.type() != QEvent.KeyPress:
             return super().eventFilter(watched, event)
         key = event.key()

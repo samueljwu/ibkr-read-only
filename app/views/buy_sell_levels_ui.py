@@ -5,8 +5,8 @@ import math
 
 from PySide6.QtCharts import QDateTimeAxis, QLineSeries, QScatterSeries, QValueAxis
 from PySide6.QtCore import QByteArray, QDate, QDateTime, QLocale, QTime, Qt
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QToolTip,
+from PySide6.QtGui import QColor, QCursor, QPainter
+from PySide6.QtWidgets import (QComboBox, QToolTip,
                                QVBoxLayout, QWidget, QSizePolicy)
 
 from app.finance.splits import adjusted_execution_price, ledger_split_events
@@ -14,7 +14,9 @@ from app.finance.services import PortfolioService
 from app.market.split_history import SplitHistoryClient, combine_split_history
 from app.market.market_data import MarketDataProvider, five_year_start
 from app.views import widgets
-from app.views.chart_ui import NavigableChartView, base_chart, finish_chart, price_scale
+from app.views.chart_ui import ChartNavigation, NavigableChartView, base_chart, finish_chart, price_scale
+from app.views.chart_colors import ChartColorControl
+from app.views.toolbar import Toolbar
 from app.views.table_ui import ReportTable, SortItem
 from app.views.ui_theme import COLORS, style_toolbar_dropdown
 
@@ -92,16 +94,15 @@ class BuySellLevelsPanel(QWidget):
         self._split_history = split_history or SplitHistoryClient(db, self)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 0)
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Stock"))
+        widgets.apply_layout(layout, "subpage")
+        layout.setSpacing(8)
+        self.toolbar = controls = Toolbar()
         self.stock_combo = style_toolbar_dropdown(QComboBox())
         self.stock_combo.setMinimumWidth(220)
         self.stock_combo.currentIndexChanged.connect(self._stock_changed)
-        controls.addWidget(self.stock_combo)
+        controls.add_control(self.stock_combo, "Stock")
         self.load_button = widgets.button("Load older prices", self._load_older_prices)
-        controls.addWidget(self.load_button)
-        controls.addWidget(QLabel("Axis decimals"))
+        controls.add_control(self.load_button)
         self.axis_decimals_combo = style_toolbar_dropdown(QComboBox())
         self.axis_decimals_combo.addItem("Auto", None)
         for places in range(9):
@@ -110,23 +111,24 @@ class BuySellLevelsPanel(QWidget):
         if saved_decimals.isdigit() and 0 <= int(saved_decimals) <= 8:
             self.axis_decimals_combo.setCurrentIndex(int(saved_decimals) + 1)
         self.axis_decimals_combo.currentIndexChanged.connect(self._axis_decimals_changed)
-        controls.addWidget(self.axis_decimals_combo)
-        self.zoom_in_button = widgets.button("Zoom in")
-        self.zoom_out_button = widgets.button("Zoom out")
-        self.zoom_reset_button = widgets.button("Reset view")
-        for button in (self.zoom_in_button, self.zoom_out_button, self.zoom_reset_button):
-            controls.addWidget(button)
-        controls.addStretch()
-        layout.addLayout(controls)
-
+        controls.add_control(self.axis_decimals_combo, "Axis decimals")
+        self.chart_colors = ChartColorControl(
+            db, portfolio_id, (("price", "Daily close line", "accent"),), self._render)
+        controls.add_control(self.chart_colors)
         self.note = widgets.hint("")
         self.chart_view = NavigableChartView()
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         self.chart_view.setMinimumHeight(300)
         self.chart_view.setMinimumWidth(0)
-        self.zoom_in_button.clicked.connect(lambda: self.chart_view.zoom_by(1.25))
-        self.zoom_out_button.clicked.connect(lambda: self.chart_view.zoom_by(0.8))
-        self.zoom_reset_button.clicked.connect(self.chart_view.reset_view)
+        self.navigation = ChartNavigation(self.chart_view)
+        self.zoom_in_button = self.navigation.zoom_in
+        self.zoom_out_button = self.navigation.zoom_out
+        self.zoom_reset_button = self.navigation.reset
+        controls.add_control(self.navigation)
+        self.layout_combo = widgets.layout_choice("Buy / sell chart and table")
+        controls.add_control(self.layout_combo, "Layout", trailing=True)
+        layout.addWidget(controls)
+        layout.addWidget(self.note)
 
         self.table = ReportTable(0, 9)
         self.table.setHorizontalHeaderLabels((
@@ -134,6 +136,7 @@ class BuySellLevelsPanel(QWidget):
             "Realized P&L USD", "Realized P&L %", "Open P&L USD", "Open P&L %"))
         self.table.configure_numbers(db, f"analytics_levels_decimals_{portfolio_id}",
                                      TABLE_NUMBER_FORMATS)
+        self.table.fit_header_widths()
         self.table.remember_layout(db, f"analytics_levels_table_layout_{portfolio_id}")
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.DescendingOrder)
@@ -142,7 +145,7 @@ class BuySellLevelsPanel(QWidget):
         self.table.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.splitter, self.layout_combo = widgets.chart_table_layout(
             layout, db, f"analytics_levels_splitter_{portfolio_id}",
-            self.chart_view, self.table, info_label=self.note)
+            self.chart_view, self.table, display_combo=self.layout_combo)
 
     def view_state(self):
         return {
@@ -170,6 +173,8 @@ class BuySellLevelsPanel(QWidget):
 
     def set_theme(self, theme):
         self.theme = theme
+        self.chart_colors.set_theme(theme)
+        self.navigation.set_theme(theme)
         self._render()
 
     def _stock_changed(self, *_):
@@ -289,7 +294,6 @@ class BuySellLevelsPanel(QWidget):
             [row for row in prices if row["day"] >= chart_start])
         first_trade_day = min((row["trade_date"] for row in trades if row.get("trade_date")),
                               default=None)
-        older_trades = bool(first_trade_day and first_price_day and first_trade_day < first_price_day)
         needs_history = not first_price_day or first_price_day > (
             five_year_start() + timedelta(days=7)).isoformat()
         self.load_button.setEnabled(bool(self._request_price_history and con_id and
@@ -310,24 +314,14 @@ class BuySellLevelsPanel(QWidget):
                 except ValueError:
                     split_state = "unavailable"
 
-        note = (
-            f"Saved {position['currency']} daily closes and trades. "
-            "Buy/sell markers: split-adjusted prices, sized by trade notional; "
-            "table: original execution prices. "
-            "Drag to pan; scroll to zoom." if points else
-            "No saved daily prices for this stock. Recorded trades are listed below; "
-            "use Load older prices while connected to IBKR.")
-        note += " P&L from Trades/Lots (USD); realized values repeat on matched trades."
-        if older_trades:
-            note += f" Saved closes begin {first_price_day}; earlier trades have no matching price line."
+        note = ("Daily closes and buy/sell trades. P&L in USD." if points else
+                "No saved prices for this stock. Load older prices to show the chart.")
         if con_id in self._history_exhausted:
             note += " IBKR has no earlier daily prices for this stock."
         if split_state == "fetching":
-            note += " Checking split history; markers will appear when it is verified."
+            note += " Checking trade markers…"
         elif split_state == "unavailable":
-            note += " Split history is unavailable; markers are hidden to avoid incorrect levels."
-        elif chart_executions:
-            note += " Yahoo split history verified."
+            note += " Split history unavailable; trade markers are hidden."
         if self._history_message:
             note += " " + self._history_message
         self.note.setText(note)
@@ -337,7 +331,7 @@ class BuySellLevelsPanel(QWidget):
 
         line = QLineSeries()
         line.setName("Daily close")
-        line.setPen(QPen(QColor(colors["accent"]), 2))
+        line.setPen(self.chart_colors.pen("price", 2))
         for stamp, close in points:
             line.append(stamp, close)
         chart.addSeries(line)

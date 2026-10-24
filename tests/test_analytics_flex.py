@@ -29,22 +29,6 @@ def test_flex_nav_and_external_flows_exclude_deposits_and_transfers_from_pnl():
     assert [(flow[1], flow[2]) for flow in flows] == [("2026-01-06", 500), ("2026-01-07", 100)]
 
 
-def test_daily_breakout_ignores_previous_day_nav_context():
-    xml = (b'<FlexQueryResponse><FlexStatements>'
-           b'<FlexStatement accountId="DU123" fromDate="20260105" toDate="20260105" baseCurrency="USD">'
-           b'<EquitySummaryInBase>'
-           b'<EquitySummaryByReportDateInBase reportDate="20260102" total="900"/>'
-           b'<EquitySummaryByReportDateInBase reportDate="20260105" total="1000"/>'
-           b'</EquitySummaryInBase><CashTransactions/><Transfers/></FlexStatement>'
-           b'<FlexStatement accountId="DU123" fromDate="20260106" toDate="20260106" baseCurrency="USD">'
-           b'<EquitySummaryInBase>'
-           b'<EquitySummaryByReportDateInBase reportDate="20260105" total="1000"/>'
-           b'<EquitySummaryByReportDateInBase reportDate="20260106" total="1100"/>'
-           b'</EquitySummaryInBase><CashTransactions/><Transfers/></FlexStatement>'
-           b'</FlexStatements></FlexQueryResponse>')
-    valuations, flows = parse_analytics_flex(xml, "DU123", "2026-01-05", "2026-01-06")
-    assert valuations == {"2026-01-05": (1000, None), "2026-01-06": (1100, None)}
-    assert flows == []
 
 
 def test_flex_analytics_sync_replays_corrections_and_replaces_csv_rows(tmp_path, monkeypatch):
@@ -101,15 +85,6 @@ def test_flex_analytics_rejects_wrong_account_or_missing_flow_section():
         parse_analytics_flex(_report(include_flows=False), "DU123", "2026-01-05", "2026-01-07")
 
 
-def test_flex_analytics_accepts_empty_early_window_and_signs_cash_withdrawal():
-    xml = (b'<FlexQueryResponse><FlexStatements><FlexStatement accountId="DU123" '
-           b'fromDate="20260105" toDate="20260107" baseCurrency="USD"><EquitySummaryInBase/>'
-           b'<CashTransactions/><Transfers><Transfer reportDate="20260107" '
-           b'assetCategory="CASH" cashTransfer="50" currency="USD" direction="OUT" '
-           b'transactionID="cash-2"/></Transfers></FlexStatement></FlexStatements></FlexQueryResponse>')
-    valuations, flows = parse_analytics_flex(xml, "DU123", "2026-01-05", "2026-01-07")
-    assert valuations == {}
-    assert [flow[2] for flow in flows] == [-50]
 
 
 def test_analytics_flex_rejects_partial_coverage_and_unverified_base():

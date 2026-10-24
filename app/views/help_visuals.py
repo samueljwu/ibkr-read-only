@@ -2,18 +2,13 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, QTimer
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 
 class HelpScreenshot(QWidget):
     """Show a synthetic-data capture at the guide's available width."""
-
-    LIGHT_CAPTURE_IN_DARK = frozenset({
-        "matched_lots", "portfolio_overview", "portfolio_trades",
-        "portfolio_cash_range", "portfolio_cash",
-    })
 
     def __init__(self, name, description):
         super().__init__()
@@ -23,14 +18,19 @@ class HelpScreenshot(QWidget):
         self.set_theme("light")
 
     def set_theme(self, theme):
-        capture_theme = "light" if theme == "dark" and self.name in self.LIGHT_CAPTURE_IN_DARK else theme
-        path = Path(__file__).with_name("help_assets") / f"{self.name}_{capture_theme}.png"
+        assets = Path(__file__).with_name("help_assets")
+        path = assets / f"{self.name}_{theme}@2x.png"
+        if not path.is_file():
+            path = assets / f"{self.name}_{theme}.png"
         self._original = QPixmap(str(path))
         if self._original.isNull():
-            self._scaled = QPixmap()
             self.setFixedHeight(0)
             return
         self._fit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -45,13 +45,19 @@ class HelpScreenshot(QWidget):
     def _fit(self):
         if self._original.isNull():
             return
-        width = min(max(self.width(), 1), self._original.width())
-        self._scaled = self._original.scaledToWidth(width, Qt.SmoothTransformation)
-        if self.height() != self._scaled.height():
-            self.setFixedHeight(self._scaled.height())
+        native = self._original.deviceIndependentSize()
+        width = min(max(self.width(), 1), native.width())
+        height = max(1, round(native.height() * width / native.width()))
+        if self.height() != height:
+            self.setFixedHeight(height)
         self.update()
 
     def paintEvent(self, event):
-        if not self._scaled.isNull():
+        if not self._original.isNull():
+            native = self._original.deviceIndependentSize()
+            width = min(self.width(), native.width())
+            height = native.height() * width / native.width()
             painter = QPainter(self)
-            painter.drawPixmap(0, 0, self._scaled)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.drawPixmap(QRectF(0, 0, width, height), self._original,
+                               QRectF(self._original.rect()))

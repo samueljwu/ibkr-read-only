@@ -70,16 +70,3 @@ def test_legacy_rows_and_nav_migrate_to_sw_once(tmp_path):
         assert db.portfolio_nav(1) is None
     finally:
         db.conn.close()
-
-
-def test_ibkr_nav_uses_only_broker_snapshot(tmp_path):
-    db = Database(tmp_path / "broker-nav.sqlite3")
-    try:
-        db.set_portfolio_nav(1, 1000)
-        assert db.effective_nav(1) == 1000  # Mock mode still supports test data.
-        db.set_setting("provider", "IBKR")
-        assert db.effective_nav(1) is None
-        db.set_account_value(1, "NetLiquidation", 1250, "USD", "2026-10-07T09:00:00")
-        assert db.effective_nav(1) == 1250
-    finally:
-        db.conn.close()

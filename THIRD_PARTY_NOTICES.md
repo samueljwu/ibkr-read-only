@@ -11,6 +11,7 @@ components; their own licenses and copyright notices remain applicable:
 
 | Component | License and source |
 | --- | --- |
+| Inter 4.1 font | [SIL Open Font License 1.1](app/assets/fonts/LICENSE.txt); [official source](https://github.com/rsms/inter/releases/tag/v4.1) |
 | Qt for Python / PySide6 6.8.1, including Qt Charts and Shiboken | [Qt for Python licensing](https://doc.qt.io/qtforpython-6/); [Qt Charts GPLv3](https://doc.qt.io/qt-6.8/qtcharts-index.html#licenses); [Qt 6.8.1 source](https://download.qt.io/archive/qt/6.8/6.8.1/single/) and [PySide 6.8.1 source tag](https://github.com/pyside/pyside-setup/tree/v6.8.1) |
 | Interactive Brokers TWS API 10.50.01 | [IBKR GPL announcement](https://www.interactivebrokers.com/docs/tws-api/changelog/2026/8/3); Python package installed from IBKR's official source archive |
 | SQLCipher / sqlcipher3 | [SQLCipher licensing](https://www.zetetic.net/sqlcipher/open-source/); sqlcipher3 license ships with its source distribution |

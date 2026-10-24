@@ -10,6 +10,7 @@ from app.platform.paths import default_data_dir, new_portfolio_dir
 from app.storage.database import Database, MissingSelectedDatabase
 from app.storage.encryption import InvalidDatabaseKey, MissingDatabaseKey
 from app.views.database_selection import DatabaseSelectionWindow
+from app.views.typography import install_app_font
 from app.version import VERSION
 from app.platform.app_update import launch_update
 
@@ -39,9 +40,10 @@ def main(argv=None):
             from keyring.backends.macOS import Keyring
 
         app = QApplication(sys.argv)
+        install_app_font(app)
         root = Path(__file__).resolve().parent
         images = (root / "app" / "assets" / "app_icon.png",
-                  root / "app" / "views" / "help_assets" / "start_connection_light.png")
+                  root / "app" / "views" / "help_assets" / "start_flex_light@2x.png")
         licenses = (root / "licenses" / "inventory.json",
                     root / "licenses" / "Python-LICENSE.txt",
                     root / "licenses" / "Apache-2.0.txt")
@@ -79,6 +81,7 @@ def main(argv=None):
         if index + 1 < len(args):
             database_path = Path(args[index + 1])
     app = QApplication(sys.argv)
+    install_app_font(app)
     app.setApplicationName("IBKR Dashboard")
     app.setApplicationDisplayName("IBKR Dashboard")
     app.setApplicationVersion(VERSION)

@@ -7,26 +7,29 @@ from datetime import date, timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["QT_SCALE_FACTOR"] = "2"
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu, QSplitter, QWidget
 
 import app.ui as ui
 from app.platform import secret_store
-from app.views.help_visuals import HelpScreenshot
 from app.views.lot_matching_ui import LotMatchDialog
+from app.views.typography import install_app_font
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "app" / "views" / "help_assets"
+ACTIVE_SCREENSHOTS = frozenset({
+    "start_flex", "rebalance_table", "rebalance_cases", "views_view_menu",
+})
 
 
 def save_crop(widget, name, theme, left, top, width, height):
-    if theme == "dark" and name in HelpScreenshot.LIGHT_CAPTURE_IN_DARK:
+    if name not in ACTIVE_SCREENSHOTS:
         return
     image = widget.grab(QRect(left, top, width, height))
-    path = ASSETS / f"{name}_{theme}.png"
+    path = ASSETS / f"{name}_{theme}@2x.png"
     if image.isNull() or not image.save(str(path)):
         raise RuntimeError(f"Could not capture {path}")
     print(path.name, image.width(), image.height())
@@ -41,10 +44,7 @@ def main():
     secret_store.load_flex_token = lambda account: None
     ui.configure_diagnostics = lambda *args: logging.getLogger("help-capture")
     app = QApplication([])
-    font_id = QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\segoeui.ttf")
-    if font_id >= 0:
-        app.setFont(QFont(QFontDatabase.applicationFontFamilies(font_id)[0], 9))
-    QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\seguisym.ttf")
+    install_app_font(app)
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
         window = ui.MainWindow(database_path=Path(directory) / "synthetic.sqlite3")
         window.resize(1100, 760)

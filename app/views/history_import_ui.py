@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QGridLayout,
-                               QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar,
+                               QHBoxLayout, QLabel, QPlainTextEdit,
                                QPushButton, QToolButton, QVBoxLayout)
 
 from app.platform.history_status import format_history_details, merge_periods
@@ -18,6 +18,7 @@ from app.flex.flex_import import flex_today, oldest_flex_date
 from app.views import widgets
 from app.views.date_input import CalendarDateInput
 from app.views.table_ui import ReportTable, SortItem
+from app.views.ui_theme import style_combo_selection
 
 
 class HistoryImportDialog(QDialog):
@@ -41,7 +42,7 @@ class HistoryImportDialog(QDialog):
         form = QGridLayout()
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(5)
-        self.source = QComboBox()
+        self.source = style_combo_selection(QComboBox())
         for label, value in (("All reports", "all"), ("Trades", "trades"),
                              ("Analytics", "analytics"), ("Cash", "cash")):
             self.source.addItem(label, value)
@@ -72,12 +73,7 @@ class HistoryImportDialog(QDialog):
         self.progress_label.setWordWrap(True)
         progress_header = QHBoxLayout()
         progress_header.addWidget(self.progress_label, 1)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("syncProgressBar")
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedWidth(130)
-        self.progress_bar.setFixedHeight(12)
+        self.progress_bar = widgets.progress_bar(busy=True, compact=True)
         progress_header.addWidget(self.progress_bar, alignment=Qt.AlignVCenter)
         progress_layout.addLayout(progress_header)
         self.details = QPlainTextEdit()
@@ -120,6 +116,7 @@ class HistoryImportDialog(QDialog):
         older_actions.addWidget(self.remove_older_button)
         older_layout.addLayout(older_actions)
         layout.addWidget(self.older_card)
+        layout.addStretch()
 
         self.source.currentIndexChanged.connect(self._selection_changed)
         self.from_date.dateChanged.connect(self._selection_changed)

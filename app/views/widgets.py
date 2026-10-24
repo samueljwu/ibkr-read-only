@@ -9,11 +9,11 @@ import json
 
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtWidgets import (QComboBox, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
-                               QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
 from app.views.ui_theme import (CARD_MARGINS, DIALOG_MARGINS, DIALOG_SPACING,
                                  PAGE_MARGINS, PAGE_SPACING, SUBPAGE_MARGINS,
-                                 style_toolbar_dropdown)
+                                 SPLITTER_HANDLE, style_toolbar_dropdown)
 
 
 def apply_layout(layout, kind):
@@ -58,6 +58,18 @@ def hint(text):
     label.setObjectName("hint")
     label.setWordWrap(True)
     return label
+
+
+def progress_bar(*, busy=False, compact=False):
+    """Build a themed progress indicator for dialogs or compact status areas."""
+    bar = QProgressBar()
+    if busy:
+        bar.setRange(0, 0)
+    if compact:
+        bar.setObjectName("compactProgress")
+        bar.setTextVisible(False)
+        bar.setFixedSize(90, 14)
+    return bar
 
 
 def field_label(text, buddy=None):
@@ -161,6 +173,52 @@ def save_chart_table_split_state(db, splitter, key):
     db.set_setting(state_key, bytes(splitter.saveState().toBase64()).decode("ascii"))
 
 
+def _restore_split_state(db, splitter, key, horizontal, sizes=(600, 400)):
+    saved = db.setting(_chart_table_state_key(key, horizontal))
+    # Returns used JSON sizes before adopting the shared pane component.
+    try:
+        legacy_sizes = json.loads(saved)
+    except (TypeError, ValueError):
+        legacy_sizes = None
+    if isinstance(legacy_sizes, list) and len(legacy_sizes) == splitter.count() and all(
+            type(size) is int and size >= 0 for size in legacy_sizes):
+        splitter.setSizes(legacy_sizes)
+    elif not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
+        splitter.setSizes(sizes)
+
+
+def layout_choice(description):
+    combo = style_toolbar_dropdown(QComboBox())
+    combo.addItem("Top and bottom", "vertical")
+    combo.addItem("Side by side", "horizontal")
+    combo.setAccessibleName(f"{description} layout")
+    combo.setToolTip(f"{description} layout")
+    return combo
+
+
+def pane_splitter(db, key, first, second, *, layout_combo=None, description="panes",
+                  sizes=(600, 400)):
+    """Two persistent panes, with an optional orientation control."""
+    horizontal = layout_combo is not None and db.setting(f"{key}_orientation") == "horizontal"
+    splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
+    splitter.setChildrenCollapsible(False)
+    splitter.setHandleWidth(SPLITTER_HANDLE)
+    splitter.setMinimumWidth(0)
+    splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+    splitter.addWidget(first)
+    splitter.addWidget(second)
+    splitter.setStretchFactor(0, sizes[0])
+    splitter.setStretchFactor(1, sizes[1])
+    _restore_split_state(db, splitter, key, horizontal, sizes)
+    splitter.splitterMoved.connect(lambda *_: save_chart_table_split_state(db, splitter, key))
+    splitter.handle(1).setToolTip(f"Drag to resize {description}")
+    if layout_combo is not None:
+        layout_combo.setCurrentIndex(layout_combo.findData("horizontal" if horizontal else "vertical"))
+        layout_combo.currentIndexChanged.connect(
+            lambda: set_chart_table_layout(db, splitter, key, layout_combo.currentData() == "horizontal"))
+    return splitter
+
+
 def set_chart_table_layout(db, splitter, key, horizontal):
     if (splitter.orientation() == Qt.Horizontal) == horizontal:
         return
@@ -168,34 +226,32 @@ def set_chart_table_layout(db, splitter, key, horizontal):
     splitter.blockSignals(True)
     try:
         splitter.setOrientation(Qt.Horizontal if horizontal else Qt.Vertical)
-        saved = db.setting(_chart_table_state_key(key, horizontal))
-        if not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
-            splitter.setSizes((600, 400))
+        _restore_split_state(db, splitter, key, horizontal)
     finally:
         splitter.blockSignals(False)
     db.set_setting(f"{key}_orientation", "horizontal" if horizontal else "vertical")
 
 
-def chart_table_layout(layout, db, key, chart, table, *, info_label=None, navigator=None):
-    """Add the shared chart/table orientation control and persistent splitter."""
-    horizontal = db.setting(f"{key}_orientation") == "horizontal"
-    controls = QHBoxLayout()
-    controls.setSpacing(8)
-    if info_label is not None:
-        controls.addWidget(info_label, 1)
-    controls.addStretch()
-    controls.addWidget(QLabel("Chart and table"))
-    layout_combo = style_toolbar_dropdown(QComboBox())
-    layout_combo.addItems(("Top and bottom", "Side by side"))
-    layout_combo.setCurrentIndex(1 if horizontal else 0)
-    controls.addWidget(layout_combo)
-    layout.addLayout(controls)
+def chart_table_layout(layout, db, key, chart, table, *, info_label=None, navigator=None,
+                       display_combo: QComboBox | None = None):
+    """Build a persistent splitter, optionally using a caller's display dropdown.
 
-    splitter = QSplitter(Qt.Horizontal if horizontal else Qt.Vertical)
-    splitter.setChildrenCollapsible(False)
-    splitter.setHandleWidth(11)
-    splitter.setMinimumWidth(0)
-    splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+    The supplied dropdown uses ``vertical`` / ``horizontal`` item data.
+    """
+    if display_combo is None:
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        if info_label is not None:
+            controls.addWidget(info_label, 1)
+        controls.addStretch()
+        controls.addWidget(QLabel("Layout"))
+        layout_combo = layout_choice("Chart and table")
+        controls.addWidget(layout_combo)
+        layout.addLayout(controls)
+    else:
+        layout_combo = display_combo
+        if info_label is not None:
+            layout.addWidget(info_label)
     chart_panel = QWidget()
     chart_panel.setMinimumWidth(0)
     chart_layout = QVBoxLayout(chart_panel)
@@ -204,18 +260,9 @@ def chart_table_layout(layout, db, key, chart, table, *, info_label=None, naviga
     chart_layout.addWidget(chart, 1)
     if navigator is not None:
         chart_layout.addWidget(navigator)
-    splitter.addWidget(chart_panel)
-    splitter.addWidget(table)
-    splitter.setStretchFactor(0, 3)
-    splitter.setStretchFactor(1, 2)
-    saved = db.setting(_chart_table_state_key(key, horizontal))
-    if not saved or not splitter.restoreState(QByteArray.fromBase64(saved.encode("ascii"))):
-        splitter.setSizes((600, 400))
-    splitter.splitterMoved.connect(lambda *_: save_chart_table_split_state(db, splitter, key))
-    layout_combo.currentIndexChanged.connect(
-        lambda index: set_chart_table_layout(db, splitter, key, index == 1))
+    splitter = pane_splitter(db, key, chart_panel, table, layout_combo=layout_combo,
+                             description="chart and table")
     layout.addWidget(splitter, 1)
-    splitter.handle(1).setToolTip("Drag to resize chart and table")
     return splitter, layout_combo
 
 

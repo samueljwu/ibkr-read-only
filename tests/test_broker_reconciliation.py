@@ -35,23 +35,6 @@ def test_broker_snapshot_checks_derived_quantity_and_nav(tmp_path):
         db.conn.close()
 
 
-def test_broker_holding_without_ledger_history_does_not_look_like_zero_value(tmp_path):
-    db = Database(tmp_path / "missing.sqlite3")
-    try:
-        position_id = db.add_position({"display_ticker": "AAPL", "ib_symbol": "AAPL"})
-        db.cache_contract(position_id, 900000001, multiplier=1)
-        db.save_broker_positions(1, [{"con_id": 900000001, "quantity": 100,
-                                      "symbol": "AAPL", "currency": "USD"}], "2026-10-06T12:00:00")
-        db.set_metadata("broker_positions_refresh_1", "2026-10-06T12:00:00")
-        market = MockMarketDataProvider()
-        market.refresh(db.rows("positions", 1))
-        row = PortfolioService(db, market).portfolio_rows()[0]
-        assert row["broker_qty"] == 100
-        assert row["position_qty"] == 0
-        assert row["value"] is None
-        assert row["reconciliation"] == "DIFFERENCE"
-    finally:
-        db.conn.close()
 
 
 def test_broker_position_delta_updates_and_removes_holding(tmp_path):

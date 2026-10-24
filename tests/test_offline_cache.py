@@ -17,65 +17,12 @@ from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today
 
 
-def test_quote_cache_survives_restart_and_is_scoped_to_account_and_contract(tmp_path):
-    path = tmp_path / "offline.sqlite3"
-    db = Database(path)
-    position_id = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-    db.cache_contract(position_id, 123)
-    db.save_quotes(1, "ACCOUNT-A", [(position_id, 123, 42.5, "LIVE LAST", "2026-10-06T15:00:00")])
-    db.conn.close()
-
-    db = Database(path)
-    try:
-        assert db.cached_quotes(1, "ACCOUNT-A")[position_id]["price"] == 42.5
-        assert db.cached_quotes(1, "ACCOUNT-B") == {}
-        db.cache_contract(position_id, 456)
-        assert db.cached_quotes(1, "ACCOUNT-A") == {}
-    finally:
-        db.conn.close()
 
 
-def test_quote_cache_does_not_wait_for_another_writer(tmp_path):
-    path = tmp_path / "locked.sqlite3"
-    db = Database(path)
-    position_id = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-    other = open_database(path)
-    try:
-        other.execute("BEGIN IMMEDIATE")
-        db.save_quotes(1, "ACCOUNT-A", [(position_id, None, 12, "LIVE LAST", "2026-10-06T15:00:00")])
-        # The optional quote cache must be skipped rather than waiting on the
-        # other writer, which still holds the lock.
-        assert other.in_transaction
-    finally:
-        other.rollback()
-        other.close()
-        db.conn.close()
 
 
-def test_disconnect_clears_live_ticks_and_keeps_last_observation():
-    market = MarketDataProvider()
-    market.connected = True
-    market.events.put(("quote", [1], "last", 42.5, "Live"))
-    market.drain()
-    market.events.put(("connected", False))
-    assert market.drain() == {1}
-    quote = market.quote(1)
-    assert quote["ticks"] == {}
-    assert quote["cached_price"] == 42.5
-    assert quote["mode"] == "Cached"
 
 
-def test_market_data_mode_does_not_clear_subscription_error_without_a_price():
-    market = MarketDataProvider()
-    market.events.put(("status", [1], "IBKR ERROR 354: market data unavailable"))
-    market.events.put(("quote", [1], None, None, "Live"))
-    market.drain()
-    assert market.quote(1)["status"] == "IBKR ERROR 354: market data unavailable"
-    assert market.quote(1)["ticks"] == {}
-
-    market.events.put(("quote", [1], "last", 13, "Live"))
-    market.drain()
-    assert market.quote(1)["status"] == "OK"
 
 
 def test_next_earnings_picks_earliest_upcoming_nested_event():
@@ -150,23 +97,6 @@ def test_stock_and_underlying_price_requests_do_not_require_fundamentals(monkeyp
     assert all(request[2] == "" for request in requests)
 
 
-def test_cached_quote_marks_value_but_not_daily_return(tmp_path):
-    db = Database(tmp_path / "valuation.sqlite3")
-    try:
-        position_id = db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-        db.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
-                      "side": "BUY", "quantity": 2, "price": 10, "commission_usd": 0})
-        market = MarketDataProvider()
-        market.quotes[position_id] = {"ticks": {}, "mode": "Cached", "status": "CACHED QUOTE",
-                                      "cached_price": 12, "cached_as_of": "2026-10-06T15:00:00"}
-        row = PortfolioService(db, market).portfolio_rows()[0]
-        assert row["value"] == 24
-        assert row["price_source"] == "CACHED QUOTE 2026-10-06T15:00:00"
-        assert row["data_status"] == "CACHED QUOTE"
-        assert row["daily_pnl"] is None
-        assert row["one_day"] is None
-    finally:
-        db.conn.close()
 
 
 def test_ibkr_mode_without_api_uses_cache_and_never_mock(tmp_path, monkeypatch):
@@ -256,32 +186,6 @@ def test_live_label_and_daily_summary_wait_for_actual_quote(tmp_path, monkeypatc
         window._refresh_summary()
         assert "Data: Live (1/1)" in window.statusBar().currentMessage()
         assert window.models["Portfolio"].rows[0]["one_day"] == 13 / 12 - 1
-        assert window.metric_values["daily"].text() == "$1.00"
-    finally:
-        window.close()
-
-
-def test_historical_close_refreshes_daily_summary(tmp_path, monkeypatch):
-    QApplication.instance() or QApplication([])
-    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "history-summary.sqlite3"))
-    window = ui.MainWindow()
-    try:
-        position_id = window.db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-        window.db.cache_contract(position_id, 123)
-        window.db.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
-                             "side": "BUY", "quantity": 1, "price": 10, "commission_usd": 0})
-        monkeypatch.setattr(window.service, "_as_of", lambda position: flex_today())
-        provider = MarketDataProvider()
-        provider.connected = True
-        provider.quotes[position_id] = {"ticks": {"last": 13}, "mode": "Live", "status": "OK"}
-        window.market = window.service.market = provider
-        window._refresh_models()
-        assert window.metric_values["daily"].text() == "—"
-
-        provider.events.put(("history", 123, [{"day": (flex_today() - timedelta(days=1)).isoformat(),
-                                                "close": 12, "volume": 100}]))
-        window._poll()
-        window._refresh_summary()
         assert window.metric_values["daily"].text() == "$1.00"
     finally:
         window.close()

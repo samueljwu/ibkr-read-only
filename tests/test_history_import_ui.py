@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QCalendarWidget, QLineEdit
+from PySide6.QtWidgets import QApplication, QCalendarWidget, QLabel, QLineEdit
 
 import app.ui as ui
 from app.flex.flex_import import oldest_flex_date
@@ -148,6 +148,19 @@ def test_import_dialog_keeps_explanation_and_results_compact(window):
     assert dialog.progress_label.isVisible()
     assert dialog.details.isVisible()
     assert "Synthetic correction requires review." in dialog.details.toPlainText()
+
+
+def test_import_dialog_keeps_periods_card_compact_when_resized(window):
+    window.open_history_import()
+    dialog = window.history_import_dialog
+    dialog.resize(dialog.width(), dialog.height() + 300)
+    QApplication.instance().processEvents()
+
+    card = dialog.periods_table.parentWidget()
+    title = next(label for label in card.findChildren(QLabel)
+                 if label.text() == "Imported periods")
+    assert dialog.periods_table.y() - (title.y() + title.height()) < 30
+    assert card.height() < 250
 
 
 def test_token_stays_out_of_settings_and_is_never_prefilled(window):

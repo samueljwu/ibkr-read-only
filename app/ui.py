@@ -13,11 +13,11 @@ from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import QAbstractTableModel, QByteArray, QItemSelectionModel, QModelIndex, QRect, QSize, QTimer, Qt
+from PySide6.QtCore import QAbstractTableModel, QByteArray, QEvent, QItemSelectionModel, QModelIndex, QRect, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
-                               QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QTabWidget,
+                               QGridLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton, QTabWidget,
                                QScrollArea, QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTableView, QToolButton, QVBoxLayout, QWidget)
 
@@ -29,6 +29,7 @@ from app.finance.calculations import choose_price, valid_price
 from app.finance.option_labels import option_label
 from app.views.analytics_ui import AnalyticsTab
 from app.views.cash_ui import CashMovementsTab
+from app.views.color_palette import ColorPaletteMenu
 from app.views.calcs_ui import CalcsTab
 from app.broker.broker_sync import BrokerIngestor
 from app.storage.excel_io import export_workbook
@@ -36,16 +37,21 @@ from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, M
 from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today, oldest_flex_date
 from app.sync.sync_service import trade_sync_paused
-from app.views.table_ui import (ReportTable, SortItem, TableClickAwayFilter,
+from app.views.table_ui import (TABLE_ROW_HEIGHT, ReportTable, SortItem, TableClickAwayFilter,
                                 copy_table_selection, display_number, handle_table_shortcut)
-from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
-                          stylesheet, style_toolbar_dropdown)
+from app.views.ui_theme import (COLORS, PAGE_MARGINS, PAGE_SPACING, SUMMARY_BORDER_GRADIENTS,
+                                SUMMARY_BORDER_SOLIDS, TOOLBAR_GROUP_SPACING,
+                                TOOLBAR_ITEM_SPACING, stylesheet, style_combo_selection,
+                                set_zoom_height, style_toolbar_dropdown)
 from app.views.themed_checkbox import ThemedCheckBox
 from app.views.help_visuals import HelpScreenshot
 from app.views.history_import_ui import HistoryImportDialog
+from app.views.date_input import DatePickerCalendar
 from app.views.action_icons import action_icon
-from app.views.shortcuts import native_text, shortcut
+from app.views.shortcuts import NEXT_TAB, PREVIOUS_TAB, native_text, shortcut
+from app.views.summary_border import BORDER_PALETTES, BORDER_STYLES, SummaryBorder
 from app.views.lot_matching_ui import LotMatchDialog
+from app.views.main_navigation import MainNavigation
 from app.views.tutorial_ui import TutorialOverlay
 from app.views.update_dialog import UpdateDialog
 from app.views import widgets
@@ -449,7 +455,7 @@ class GridView(QTableView):
         self.setSortingEnabled(False)
         self.horizontalHeader().setSectionsMovable(True)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.verticalHeader().setDefaultSectionSize(25)
+        self.verticalHeader().setDefaultSectionSize(TABLE_ROW_HEIGHT)
         self.setWordWrap(False)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.selection_axis = "row"
@@ -511,6 +517,17 @@ class MainWindow(QMainWindow):
         self.log.info("IBKR Dashboard opened; database=%s", self.db.path)
         self.portfolio_id = 1
         self._show_account_summary = self.db.setting("show_account_summary") != "0"
+        self._sidebar_requested = self.db.setting("show_sidebar") != "0"
+        self._sidebar_explicitly_shown = False
+        self._summary_border_style = self.db.setting("summary_border_style") or "prism"
+        if self._summary_border_style not in dict(BORDER_STYLES):
+            self._summary_border_style = "prism"
+        self._summary_border_palette = self.db.setting("summary_border_palette") or "rainbow"
+        if self._summary_border_palette not in dict(BORDER_PALETTES) and self._summary_border_palette != "solid":
+            self._summary_border_palette = "rainbow"
+        self._summary_border_color = self.db.setting("summary_border_color") or COLORS["light"]["accent"]
+        if not QColor(self._summary_border_color).isValid():
+            self._summary_border_color = COLORS["light"]["accent"]
         self._compact_geometry = None
         self._history_attempt_day = None
         self._last_flex_sync_stamp = self.db.metadata("ibkr_flex_sync_completed")
@@ -556,15 +573,24 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("central")
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(14, 12, 14, 8)
-        root_layout.setSpacing(9)
+        root_layout.setContentsMargins(*PAGE_MARGINS)
+        compact_layout = self.width() < 1100
+        root_layout.setSpacing(PAGE_SPACING if compact_layout else 16)
+        self.dashboard_layout = root_layout
+        self._dashboard_compact = compact_layout
         self.heading = QLabel()
         self.heading.setObjectName("heading")
         heading_row = QHBoxLayout()
+        self.navigation_toggle = QPushButton()
+        self.navigation_toggle.setObjectName("secondary")
+        self.navigation_toggle.clicked.connect(self._toggle_sidebar)
+        self.navigation_toggle.setFixedSize(34, 34)
+        self.navigation_toggle.setIconSize(QSize(20, 20))
+        heading_row.addWidget(self.navigation_toggle)
         heading_row.addWidget(self.heading)
         heading_row.addStretch()
-        self.sync_button = QPushButton()
-        self.sync_button.setObjectName("secondary")
+        self.sync_button = QPushButton("Sync")
+        self.sync_button.setObjectName("syncAction")
         self.sync_button.clicked.connect(self.sync_all)
         heading_row.addWidget(self.sync_button)
         self.pause_sync_button = QPushButton()
@@ -587,20 +613,28 @@ class MainWindow(QMainWindow):
         self.settings_button.setToolTip("Settings")
         self.settings_button.clicked.connect(self.open_settings)
         heading_row.addWidget(self.settings_button)
-        for button in (self.sync_button, self.pause_sync_button, self.theme_button,
+        set_zoom_height(self.sync_button, 34)
+        self.sync_button.setMinimumWidth(92)
+        self.sync_button.setIconSize(QSize(18, 18))
+        for button in (self.pause_sync_button, self.theme_button,
                        self.help_button, self.settings_button):
             button.setFixedSize(34, 34)
             button.setIconSize(QSize(20, 20))
         root_layout.addLayout(heading_row)
-        summary = QWidget()
+        summary = SummaryBorder()
         summary.setObjectName("summary")
+        summary.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.summary = summary
         summary_layout = QVBoxLayout(summary)
-        summary_layout.setContentsMargins(14, 10, 14, 9)
-        summary_layout.setSpacing(5)
+        summary_layout.setContentsMargins(*self._summary_margins(compact_layout))
+        summary_layout.setSpacing(8)
+        self.summary_layout = summary_layout
         metrics = QGridLayout()
-        metrics.setHorizontalSpacing(20)
-        metrics.setVerticalSpacing(6)
+        metrics.setHorizontalSpacing(16)
+        metrics.setVerticalSpacing(16)
+        self.summary_metrics_layout = metrics
+        self.summary_metric_cells = []
+        self._summary_columns = 3
         self.metric_values = {}
         for index, (key, title) in enumerate((("nav", "NET ASSET VALUE"), ("cash", "CASH"),
                                              ("holdings", "HOLDINGS VALUE"), ("daily", "DAILY P&L"),
@@ -617,6 +651,7 @@ class MainWindow(QMainWindow):
             cell_layout.addWidget(label)
             cell_layout.addWidget(value)
             metrics.addWidget(cell, index // 3, index % 3)
+            self.summary_metric_cells.append(cell)
             self.metric_values[key] = value
         for column in range(3):
             metrics.setColumnStretch(column, 1)
@@ -626,18 +661,25 @@ class MainWindow(QMainWindow):
         self.data_notice.setWordWrap(True)
         summary_layout.addWidget(self.data_notice)
         root_layout.addWidget(summary)
+        self._layout_summary_metrics(self.width())
+        page_row = QHBoxLayout()
+        page_row.setContentsMargins(0, 0, 0, 0)
+        page_row.setSpacing(8)
+        self.navigation = MainNavigation()
+        self.navigation.setFixedWidth(132)
+        self.navigation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        page_row.addWidget(self.navigation)
+        self.navigation.setHidden(not self._sidebar_requested or self.width() < 1000)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("mainPages")
         self.tabs.tabBar().setExpanding(False)
-        root_layout.addWidget(self.tabs)
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        page_row.addWidget(self.tabs, 1)
+        root_layout.addLayout(page_row, 1)
         self.setCentralWidget(root)
         self.sync_progress_label = QLabel("Syncing IBKR…")
         self.sync_progress_label.setObjectName("syncProgressLabel")
-        self.sync_progress_bar = QProgressBar()
-        self.sync_progress_bar.setObjectName("syncProgressBar")
-        self.sync_progress_bar.setRange(0, 0)
-        self.sync_progress_bar.setTextVisible(False)
-        self.sync_progress_bar.setFixedWidth(130)
-        self.sync_progress_bar.setFixedHeight(12)
+        self.sync_progress_bar = widgets.progress_bar(busy=True, compact=True)
         self.statusBar().addPermanentWidget(self.sync_progress_label)
         self.statusBar().addPermanentWidget(self.sync_progress_bar)
         self.trade_sync_status = QLabel()
@@ -661,9 +703,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.calcs_tab, "Rebalance")
         widgets.persist_tab_order(self.tabs, self.db, self.TAB_LAYOUT_KEY,
                                   ids=list(self.DEFAULT_TAB_ORDER), remember_active=True)
+        self.tabs.tabBar().hide()
+        self._reordering_navigation = False
+        self._sync_navigation_from_tabs()
+        self.navigation.currentRowChanged.connect(self._navigation_selected)
+        self.navigation.itemClicked.connect(self._expand_for_tab_selection)
+        self.navigation.orderChanged.connect(self._reorder_from_navigation)
+        self.tabs.tabBar().tabMoved.connect(self._sync_navigation_from_tabs)
+        self.tabs.currentChanged.connect(self._sync_navigation_from_tabs)
         self.tabs.currentChanged.connect(self._refresh_special_tab)
         self.tabs.currentChanged.connect(self._expand_for_tab_selection)
-        self.tabs.tabBarClicked.connect(self._expand_for_tab_selection)
         self._make_settings_tab()
         self._make_help_dialog()
         self._make_menu()
@@ -674,11 +723,12 @@ class MainWindow(QMainWindow):
         self._update_match_lots_availability()
         self._table_click_away_filter = TableClickAwayFilter(self)
         QApplication.instance().installEventFilter(self._table_click_away_filter)
+        QApplication.instance().installEventFilter(self)
         enable_label_copy(self)
-        self.next_tab_shortcut = QShortcut(shortcut("Ctrl+Tab", "Meta+Tab"), self)
+        self.next_tab_shortcut = QShortcut(NEXT_TAB, self)
         self.next_tab_shortcut.setContext(Qt.WindowShortcut)
         self.next_tab_shortcut.activated.connect(lambda: self._step_tab(1))
-        self.previous_tab_shortcut = QShortcut(shortcut("Ctrl+Shift+Tab", "Meta+Shift+Tab"), self)
+        self.previous_tab_shortcut = QShortcut(PREVIOUS_TAB, self)
         self.previous_tab_shortcut.setContext(Qt.WindowShortcut)
         self.previous_tab_shortcut.activated.connect(lambda: self._step_tab(-1))
         if sys.platform == "darwin":
@@ -694,6 +744,8 @@ class MainWindow(QMainWindow):
         self._apply_zoom()
         self._sync_progress_active = True
         self._start_provider()
+        for view in (*self.views.values(), *self.findChildren(ReportTable)):
+            view.selectionModel().clear()
         if isinstance(self.market, IBKRMarketDataProvider):
             self._watch_live_sync()
         self.lots_refresh_timer = QTimer(self)
@@ -743,16 +795,85 @@ class MainWindow(QMainWindow):
         if count:
             self.tabs.setCurrentIndex((self.tabs.currentIndex() + direction) % count)
 
+    def _sync_navigation_from_tabs(self, *_):
+        if self._reordering_navigation:
+            return
+        previous = self.navigation.blockSignals(True)
+        try:
+            self.navigation.clear()
+            for index in range(self.tabs.count()):
+                item = QListWidgetItem(self.tabs.tabText(index))
+                item.setData(Qt.UserRole, self.tabs.tabBar().tabData(index))
+                self.navigation.addItem(item)
+            self.navigation.setCurrentRow(self.tabs.currentIndex())
+        finally:
+            self.navigation.blockSignals(previous)
+
+    def _navigation_selected(self, row):
+        if 0 <= row < self.tabs.count() and row != self.tabs.currentIndex():
+            self.tabs.setCurrentIndex(row)
+
+    def _reorder_from_navigation(self):
+        order = [self.navigation.item(row).data(Qt.UserRole)
+                 for row in range(self.navigation.count())]
+        active_id = self.tabs.tabBar().tabData(self.tabs.currentIndex())
+        self._reordering_navigation = True
+        try:
+            for destination, name in enumerate(order):
+                source = self._tab_index(name)
+                if source >= 0 and source != destination:
+                    self.tabs.tabBar().moveTab(source, destination)
+        finally:
+            self._reordering_navigation = False
+        if active_id is not None:
+            self.tabs.setCurrentIndex(self._tab_index(active_id))
+        self._sync_navigation_from_tabs()
+
+    def _toggle_sidebar(self):
+        visible = self.navigation.isHidden()
+        self._sidebar_requested = visible
+        self._sidebar_explicitly_shown = visible
+        self.navigation.setVisible(visible)
+        self.db.set_setting("show_sidebar", "1" if visible else "0")
+        self._update_navigation_toggle()
+        if self._compact_geometry is not None:
+            self._fit_compact_summary()
+
+    def _update_navigation_toggle(self):
+        visible = not self.navigation.isHidden()
+        label = "Hide sidebar" if visible else "Show sidebar"
+        self.navigation_toggle.setAccessibleName(label)
+        self.navigation_toggle.setToolTip(label)
+        self.navigation_toggle.setIcon(action_icon(
+            "sidebar_hide" if visible else "sidebar_show", COLORS[self.theme]["text"]))
+
     def _update_summary_visibility(self):
-        self.summary.setVisible((self._show_account_summary or self._compact_geometry is not None) and
-                                self.tabs.currentWidget() is not self.calcs_tab)
+        self.summary.setVisible(self._show_account_summary or self._compact_geometry is not None)
+
+    def _layout_summary_metrics(self, width):
+        columns = 6 if width >= 1100 else 3 if width >= 700 else 2
+        if columns == self._summary_columns:
+            return
+        layout = self.summary_metrics_layout
+        for cell in self.summary_metric_cells:
+            layout.removeWidget(cell)
+        for index, cell in enumerate(self.summary_metric_cells):
+            layout.addWidget(cell, index // columns, index % columns)
+        for column in range(6):
+            layout.setColumnStretch(column, int(column < columns))
+        self._summary_columns = columns
+        self._fit_summary_height()
+
+    def _fit_summary_height(self):
+        self.summary_layout.activate()
+        self.summary.setMinimumHeight(self.summary.sizeHint().height())
 
     def _expand_for_tab_selection(self, _index):
         if self._compact_geometry is not None:
             self.compact_summary_action.setChecked(False)
 
     def _fit_compact_summary(self):
-        self.tabs.setFixedHeight(self.tabs.tabBar().sizeHint().height() + 2)
+        self.tabs.setFixedHeight(0)
         self.centralWidget().layout().activate()
         self.resize(self.width(), self.sizeHint().height())
 
@@ -792,6 +913,44 @@ class MainWindow(QMainWindow):
         self.db.set_setting("show_account_summary", "1" if visible else "0")
         self._update_summary_visibility()
 
+    def _summary_margins(self, compact):
+        if self._summary_border_style == "terminal":
+            return (16, 35, 16, 10) if compact else (22, 35, 22, 18)
+        if self._summary_border_style == "flight":
+            return (27, 10, 27, 10) if compact else (29, 18, 29, 18)
+        return (16, 10, 16, 10) if compact else (22, 18, 22, 18)
+
+    def _refresh_summary_border(self):
+        self.summary.set_appearance(self._summary_border_style, self._summary_border_palette,
+                                    self._summary_border_color, self.theme)
+        self.summary_layout.setContentsMargins(*self._summary_margins(self._dashboard_compact))
+        self._fit_summary_height()
+        if self._compact_geometry is not None:
+            self._fit_compact_summary()
+
+    def _set_summary_border_style(self, style):
+        if style not in dict(BORDER_STYLES):
+            return
+        self._summary_border_style = style
+        self.db.set_setting("summary_border_style", style)
+        self._refresh_summary_border()
+        self._sync_summary_border_menu()
+
+    def _set_summary_border_palette(self, palette, color):
+        if palette not in dict(BORDER_PALETTES) and palette != "solid":
+            return
+        self._summary_border_palette = palette
+        self.db.set_setting("summary_border_palette", palette)
+        if palette == "solid" and QColor(color).isValid():
+            self._summary_border_color = QColor(color).name()
+            self.db.set_setting("summary_border_color", self._summary_border_color)
+        self._refresh_summary_border()
+        self._sync_summary_border_menu()
+
+    def _sync_summary_border_menu(self):
+        self.summary_style_actions[self._summary_border_style].setChecked(True)
+        self.summary_color_menu.set_selection(self._summary_border_palette, self._summary_border_color)
+
     def _refresh_calcs_live(self):
         if self.tabs.currentWidget() is self.calcs_tab and not self._sync_paused:
             focus = QApplication.focusWidget()
@@ -810,13 +969,18 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, theme):
         self.theme = theme if theme in ("light", "dark") else "light"
         self.setStyleSheet(stylesheet(self.theme, self.zoom_percent))
+        self._refresh_summary_border()
+        for calendar in self.findChildren(DatePickerCalendar):
+            calendar.set_colors(COLORS[self.theme])
         for visual in self.help_screenshots:
             visual.set_theme(self.theme)
         self.analytics_tab.set_theme(self.theme)
         color = COLORS[self.theme]["text"]
-        self.sync_button.setIcon(action_icon("sync", color))
+        sync_icon_color = "sync_action_text" if self.sync_button.isEnabled() else "disabled_text"
+        self.sync_button.setIcon(action_icon("sync", COLORS[self.theme][sync_icon_color]))
         self._update_pause_sync_button()
         self.theme_button.setIcon(action_icon("sun" if self.theme == "dark" else "moon", color))
+        self._update_navigation_toggle()
         self.help_button.setIcon(action_icon("help", color))
         self.settings_button.setIcon(action_icon("settings", color))
         theme_action = "Switch to light mode" if self.theme == "dark" else "Switch to dark mode"
@@ -841,6 +1005,7 @@ class MainWindow(QMainWindow):
         else:
             scaled_font.setPixelSize(round(font.pixelSize() * self.zoom_percent / 100))
         self.setFont(scaled_font)
+        self.navigation.setFixedWidth(round(132 * self.zoom_percent / 100))
         for table in self.findChildren(QTableView):
             header = table.verticalHeader()
             base = header.property("zoom_base_row_height")
@@ -852,6 +1017,21 @@ class MainWindow(QMainWindow):
         self.zoom_in_action.setEnabled(self.zoom_percent < self.MAX_ZOOM)
         self.zoom_reset_action.setEnabled(self.zoom_percent != 100)
         self._apply_theme(self.theme)
+        self.cash_tab.fit_summary_text()
+        QTimer.singleShot(0, self.cash_tab.fit_summary_text)
+        for widget in self.findChildren(QWidget):
+            base = widget.property("zoom_base_height")
+            if base is not None:
+                widget.setFixedHeight(max(base, widget.sizeHint().height() + 2))
+        if self.zoom_percent > 100:
+            for table in self.findChildren(QTableView):
+                header = table.horizontalHeader()
+                for section in range(header.count()):
+                    if (not header.isSectionHidden(section) and
+                            header.sectionResizeMode(section) == QHeaderView.Interactive):
+                        minimum = header.sectionSizeHint(section)
+                        if header.sectionSize(section) < minimum:
+                            header.resizeSection(section, minimum)
         if self._compact_geometry is not None:
             self._fit_compact_summary()
 
@@ -1007,6 +1187,8 @@ class MainWindow(QMainWindow):
                        "Syncing IBKR…" if running else "Sync IBKR")
         self.sync_button.setAccessibleName(sync_action)
         self.sync_button.setEnabled(not self._sync_paused and not running and self._history_process is None)
+        sync_icon_color = "sync_action_text" if self.sync_button.isEnabled() else "disabled_text"
+        self.sync_button.setIcon(action_icon("sync", COLORS[self.theme][sync_icon_color]))
         statuses = []
         for label, setting, prefix in (
                 ("Trades", "flex_query_id", "ibkr_flex"),
@@ -1470,6 +1652,9 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout(toolbar_widget)
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(TOOLBAR_GROUP_SPACING)
+        if name == "Portfolio":
+            toolbar.addWidget(widgets.section_title("Positions"))
+            toolbar.addStretch()
         if name == "Trades":
             filter_controls = QHBoxLayout()
             filter_controls.setSpacing(TOOLBAR_ITEM_SPACING)
@@ -1496,10 +1681,11 @@ class MainWindow(QMainWindow):
         if name == "Portfolio":
             column_controls.addWidget(QLabel("Show"))
         columns_button = self._button(column_controls, "Columns", lambda: None)
-        style_toolbar_dropdown(columns_button)
         column_menu = QMenu(columns_button)
+        column_menu.setObjectName("columnsMenu")
         column_menu.aboutToShow.connect(lambda table=name, menu=column_menu: self._populate_columns_menu(table, menu))
         columns_button.setMenu(column_menu)
+        style_toolbar_dropdown(columns_button)
         toolbar.addLayout(column_controls)
         if name == "Lots":
             self.match_lots_button = widgets.button("Match lots…", self.match_lots, variant="secondary")
@@ -1510,7 +1696,8 @@ class MainWindow(QMainWindow):
             self.hide_closed_checkbox.setChecked(self.models[name].hide_closed)
             self.hide_closed_checkbox.toggled.connect(self.models[name].set_hide_closed)
             toolbar.addWidget(self.hide_closed_checkbox)
-        toolbar.addStretch()
+        if name != "Portfolio":
+            toolbar.addStretch()
         search = QLineEdit()
         search.setPlaceholderText("Type instrument")
         search.setClearButtonEnabled(True)
@@ -1587,7 +1774,7 @@ class MainWindow(QMainWindow):
         ]
         for key, label, options in definitions:
             if options:
-                widget = QComboBox()
+                widget = style_combo_selection(QComboBox())
                 widget.addItems(options)
                 stored = self.db.setting(key)
                 widget.setCurrentText("On" if key == "autosave" and stored == "1" else
@@ -1710,7 +1897,7 @@ class MainWindow(QMainWindow):
     def _make_help_dialog(self):
         self.help_dialog = QDialog(self)
         self.help_dialog.setWindowTitle("Help · IBKR Dashboard")
-        self.help_dialog.resize(760, 600)
+        self.help_dialog.resize(820, 640)
         dialog_layout = QVBoxLayout(self.help_dialog)
         guide_layout = QHBoxLayout()
         self.help_navigation = QListWidget()
@@ -1727,7 +1914,7 @@ class MainWindow(QMainWindow):
         page_layout = QVBoxLayout()
         jump_layout = QHBoxLayout()
         jump_layout.addWidget(QLabel("Jump to"))
-        self.help_jump_menu = QComboBox()
+        self.help_jump_menu = style_combo_selection(QComboBox())
         self.help_jump_menu.setObjectName("helpJumpMenu")
         self.help_jump_menu.setFixedWidth(210)
         self.help_jump_menu.activated.connect(self._jump_to_help_step)
@@ -1746,7 +1933,7 @@ class MainWindow(QMainWindow):
             page.setObjectName("helpPage")
             content = QVBoxLayout(page)
             content.setContentsMargins(16, 12, 16, 12)
-            content.setSpacing(8)
+            content.setSpacing(14)
             heading = QLabel(title)
             heading.setObjectName("helpHeading")
             content.addWidget(heading)
@@ -1764,6 +1951,20 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             content.addWidget(label)
+
+        def add_bullets(content, lines):
+            bullets = QVBoxLayout()
+            bullets.setSpacing(7)
+            for line in lines:
+                row = QHBoxLayout()
+                row.setSpacing(7)
+                marker = QLabel("•")
+                marker.setFixedWidth(10)
+                marker.setAlignment(Qt.AlignTop)
+                row.addWidget(marker)
+                add_note(row, line)
+                bullets.addLayout(row)
+            content.addLayout(bullets)
 
         def add_picture(content, name, description):
             image = HelpScreenshot(name, description)
@@ -1791,12 +1992,16 @@ class MainWindow(QMainWindow):
             menu_label = menu_label.split("→", 1)[0].strip()
             self.help_step_targets[content.property("helpTitle")].append((menu_label, heading))
             if body:
-                add_note(content, body)
+                if isinstance(body, str):
+                    add_note(content, body)
+                else:
+                    add_bullets(content, body)
             if screenshot:
                 add_picture(content, screenshot, title)
 
-        def add_disclosure(content, title, lines):
+        def add_disclosure(content, title, groups):
             toggle = QToolButton()
+            toggle.setObjectName("helpDisclosure")
             toggle.setText(title)
             toggle.setCheckable(True)
             toggle.setArrowType(Qt.RightArrow)
@@ -1805,9 +2010,12 @@ class MainWindow(QMainWindow):
             details = QWidget()
             detail_layout = QVBoxLayout(details)
             detail_layout.setContentsMargins(14, 0, 0, 0)
-            detail_layout.setSpacing(4)
-            for line in lines:
-                add_note(detail_layout, line)
+            detail_layout.setSpacing(10)
+            for heading, lines in groups:
+                label = QLabel(heading)
+                label.setObjectName("helpFieldHeading")
+                detail_layout.addWidget(label)
+                add_bullets(detail_layout, lines)
             details.hide()
 
             def show_details(checked):
@@ -1819,127 +2027,167 @@ class MainWindow(QMainWindow):
             content.addWidget(details)
 
         start_content = add_section("Start")
-        add_step(start_content, "1  Find the Socket Port in TWS or IB Gateway", jump_label="Port")
-        add_note(start_content, "TWS: Global Configuration → API → Settings · live 7496 / paper 7497")
-        add_note(start_content, "Gateway: Configure → Settings → API → Settings · live 4001 / paper 4002")
-        add_note(start_content, "Enable socket clients and Read-Only API. Use the Socket Port shown there; it may differ from the defaults.")
-        add_step(start_content, "2  Settings → connect to IBKR",
-                 "Enter the host, Socket Port and account. Click Use IBKR, or Apply Settings if IBKR is already selected.",
-                 "start_connection", jump_label="Connect")
-        add_picture(start_content, "start_apply", "Use IBKR and Apply Settings")
-        add_step(start_content, "3  Sync IBKR",
-                 "Click the circular arrows in the top toolbar. Hover for each source's status.",
-                 "start_sync", jump_label="Sync")
+        add_step(start_content, "1.  Find the Socket Port in TWS or IB Gateway", (
+            "TWS: Global Configuration → API → Settings. Defaults: live 7496, paper 7497.",
+            "Gateway: Configure → Settings → API → Settings. Defaults: live 4001, paper 4002.",
+            "Enable socket clients and Read-Only API. Copy the Socket Port shown; it may differ from the defaults.",
+        ), jump_label="Port")
+        add_step(start_content, "2.  Settings → connect to IBKR",
+                 ("Enter the host, Socket Port and account.",
+                  "Click Use IBKR, or Apply Settings if IBKR is already selected."),
+                 jump_label="Connect")
+        add_step(start_content, "3.  Sync IBKR",
+                 ("Click the circular arrows in the top toolbar.",
+                  "Hover over the button to check each source's status."),
+                 jump_label="Sync")
 
         # Keep the Flex field lists and CSV requirements aligned with HISTORICAL_REPORTS.md.
-        add_step(start_content, "4  Client Portal → Performance & Reports → Flex Queries",
-                 "Create three Activity Flex Queries (XML): Trades, Analytics and Cash. Use one USD-base account, custom dates, all currencies and instruments, and no symbol filter.",
+        add_step(start_content, "4.  Client Portal → Performance & Reports → Flex Queries",
+                 ("Create three Activity Flex Queries (XML): Trades, Analytics and Cash.",
+                  "For each query, use one USD-base account and custom dates. Include all currencies and instruments; leave the symbol filter empty."),
                  jump_label="Flex queries")
         add_disclosure(start_content, "Trades query · fields to select", (
-            "Trades → Executions: Account ID, Trade ID, IB Execution ID, Trade Date, Trade Time (or Date/Time), Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Class, Currency, Multiplier, FX Rate to Base, IB Commission, IB Commission Currency. Options also need Expiry, Put/Call and Strike.",
-            "Corporate Actions: Account ID, Type, Description, Date/Time, Transaction ID, Conid, Symbol, Asset Class, Currency, Quantity, Proceeds, Multiplier, FX Rate to Base.",
-            "Options, Exercises and Expirations: Account ID, Date, Transaction Type, Asset Class, Conid, Quantity, Trade Price, Proceeds.",
-            "Transfers (ACATS, Internal): Account ID, Date, Direction, Asset Class, Conid, Symbol, Quantity, Currency, FX Rate to Base, Transaction ID. Account Information: Currency.",
+            ("Trades → Executions", (
+                "IDs and dates: Account ID, Trade ID, IB Execution ID, Trade Date, Trade Time (or Date/Time).",
+                "Trade: Buy/Sell, Quantity, Trade Price, Conid, Symbol, Asset Class, Currency, Multiplier.",
+                "Costs and FX: FX Rate to Base, IB Commission, IB Commission Currency.",
+                "For options, also select Expiry, Put/Call and Strike.",
+            )),
+            ("Corporate Actions", (
+                "Account ID, Type, Description, Date/Time, Transaction ID, Conid, Symbol.",
+                "Asset Class, Currency, Quantity, Proceeds, Multiplier, FX Rate to Base.",
+            )),
+            ("Options, Exercises and Expirations", (
+                "Account ID, Date, Transaction Type, Asset Class, Conid, Quantity, Trade Price, Proceeds.",
+            )),
+            ("Transfers (ACATS, Internal)", (
+                "Account ID, Date, Direction, Asset Class, Conid, Symbol, Quantity.",
+                "Currency, FX Rate to Base, Transaction ID.",
+            )),
+            ("Account Information", ("Currency.",)),
         ))
         add_disclosure(start_content, "Analytics query · fields to select", (
-            "NAV Summary in Base: Account ID, Report Date, Total, Cash. Cash Transactions: Account ID, Date/Time, Type, Amount, Currency, FX Rate to Base.",
-            "Transfers (ACATS, Internal): Account ID, Report Date, Date, Direction, Asset Class, Position Amount in Base, Currency, FX Rate to Base, Transaction ID. Account Information: Currency.",
+            ("NAV Summary in Base", ("Account ID, Report Date, Total, Cash.",)),
+            ("Cash Transactions", ("Account ID, Date/Time, Type, Amount, Currency, FX Rate to Base.",)),
+            ("Transfers (ACATS, Internal)", (
+                "Account ID, Report Date, Date, Direction, Asset Class.",
+                "Position Amount in Base, Currency, FX Rate to Base, Transaction ID.",
+            )),
+            ("Account Information", ("Currency.",)),
         ))
         add_disclosure(start_content, "Cash query · fields to select", (
-            "Cash Transactions: Account ID, Currency, Date/Time, Type, Amount, Description, Conid, Symbol, FX Rate to Base. Add Report Date or Transaction ID if offered.",
+            ("Cash Transactions", (
+                "Account ID, Currency, Date/Time, Type, Amount, Description.",
+                "Conid, Symbol, FX Rate to Base. Add Report Date or Transaction ID if offered.",
+            )),
         ))
-        add_step(start_content, "5  Settings → apply query IDs, then save the Flex token",
-                 "Use the matching Trades, Analytics and Cash query IDs. Apply the account before saving its token.",
+        add_step(start_content, "5.  Settings → apply query IDs, then save the Flex token",
+                 ("Enter the matching Trades, Analytics and Cash query IDs.",
+                  "Apply the account, then save its Flex token."),
                  "start_flex", jump_label="Flex token")
-        add_step(start_content, "6  File → Import Data → import Flex history",
-                 "Select All reports, set From and To through yesterday, then click Import history. Check progress and coverage gaps.",
-                 "start_import", jump_label="Import history")
-        add_step(start_content, "7  Import older CSV history (optional)",
-                 f"For history before {oldest_flex_date().isoformat()}, use a PortfolioAnalyst since-inception monthly Detailed CSV and an Activity Statement CSV for the same USD-base account. The statement must run from inception through a month end before that date; PortfolioAnalyst must include that month.",
-                 "setup_older_csv", jump_label="Older CSV")
-        add_note(start_content, "PortfolioAnalyst: Reports → Default Reports → Since Inception → Detailed (CSV). Activity Statement: Statements → Activity Statement → CSV.")
-        add_note(start_content, "Include Account Information, Net Asset Value, Change in NAV, and dated activity or positions in the Activity Statement.")
-        add_note(start_content, "If that older statement is unavailable in Client Portal, ask IBKR whether an archived CSV is available.")
-        add_note(start_content, "File → Import Data → Import older CSV history… Select both files together (Ctrl-click). This adds monthly history, not missing daily NAV or cash dates.")
+        add_step(start_content, "6.  File → Import Data → import Flex history",
+                 ("Select All reports. Set From and To through yesterday.",
+                  "Click Import history. Check progress and coverage gaps."),
+                 jump_label="Import history")
+        add_step(start_content, "7.  Import older CSV history (optional)",
+                 (f"Use this step for history before {oldest_flex_date().isoformat()}.",
+                  "Get a PortfolioAnalyst since-inception monthly Detailed CSV and an Activity Statement CSV for the same USD-base account.",
+                  f"Run the Activity Statement from inception through a month end before {oldest_flex_date().isoformat()}. PortfolioAnalyst must include that month."),
+                 jump_label="Older CSV")
+        add_bullets(start_content, (
+            "PortfolioAnalyst: Reports → Default Reports → Since Inception → Detailed (CSV).",
+            "Activity Statement: Statements → Activity Statement → CSV.",
+            "In the Activity Statement, include Account Information, Net Asset Value, Change in NAV, and dated activity or positions.",
+            "If the older statement is unavailable, ask IBKR for an archived CSV.",
+            "Go to File → Import Data → Import older CSV history… Select both files together (Ctrl-click).",
+            "This adds monthly history, not missing daily NAV or cash dates.",
+        ))
 
         portfolio_content = add_section("Portfolio")
-        add_step(portfolio_content, "1  Overview → inspect holdings",
-                 "Use Columns, Hide closed or search. Scroll right for Reconciliation and Data status; double-click a holding for its trades and lots.",
-                 "portfolio_overview")
-        add_step(portfolio_content, "2  Trades → filter BUY or SELL",
-                 "Search an instrument to narrow the table. Matched realized P&L appears on both trade rows.",
-                 "portfolio_trades")
-        add_step(portfolio_content, "3  Cash → choose a date range",
-                 "Cash Flex supplies deposits, dividends, interest, tax and fees.",
-                 "portfolio_cash_range")
-        add_picture(portfolio_content, "portfolio_cash", "Imported Cash transactions")
-        add_note(portfolio_content, "Lots filters Open and Closed; use Match lots… to change allocations.")
+        add_step(portfolio_content, "1.  Overview → inspect holdings",
+                 ("Use Columns, Hide closed, or search to focus the table.",
+                  "Scroll right for Reconciliation and Data status.",
+                  "Double-click a holding to see its trades and lots."))
+        add_step(portfolio_content, "2.  Trades → filter BUY or SELL",
+                 ("Search for an instrument to narrow the table.",
+                  "Matched realized P&L appears on both trade rows."))
+        add_step(portfolio_content, "3.  Cash → choose a date range",
+                 "Review deposits, dividends, interest, tax and fees from Cash Flex.")
+        add_note(portfolio_content, "In Lots, filter Open or Closed. Use Match lots… to change allocations.")
 
         matched_content = add_section("Matched lots")
-        add_step(matched_content, "1  Lots → select a lot → Match lots…",
-                 "Open = held · Closed = sold. Double-clicking a lot also opens matching.",
-                 "matched_lots", jump_label="Open matching")
-        add_step(matched_content, "2  Drag a sale onto an eligible purchase",
-                 "Sales are above purchases. The purchase must be earlier and have free quantity.",
-                 "matched_sale", jump_label="Drag to match")
-        add_picture(matched_content, "matched_purchase", "Purchases before a manual match")
-        add_step(matched_content, "3  Review chosen and automatic quantities → Save changes",
-                 "The preview updates before saving. Cancel discards the edit.", "matched_after",
+        add_step(matched_content, "1.  Lots → select a lot → Match lots…",
+                 ("Open lots are held; Closed lots are sold.",
+                  "Double-click a lot to open matching."), jump_label="Open matching")
+        add_step(matched_content, "2.  Drag a sale onto an eligible purchase",
+                 ("Sales appear above purchases.",
+                  "Choose an earlier purchase with free quantity."), jump_label="Drag to match")
+        add_step(matched_content, "3.  Review chosen and automatic quantities → Save changes",
+                 ("Check the preview before saving.",
+                  "Click Cancel to discard the edit."),
                  jump_label="Save changes")
-        add_note(matched_content, "Split selected purchase to allocate smaller parts; Remove split joins them. Reset sale to automatic removes your choice.")
-        add_step(matched_content, "Other matching actions", screenshot="matched_menu",
-                 jump_label="Other actions")
-        add_note(matched_content, "Rebuild automatic matches keeps manual choices. Auto-match remaining: FIFO (oldest), LIFO (newest), Max realized gain or Max unrealized gain (highest cost).")
-        add_note(matched_content, "Clear match for selected lot frees its shares. Short-sale covers are automatic and cannot be edited here. Missing fees, FX or multiplier can prevent a match.")
+        add_bullets(matched_content, (
+            "Split selected purchase to allocate smaller parts; Remove split joins them.",
+            "Reset sale to automatic removes your choice.",
+        ))
+        add_step(matched_content, "Other matching actions", jump_label="Other actions")
+        add_bullets(matched_content, (
+            "Rebuild automatic matches keeps manual choices.",
+            "Auto-match remaining: FIFO (oldest), LIFO (newest), Max realized gain, or Max unrealized gain (highest cost).",
+            "Clear match for selected lot frees its shares.",
+            "Short-sale covers match automatically and cannot be edited here.",
+            "Missing fees, FX or multiplier can prevent a match.",
+        ))
 
         analytics_content = add_section("Analytics")
         add_step(analytics_content, "P&L → choose a range and chart metric",
-                 "Toggle S&P 500 or drag the chart to focus dates. Adjusted change removes external flows; gaps need more NAV and flow history.",
-                 "analytics_pnl")
+                 ("Toggle S&P 500 or drag the chart to focus on dates.",
+                  "Adjusted change excludes external flows. Gaps need more NAV and flow history."))
         add_step(analytics_content, "Capital deployment → choose a view",
-                 "Net deployed, buy/sell activity and cash/portfolio share the same range controls.",
-                 "analytics_capital")
+                 "Net deployed, buy/sell activity and cash/portfolio share the same date range.")
         add_step(analytics_content, "Returns → select an instrument",
-                 "Inspect matched lots and income below. ≈ marks partial data; hover for the reason. Open bonds need accrued interest.",
-                 "analytics_returns")
+                 ("Inspect matched lots and income below the chart.",
+                  "≈ marks partial data. Hover to see why.",
+                  "Open bonds need accrued interest."))
         add_step(analytics_content, "Exposure → group and inspect positions",
-                 "Choose Sector or Custom and Adjusted or Market value. Select a slice or category; create or manage custom sets here.",
-                 "analytics_exposure")
+                 ("Choose Sector or Custom, then Adjusted or Market value.",
+                  "Select a slice or category. Create and manage custom sets here."))
         add_step(analytics_content, "Monthly P&L → review each month",
-                 "Partial months and missing baselines may leave returns blank. Import older PortfolioAnalyst CSVs through File → Import Data.",
-                 "analytics_monthly")
+                 ("Partial months or missing baselines may leave returns blank.",
+                  "For older months, import PortfolioAnalyst CSVs through File → Import Data."))
         add_step(analytics_content, "Buy / sell levels → choose a stock",
-                 "Zoom the chart or load older prices while connected to IBKR. Trade markers need verified split history.",
-                 "analytics_levels")
+                 ("Zoom the chart or load older prices while connected to IBKR.",
+                  "Trade markers need verified split history."))
 
         rebalance_content = add_section("Rebalance")
-        add_step(rebalance_content, "1  Set a Cash target or add an idea",
-                 "Type a ticker and click Add. Reset targets clears the worksheet's target inputs.",
-                 "rebalance_setup", jump_label="Targets")
-        add_step(rebalance_content, "2  Edit tinted Target weight cells",
-                 "The Buy / Sell USD estimate updates. Enter saves an edit; Esc cancels it.",
+        add_step(rebalance_content, "1.  Set a Cash target or add an idea",
+                 ("Type a ticker and click Add.",
+                  "Reset targets clears the worksheet's target inputs."), jump_label="Targets")
+        add_step(rebalance_content, "2.  Edit tinted Target weight cells",
+                 ("Check the Buy / Sell USD estimate as you edit.",
+                  "Press Enter to save; Esc to cancel."),
                  "rebalance_table", jump_label="Target weights")
-        add_step(rebalance_content, "3  Show → Upside / downside",
+        add_step(rebalance_content, "3.  Show → Upside / downside",
                  "Enter price or percentage assumptions to compare cases.",
-                 "rebalance_show", jump_label="Upside / downside")
+                 jump_label="Upside / downside")
         add_picture(rebalance_content, "rebalance_cases", "Upside and downside case inputs")
         add_note(rebalance_content, "This worksheet does not place orders.")
 
         views_content = add_section("Views & data")
-        add_step(views_content, "1  Right-click a column heading",
-                 "Sort, set decimal places or hide the column. Columns → Show all columns restores hidden columns.",
-                 "views_columns", jump_label="Columns")
-        add_step(views_content, "2  View → Save current tab view",
-                 "Saved views remember filters and layout. Drag tabs to reorder; View also resets tab order, changes zoom and toggles the account summary.",
+        add_step(views_content, "1.  Right-click a column heading",
+                 ("Sort, set decimal places, or hide the column.",
+                  "Columns → Show all columns restores hidden columns."), jump_label="Columns")
+        add_step(views_content, "2.  View → Save current tab view",
+                 ("Saved views remember filters and layout. Drag sidebar sections to reorder them.",
+                  "Use the button beside the title to hide the sidebar. View can reset its order, change zoom, or adjust the account summary border and visibility."),
                  "views_view_menu", jump_label="View menu")
-        add_step(views_content, "3  File → export, back up or import",
-                 "Export Workbook and Create SQLite Backup are here. Import Data opens the dated history importer.",
-                 "views_file_menu", jump_label="File menu")
-        add_note(views_content, "Live values may be provisional. Hover over missing values for details.")
+        add_step(views_content, "3.  File → export, back up or import",
+                 ("Use Export Workbook or Create SQLite Backup to save data.",
+                  "Use Import Data for dated history."), jump_label="File menu")
+        add_note(views_content, "Live values may change. Hover over missing values for details.")
 
         shortcuts_content = add_section("Shortcuts")
-        next_tab_keys = (f"{native_text(shortcut('Ctrl+Tab', 'Meta+Tab'))} / "
-                         f"{native_text(shortcut('Ctrl+Shift+Tab', 'Meta+Shift+Tab'))}")
+        next_tab_keys = f"{native_text(NEXT_TAB)} / {native_text(PREVIOUS_TAB)}"
         help_keys = native_text(QKeySequence(QKeySequence.HelpContents)
                                 if sys.platform == "darwin" else QKeySequence("F1"))
         if sys.platform == "darwin":
@@ -2056,10 +2304,11 @@ class MainWindow(QMainWindow):
             return widget.geometry().translated(widget.parentWidget().mapTo(self, widget.parentWidget().rect().topLeft()))
         for index in range(self.tabs.count()):
             if self.tabs.tabBar().tabData(index) == target or self.tabs.tabText(index) == target:
-                bar = self.tabs.tabBar()
-                rect = bar.tabRect(index)
-                return QRect(bar.mapTo(self, rect.topLeft()), rect.size())
-        return QRect(self.tabs.mapTo(self, self.tabs.rect().topLeft()), self.tabs.size())
+                rect = self.navigation.visualItemRect(self.navigation.item(index))
+                viewport = self.navigation.viewport()
+                return QRect(viewport.mapTo(self, rect.topLeft()), rect.size())
+        return QRect(self.navigation.mapTo(self, self.navigation.rect().topLeft()),
+                     self.navigation.size())
 
     def _show_tutorial_step(self):
         steps = self._tutorial_steps()
@@ -2101,8 +2350,31 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentWidget(self._tutorial_original_tab)
         self._tutorial_original_tab = None
 
+    def eventFilter(self, watched, event):
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab
+                and event.modifiers() in (Qt.ControlModifier, Qt.ControlModifier | Qt.ShiftModifier)
+                and isinstance(watched, QWidget) and watched.window() is self):
+            return True
+        return super().eventFilter(watched, event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "navigation"):
+            show_sidebar = (self._sidebar_requested and
+                            (event.size().width() >= 1000 or self._sidebar_explicitly_shown))
+            if self.navigation.isHidden() == show_sidebar:
+                self.navigation.setVisible(show_sidebar)
+                if hasattr(self, "theme"):
+                    self._update_navigation_toggle()
+        if hasattr(self, "dashboard_layout"):
+            compact = event.size().width() < 1100
+            if compact != self._dashboard_compact:
+                self.dashboard_layout.setSpacing(PAGE_SPACING if compact else 16)
+                self._dashboard_compact = compact
+                if hasattr(self, "summary_layout"):
+                    self.summary_layout.setContentsMargins(*self._summary_margins(compact))
+        if hasattr(self, "summary_metrics_layout"):
+            self._layout_summary_metrics(event.size().width())
         if getattr(self, "_tutorial_index", -1) >= 0:
             self._show_tutorial_step()
 
@@ -2126,6 +2398,8 @@ class MainWindow(QMainWindow):
         self.show_summary_action.setChecked(self._show_account_summary)
         self.show_summary_action.setShortcut(shortcut("Ctrl+H", "Ctrl+Shift+H"))
         self.show_summary_action.toggled.connect(self._set_account_summary_visible)
+        self.summary_style_actions, self.summary_color_menu = self._add_summary_border_menu(view_menu)
+        self._sync_summary_border_menu()
         self.compact_summary_action = view_menu.addAction("Compact summary view")
         self.compact_summary_action.setCheckable(True)
         self.compact_summary_action.setShortcut(shortcut("Ctrl+M", "Ctrl+Shift+M"))
@@ -2154,7 +2428,7 @@ class MainWindow(QMainWindow):
             "Restore saved tab view",
             lambda: self.restore_default_view(self._current_table_name()) if self._current_table_name() else None)
         view_menu.addSeparator()
-        self.reset_tabs_action = view_menu.addAction("Reset tab order", self.reset_tab_order)
+        self.reset_tabs_action = view_menu.addAction("Reset sidebar order", self.reset_tab_order)
         view_menu.aboutToShow.connect(lambda: (self.save_view_action.setEnabled(self._current_table_name() is not None),
             self.restore_view_action.setEnabled(self._current_table_name() is not None and
                 self._saved_default_view(self._current_table_name()) is not None)))
@@ -2180,6 +2454,28 @@ class MainWindow(QMainWindow):
         help_menu.addAction(self.help_guide_action)
         help_menu.addSeparator()
         help_menu.addAction("Check for updates…", self.check_for_updates)
+
+    def _add_summary_border_menu(self, parent_menu):
+        border_menu = QMenu("Summary border", parent_menu)
+        parent_menu.addMenu(border_menu)
+        border_group = QActionGroup(border_menu)
+        border_group.setExclusive(True)
+        style_actions = {}
+        for style, title in BORDER_STYLES:
+            action = border_menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(style == self._summary_border_style)
+            border_group.addAction(action)
+            action.triggered.connect(lambda checked=False, choice=style: self._set_summary_border_style(choice))
+            style_actions[style] = action
+        presets = ((key, label, SUMMARY_BORDER_GRADIENTS["light"][key])
+                   for key, label in BORDER_PALETTES)
+        color_menu = ColorPaletteMenu("Border color", presets, SUMMARY_BORDER_SOLIDS,
+                                      self._summary_border_palette, self._summary_border_color,
+                                      border_menu)
+        border_menu.addMenu(color_menu)
+        color_menu.colorSelected.connect(self._set_summary_border_palette)
+        return style_actions, color_menu
 
     def check_for_updates(self):
         dialog = getattr(self, "_update_dialog", None)
@@ -2281,7 +2577,7 @@ class MainWindow(QMainWindow):
             source = self._tab_index(name)
             if source >= 0 and source != destination:
                 self.tabs.tabBar().moveTab(source, destination)
-        self.statusBar().showMessage("Tab order reset", 5000)
+        self.statusBar().showMessage("Sidebar order reset", 5000)
 
     def _saved_default_view(self, name):
         try:
@@ -2439,6 +2735,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             QMessageBox.warning(self, "Import Data", "Could not stop the history worker. Try closing the app again.")
             return
+        self.calcs_tab.suspend_editing()
         self.calcs_tab.save_view()
         for name, view in self.views.items():
             state = bytes(view.horizontalHeader().saveState().toBase64()).decode("ascii")
@@ -2455,6 +2752,7 @@ class MainWindow(QMainWindow):
             table.finish_layout_persistence()
         self.db.conn.close()
         QApplication.instance().removeEventFilter(self._table_click_away_filter)
+        QApplication.instance().removeEventFilter(self)
         super().closeEvent(event)
 
     def selected_row(self, name):
@@ -2571,6 +2869,9 @@ class MainWindow(QMainWindow):
         menu.addAction("Save current tab view", lambda checked=False, table=name: self.save_default_view(table))
         restore_action = menu.addAction("Restore saved tab view", lambda checked=False, table=name: self.restore_default_view(table))
         restore_action.setEnabled(self._saved_default_view(name) is not None)
+        if name == "Portfolio":
+            menu.addSeparator()
+            self._add_summary_border_menu(menu)
         return menu
 
     def _toolbar_context_menu(self, name, global_point):
@@ -2946,8 +3247,7 @@ class MainWindow(QMainWindow):
             self._encryption_process = subprocess.Popen(
                 command, cwd=workdir, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.setEnabled(False)
-            self._encryption_progress = QProgressDialog("Encrypting database…", None, 0, 0)
+            self._encryption_progress = QProgressDialog("Encrypting database…", None, 0, 0, self)
             self._encryption_progress.setWindowTitle("Encrypt Database")
             self._encryption_progress.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
             self._encryption_progress.setWindowModality(Qt.ApplicationModal)
@@ -2962,6 +3262,8 @@ class MainWindow(QMainWindow):
         self._resume_database_worker(self.db.path)
 
     def _pause_for_database_worker(self):
+        self.calcs_tab.suspend_editing()
+        self.setEnabled(False)
         if isinstance(self.market, IBKRMarketDataProvider):
             self.market.stop()
         for timer in (self.timer, self.refresh_timer, self.lots_refresh_timer,
@@ -2973,6 +3275,7 @@ class MainWindow(QMainWindow):
         reopened = Database(path)
         self.db.__dict__.update(reopened.__dict__)
         self.setEnabled(True)
+        self.calcs_tab.resume_editing()
         if start_services:
             self._start_database_services()
 
@@ -3032,8 +3335,7 @@ class MainWindow(QMainWindow):
             self._move_process = subprocess.Popen(
                 command, cwd=workdir, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.setEnabled(False)
-            self._move_progress = QProgressDialog("Copying and verifying database…", None, 0, 0)
+            self._move_progress = QProgressDialog("Copying and verifying database…", None, 0, 0, self)
             self._move_progress.setWindowTitle("Move database")
             self._move_progress.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
             self._move_progress.setWindowModality(Qt.ApplicationModal)

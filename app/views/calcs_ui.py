@@ -16,10 +16,12 @@ from app.finance.calcs import calculate_targets, scale_target_weights, scenario_
 from app.finance.calculations import choose_price, valid_price
 from app.market.market_data import IBKRMarketDataProvider
 from app.views import widgets
-from app.views.shortcuts import native_text
-from app.views.table_ui import InputReportTable, SortItem, build_header_menu
+from app.views.table_ui import (TABLE_ROW_HEIGHT, InputHoverOutline, InputReportTable,
+                                InputSpinBox, SortItem, build_header_menu,
+                                keep_spinbox_arrow_cursor, select_spinbox_text_on_click)
 from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
-                          style_toolbar_dropdown)
+                                set_zoom_height, style_combo_selection,
+                                style_toolbar_dropdown)
 
 
 def _text(value, places=2):
@@ -29,6 +31,8 @@ def _text(value, places=2):
 class CalcsTable(InputReportTable):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.show_input_hover_outline = True
+        self.viewport().setMouseTracking(True)
         self.cash_editor = None
 
     def keyPressEvent(self, event):
@@ -57,6 +61,7 @@ class CalcsTab(QWidget):
         self.setObjectName("calcsPage")
         self.db, self.service, self.portfolio_id = db, service, portfolio_id
         self._loading = False
+        self._edits_suspended = False
         self.market = None
         self.require_ibkr_ideas = False
         self._selected_contract = None
@@ -130,9 +135,7 @@ class CalcsTab(QWidget):
         self._completer.activated[str].connect(self._select_suggestion)
         self.idea_input.setCompleter(self._completer)
         add_row.addWidget(self.idea_input)
-        add_button = QPushButton("Add")
-        add_button.setObjectName("secondary")
-        add_button.clicked.connect(self.add_idea)
+        add_button = widgets.button("Add", self.add_idea)
         add_row.addWidget(add_button)
         add_row.addStretch()
         layout.addLayout(add_row)
@@ -145,7 +148,7 @@ class CalcsTab(QWidget):
         cash_panel.setObjectName("card")
         cash_panel.setMinimumHeight(92)
         cash_layout = QGridLayout(cash_panel)
-        cash_layout.setContentsMargins(12, 5, 12, 5)
+        cash_layout.setContentsMargins(14, 8, 14, 8)
         cash_layout.setHorizontalSpacing(18)
         title = widgets.section_title("Cash allocation")
         cash_layout.addWidget(title, 0, 0, 1, 3)
@@ -153,9 +156,12 @@ class CalcsTab(QWidget):
             label = widgets.field_label(title)
             cash_layout.addWidget(label, 1, column)
         self.cash_value = QLabel("—")
-        self.cash_editor = QDoubleSpinBox()
+        self.cash_editor = InputSpinBox()
         self._configure_weight_editor(self.cash_editor, cash=True)
-        self.cash_editor.editingFinished.connect(lambda: self._cash_changed(self.cash_editor.value()))
+        self.cash_editor.lineEdit().setMouseTracking(False)
+        self._cash_hover_outline = InputHoverOutline(self.cash_editor)
+        self.cash_editor.editingFinished.connect(
+            lambda: self._finish_spin_edit(self.cash_editor, self._cash_changed))
         self._watch_editor(self.cash_editor, None, 4)
         self.cash_gap = QLabel("—")
         for column, widget in enumerate((self.cash_value, self.cash_editor, self.cash_gap)):
@@ -164,7 +170,7 @@ class CalcsTab(QWidget):
             cash_layout.addWidget(widget, 2, column)
             cash_layout.setColumnStretch(column, 1)
         self.cash_editor.setFixedWidth(170)
-        self.cash_editor.setFixedHeight(25)
+        set_zoom_height(self.cash_editor, TABLE_ROW_HEIGHT)
         self.cash_editor.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         cash_layout.setAlignment(self.cash_editor, Qt.AlignLeft | Qt.AlignVCenter)
         for column in range(3):
@@ -175,25 +181,20 @@ class CalcsTab(QWidget):
 
         self.table = CalcsTable(0, len(self.HEADERS))
         self.table.cash_editor = self.cash_editor
+        self.table.hoveredInputChanged.connect(self._table_hover_changed)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.table.verticalHeader().setDefaultSectionSize(25)
         self.remove_row_shortcut = QShortcut(QKeySequence("Ctrl+-"), self.table)
         self.remove_row_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.remove_row_shortcut.activated.connect(self._zero_or_remove_selected_rows)
-        self.table.setToolTip(
-            "Tinted cells are editable. Drag column headers to reorder them. "
-            "Arrows move between cells; Enter saves and moves down; Esc cancels an edit. "
-            f"Select full rows with Shift+Space, then {native_text(self.remove_row_shortcut.key())} "
-            "to remove ideas or set holdings' targets to 0%.")
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(65)
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(self._header_menu)
         for column, width in enumerate((155, 90, 110, 112, 145, 138, 150,
-                                        118, 100, 180, 115, 110, 180, 115, 135, 80, 125)):
+                                        200, 100, 180, 115, 110, 180, 115, 135, 80, 125)):
             header.setSectionResizeMode(column, QHeaderView.Interactive)
             self.table.setColumnWidth(column, width)
         saved_header = self.db.setting(f"calcs_header_v6_{portfolio_id}")
@@ -208,9 +209,6 @@ class CalcsTab(QWidget):
                 if legacy_header:
                     self._restore_legacy_header(legacy_header)
         header.setSectionsMovable(True)
-        for column, minimum in ((4, 145), (8, 100), (9, 180), (11, 110), (12, 180)):
-            self.table.setColumnWidth(column, max(minimum, self.table.columnWidth(column)))
-        header.sectionResized.connect(self._keep_editor_column_wide)
         layout.addWidget(self.table)
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -529,7 +527,7 @@ class CalcsTab(QWidget):
         return True
 
     def _idea_price_changed(self, ticker, value):
-        if self._loading or ticker not in self.ideas or self.ideas[ticker].get("con_id"):
+        if self._loading or self._edits_suspended or ticker not in self.ideas or self.ideas[ticker].get("con_id"):
             return
         self.ideas[ticker]["price_usd"] = value if value > 0 else None
         self._save_ideas()
@@ -562,6 +560,17 @@ class CalcsTab(QWidget):
     def save_view(self):
         self.db.set_setting(f"calcs_header_v6_{self.portfolio_id}",
                             bytes(self.table.horizontalHeader().saveState().toBase64()).decode("ascii"))
+
+    def suspend_editing(self):
+        focus = QApplication.focusWidget()
+        if focus is not None and self.isAncestorOf(focus):
+            # Focus loss commits the current spin box while the database is open.
+            self.table.setFocus()
+        # Teardown or disabling can emit editingFinished after the database closes.
+        self._edits_suspended = True
+
+    def resume_editing(self):
+        self._edits_suspended = False
 
     def _restore_previous_header(self, encoded):
         previous_table = CalcsTable(0, 16)
@@ -688,7 +697,7 @@ class CalcsTab(QWidget):
         self.refresh()
 
     def _position_changed(self, position_id, value):
-        if self._loading:
+        if self._loading or self._edits_suspended:
             return
         # Set only the edited row. Untouched rows keep their implicit current
         # weight, so they keep tracking NAV and price changes.
@@ -700,7 +709,7 @@ class CalcsTab(QWidget):
         self.refresh()
 
     def _cash_changed(self, value):
-        if self._loading:
+        if self._loading or self._edits_suspended:
             return
         cash_target = self._rounded_weight(value / 100, cash=True)
         try:
@@ -731,7 +740,7 @@ class CalcsTab(QWidget):
         return result
 
     def _scenario_value_changed(self, position_id, side, value):
-        if self._loading:
+        if self._loading or self._edits_suspended:
             return
         scenario = self._scenario_for(position_id)
         if value == scenario[f"{side}_value"]:
@@ -742,7 +751,7 @@ class CalcsTab(QWidget):
         self.refresh()
 
     def _scenario_mode_changed(self, position_id, side, new_mode):
-        if self._loading:
+        if self._loading or self._edits_suspended:
             return
         focused = QApplication.focusWidget()
         keep_focus = (self._scenario_controls.get(focused, ())[:2] ==
@@ -790,6 +799,9 @@ class CalcsTab(QWidget):
         return item
 
     def _watch_editor(self, editor, position_id, column):
+        if (isinstance(editor, QDoubleSpinBox) and
+                not editor.hasFocus() and not editor.lineEdit().hasFocus()):
+            editor.setProperty("baselineValue", editor.value())
         if position_id is not None:
             commit = (lambda input_widget=editor, pid=position_id, col=column:
                       self._commit_table_editor(input_widget, pid, col)) if isinstance(editor, QDoubleSpinBox) else None
@@ -803,6 +815,13 @@ class CalcsTab(QWidget):
             self._keyboard_controls[line_edit] = (editor, position_id, column, baseline)
             line_edit.installEventFilter(self)
 
+    @staticmethod
+    def _finish_spin_edit(editor, callback):
+        value = editor.value()
+        if value != editor.property("baselineValue"):
+            editor.setProperty("baselineValue", value)
+            callback(value)
+
     def _commit_table_editor(self, editor, position_id, column):
         value = editor.value()
         if column == 4:
@@ -814,11 +833,6 @@ class CalcsTab(QWidget):
 
     def _row_for_position(self, position_id):
         return self.table.row_for_key(position_id)
-
-    def _keep_editor_column_wide(self, column, _old, width):
-        minimum = {4: 145, 8: 100, 9: 180, 11: 110, 12: 180}.get(column)
-        if minimum and 0 < width < minimum:
-            self.table.setColumnWidth(column, minimum)
 
     def _keep_idea_visible_after_sort(self, *_):
         if self._loading or not self.ideas:
@@ -841,6 +855,21 @@ class CalcsTab(QWidget):
         self.table.select_cell(row, column)
 
     def eventFilter(self, watched, event):
+        if watched in (self.cash_editor, self.cash_editor.lineEdit()):
+            keep_spinbox_arrow_cursor(watched, event)
+            select_spinbox_text_on_click(self.cash_editor, event)
+            if event.type() == QEvent.FocusIn:
+                self.table.selectionModel().clear()
+            if event.type() in (QEvent.Enter, QEvent.HoverEnter,
+                                QEvent.MouseMove, QEvent.HoverMove):
+                self.table._set_hovered_input(None)
+                self._cash_hover_outline.setGeometry(self.cash_editor.rect())
+                self._cash_hover_outline.raise_()
+                self._cash_hover_outline.show()
+            elif event.type() in (QEvent.Leave, QEvent.Hide) and watched is self.cash_editor:
+                self._cash_hover_outline.hide()
+            elif event.type() == QEvent.Resize and watched is self.cash_editor:
+                self._cash_hover_outline.setGeometry(self.cash_editor.rect())
         if event.type() == QEvent.KeyPress and watched in self._scenario_controls:
             if self._navigate_scenario(watched, event):
                 return True
@@ -888,6 +917,10 @@ class CalcsTab(QWidget):
                 self.table.select_cell(0, column, focus=True)
         event.accept()
         return True
+
+    def _table_hover_changed(self, editor):
+        if editor is not None:
+            self._cash_hover_outline.hide()
 
     def _navigate_scenario(self, watched, event):
         if event.modifiers() != Qt.NoModifier or event.key() not in CalcsTable.DIRECTIONS:
@@ -946,10 +979,10 @@ class CalcsTab(QWidget):
     def _weight_editor(self, row, value, callback, *, reuse=False):
         editor = self.table.cellWidget(row, 4) if reuse else None
         if not isinstance(editor, QDoubleSpinBox):
-            editor = QDoubleSpinBox()
+            editor = InputSpinBox()
             self._configure_weight_editor(editor)
             self.table.setCellWidget(row, 4, editor)
-            editor.editingFinished.connect(lambda: callback(editor.value()))
+            editor.editingFinished.connect(lambda: self._finish_spin_edit(editor, callback))
         if not editor.hasFocus():
             editor.blockSignals(True)
             editor.setValue(100 * value)
@@ -960,7 +993,7 @@ class CalcsTab(QWidget):
     def _idea_price_editor(self, row, ticker, price, *, reuse=False):
         editor = self.table.cellWidget(row, 7) if reuse else None
         if not isinstance(editor, QDoubleSpinBox):
-            editor = QDoubleSpinBox()
+            editor = InputSpinBox()
             editor.setObjectName("calcsTargetInput")
             editor.setButtonSymbols(QDoubleSpinBox.NoButtons)
             editor.setRange(0, 1_000_000_000)
@@ -969,13 +1002,12 @@ class CalcsTab(QWidget):
             editor.setSpecialValueText("Enter price")
             self.table.setCellWidget(row, 7, editor)
             editor.editingFinished.connect(lambda symbol=ticker, spin=editor:
-                                           self._idea_price_changed(symbol, spin.value()))
+                                           self._finish_spin_edit(spin, lambda value:
+                                                                  self._idea_price_changed(symbol, value)))
         if not editor.hasFocus():
             editor.blockSignals(True)
             editor.setValue(price or 0)
             editor.blockSignals(False)
-        self.table.setColumnWidth(7, max(self.table.columnWidth(7), editor.sizeHint().width() + 8))
-        editor.setToolTip("Manual USD price per share for this portfolio idea; used only for estimated shares and scenario prices")
         self._cell(row, 7, "", sort_value=price)
         self._watch_editor(editor, f"idea:{ticker}", 7)
 
@@ -985,11 +1017,11 @@ class CalcsTab(QWidget):
         value = scenario[f"{side}_value"]
         choice = self.table.cellWidget(row, mode_column) if reuse else None
         if not isinstance(choice, QComboBox):
-            choice = QComboBox()
+            choice = style_combo_selection(QComboBox())
             choice.setObjectName("calcsTargetInput")
             choice.addItem("Price", "price")
             choice.addItem("%", "percent")
-            choice.setFixedHeight(23)
+            set_zoom_height(choice, 28)
             self.table.setCellWidget(row, mode_column, choice)
             choice.currentIndexChanged.connect(
                 lambda _, pid=position_id, which=side, box=choice:
@@ -999,21 +1031,20 @@ class CalcsTab(QWidget):
         choice.blockSignals(False)
         editor = self.table.cellWidget(row, value_column) if reuse else None
         if not isinstance(editor, QDoubleSpinBox):
-            editor = QDoubleSpinBox()
+            editor = InputSpinBox()
             editor.setObjectName("calcsTargetInput")
             editor.setButtonSymbols(QDoubleSpinBox.NoButtons)
             editor.setRange(0, 1_000_000_000)
             editor.setDecimals(4)
             editor.setSpecialValueText("Enter")
-            editor.setFixedHeight(23)
+            set_zoom_height(editor, 28)
             self.table.setCellWidget(row, value_column, editor)
             editor.editingFinished.connect(
                 lambda pid=position_id, which=side, spin=editor:
-                self._scenario_value_changed(pid, which, spin.value()))
+                self._finish_spin_edit(spin, lambda value:
+                                       self._scenario_value_changed(pid, which, value)))
         editor.setSingleStep(1 if mode == "percent" else 0.5)
         editor.setSuffix(" %" if mode == "percent" else "")
-        editor.setToolTip("Enter a positive loss percentage" if side == "down" and mode == "percent" else
-                          f"Price in {currency}" if mode == "price" else "Enter a positive gain percentage")
         if not editor.hasFocus():
             editor.blockSignals(True)
             editor.setValue(value)
@@ -1065,13 +1096,8 @@ class CalcsTab(QWidget):
         selected_column = self.table.currentColumn()
         horizontal_scroll = self.table.horizontalScrollBar().value()
         vertical_scroll = self.table.verticalScrollBar().value()
-        focus = QApplication.focusWidget()
-        editor_focused = focus is not None and (self.table.isAncestorOf(focus) or
-                                                focus is self.cash_editor or self.cash_editor.isAncestorOf(focus))
         self._loading = True
         try:
-            if editor_focused:
-                self.table.setFocus()
             self.table.setUpdatesEnabled(False)
             self._keyboard_controls = {}
             self._scenario_controls = {}
@@ -1219,7 +1245,8 @@ class CalcsTab(QWidget):
                 cash_target = self.cash_target if self.mode == "proportional" else cash_weight
             if not isinstance(cash_target, (int, float)) or not math.isfinite(cash_target):
                 cash_target = 0
-            self.cash_editor.setValue(100 * cash_target)
+            if not self.cash_editor.hasFocus() and not self.cash_editor.lineEdit().hasFocus():
+                self.cash_editor.setValue(100 * cash_target)
             self._watch_editor(self.cash_editor, None, 4)
             cash_gap = calc.get("cash_gap")
             self.cash_gap.setText("—" if cash_gap is None else

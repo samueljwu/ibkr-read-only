@@ -28,9 +28,9 @@ def test_tutorial_walks_tabs_and_restores_starting_tab(tmp_path, monkeypatch):
             window.tutorial.next_button.click()
             app.processEvents()
             assert window.tabs.tabText(window.tabs.currentIndex()) == title
-            bar = window.tabs.tabBar()
-            tab_rect = bar.tabRect(window.tabs.currentIndex())
-            expected = QRect(bar.mapTo(window, tab_rect.topLeft()), tab_rect.size())
+            navigation = window.navigation
+            item_rect = navigation.visualItemRect(navigation.currentItem())
+            expected = QRect(navigation.viewport().mapTo(window, item_rect.topLeft()), item_rect.size())
             assert window.tutorial.target_rect == expected
             assert not window.tutorial.card.geometry().intersects(expected)
         assert window.tutorial.target_rect.isValid()
@@ -41,9 +41,10 @@ def test_tutorial_walks_tabs_and_restores_starting_tab(tmp_path, monkeypatch):
         app.processEvents()
         assert window.tutorial.geometry() == window.rect()
         assert window.tutorial.card.geometry().intersects(window.tutorial.rect())
-        bar = window.tabs.tabBar()
-        tab_rect = bar.tabRect(window.tabs.currentIndex())
-        assert window.tutorial.target_rect == QRect(bar.mapTo(window, tab_rect.topLeft()), tab_rect.size())
+        navigation = window.navigation
+        item_rect = navigation.visualItemRect(navigation.currentItem())
+        assert window.tutorial.target_rect == QRect(
+            navigation.viewport().mapTo(window, item_rect.topLeft()), item_rect.size())
 
         for _ in range(4):
             window.tutorial.next_button.click()

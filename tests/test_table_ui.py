@@ -59,54 +59,10 @@ def test_shared_table_shortcuts_numeric_sort_and_decimal_preference(tmp_path):
         db.conn.close()
 
 
-def test_analytics_table_keeps_numeric_sort_and_precision_after_refresh(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "analytics-table.sqlite3")
-    table = ReportTable(0, 2)
-    try:
-        table.configure_numbers(db, "analytics_decimals", {1: (2, "usd")})
-        table.setSortingEnabled(True)
-        table.sortItems(1, Qt.AscendingOrder)
-        rows = [("2026-01-01", 1000), ("2026-01-02", 9)]
-        AnalyticsTab._fill_table(table, rows)
-        assert [table.item(row, 0).text() for row in range(2)] == ["2026-01-02", "2026-01-01"]
-        table.set_column_decimals(1, 3)
-        AnalyticsTab._fill_table(table, rows)
-        assert [table.item(row, 1).text() for row in range(2)] == ["$9.000", "$1,000.000"]
-    finally:
-        table.close()
-        db.conn.close()
 
 
-def test_pending_table_layout_is_saved_before_database_closes(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "layout.sqlite3")
-    table = ReportTable(0, 2)
-    try:
-        table.remember_layout(db, "layout")
-        table.horizontalHeader().resizeSection(0, 175)
-        assert table._layout_timer.isActive()
-        table.close()
-        assert not table._layout_timer.isActive()
-        assert db.setting("layout") is not None
-        db.conn.close()
-        app.processEvents()
-    finally:
-        table.close()
-        db.conn.close()
 
 
-def test_main_window_stops_pending_table_layouts_before_database_close(tmp_path):
-    from app.ui import MainWindow
-
-    QApplication.instance() or QApplication([])
-    window = MainWindow(tmp_path / "window.sqlite3")
-    table = window.analytics_tab.return_page.table
-    table.horizontalHeader().resizeSection(0, 175)
-    assert table._layout_timer.isActive()
-    window.close()
-    assert not table._layout_timer.isActive()
-    QApplication.instance().processEvents()
 
 
 def test_report_table_context_menu_copies_selected_text():

@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo, QPalette
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo, QMouseEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QDialogButtonBox, QHeaderView,
@@ -15,16 +15,20 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 import app.ui as ui
+from app.views.typography import install_app_font
+from app.views.toolbar import Toolbar
 from app.views.calcs_ui import CalcsTab, CalcsTable
+from app.views.date_input import CalendarDateEdit, DatePickerCalendar
 from app.storage.database import Database
-from app.views.table_ui import InputReportTable, ReportTable
-from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING,
+from app.views.table_ui import TABLE_ROW_HEIGHT, InputReportTable, ReportTable
+from app.views.ui_theme import (CARD_MARGINS, COLORS, CONTROL_HEIGHT, TOOLBAR_GROUP_SPACING,
                           TOOLBAR_ITEM_SPACING, stylesheet)
 
 
 @pytest.fixture
 def window(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
+    install_app_font(app)
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "ui-consistency.sqlite3"))
     result = ui.MainWindow()
     result.resize(1500, 850)
@@ -103,10 +107,21 @@ def test_visible_inputs_fit_across_tabs_and_settings(window, theme, width):
             page.range_combo.setCurrentText("Custom")
         elif page is window.analytics_tab:
             page.range_combo.setCurrentText("Custom")
-            for section in (page.pnl_page, page.capital_page, page.exposure_page):
+            for section in (page.pnl_page, page.capital_page, page.exposure_page,
+                            page.return_page, page.levels_page, page.monthly_page):
                 page.sections.setCurrentWidget(section)
                 app.processEvents()
-                _assert_input_text_fits(page)
+                _assert_input_text_fits(section)
+                for toolbar in section.findChildren(Toolbar):
+                    if toolbar.isVisible():
+                        for item in toolbar.row.items:
+                            group = item.widget()
+                            if group.isVisible():
+                                assert group.x() >= 0 and group.geometry().right() < toolbar.width()
+            page.sections.setCurrentWidget(page.pnl_page)
+            page.pnl_display_combo.setCurrentText("Calendar")
+            app.processEvents()
+            _assert_input_text_fits(page.pnl_page)
         app.processEvents()
         _assert_input_text_fits(page)
     window.open_settings()
@@ -126,6 +141,235 @@ def test_zoomed_inputs_fit(window):
         window.tabs.setCurrentIndex(index)
         app.processEvents()
         _assert_input_text_fits(window.tabs.currentWidget())
+
+
+@pytest.mark.parametrize("theme", ("light", "dark"))
+def test_rebalance_input_hover_preserves_selection_and_cursor(tmp_path, theme):
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "input-hover.sqlite3")
+
+    class Service:
+        def portfolio_rows(self):
+            return [{"id": index, "display_ticker": f"SYNTH{index}",
+                     "position_qty": 1, "value": 100, "security_type": "STK"}
+                    for index in (1, 2, 3)]
+
+    tab = CalcsTab(db, Service(), 1)
+    try:
+        tab.resize(1500, 600)
+        tab.show()
+        tab.setStyleSheet(stylesheet(theme))
+        app.processEvents()
+        first = tab.table.cellWidget(tab._row_for_position(1), 4)
+        second = tab.table.cellWidget(tab._row_for_position(2), 4)
+        third = tab.table.cellWidget(tab._row_for_position(3), 4)
+        choice = tab.table.cellWidget(tab._row_for_position(2), 8)
+        cash = tab.cash_editor
+        border = COLORS[theme]["selection_border"]
+
+        def visible_border(editor):
+            point = editor.mapTo(tab.table.viewport(), QPoint(1, editor.height() // 2))
+            return tab.table.viewport().grab().toImage().pixelColor(point).name()
+
+        QTest.mouseMove(cash.lineEdit(), QPoint(4, 4))
+        assert not cash.lineEdit().hasFocus()
+        assert cash.lineEdit().cursor().shape() == Qt.ArrowCursor
+        assert tab._cash_hover_outline.isVisible()
+        assert cash.grab().toImage().pixelColor(1, cash.height() // 2).name() == border
+        QTest.mouseMove(first.lineEdit(), QPoint(4, 4))
+        assert not tab._cash_hover_outline.isVisible()
+        assert visible_border(first) == border
+        assert not first.lineEdit().hasFocus()
+        QTest.mouseMove(second.lineEdit(), QPoint(4, 4))
+        assert visible_border(first) != border
+        assert visible_border(second) == border
+        QTest.mouseMove(first.lineEdit(), QPoint(4, 4))
+        assert visible_border(first) == border
+        assert visible_border(second) != border
+        header = tab.table.horizontalHeader()
+        header.resizeSection(3, header.sectionSize(3) + 1)
+        assert not tab.table._hover_outline.isVisible()
+        QTest.mouseMove(first.lineEdit(), QPoint(5, 5))
+        assert visible_border(first) == border
+
+        QTest.mouseClick(first.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+        assert not first.hasMouseTracking() and not first.lineEdit().hasMouseTracking()
+        assert not second.hasMouseTracking() and not second.lineEdit().hasMouseTracking()
+        assert not cash.lineEdit().hasMouseTracking()
+        assert QApplication.focusWidget() in (first, first.lineEdit())
+        assert first.lineEdit().selectedText()
+        assert first.property("activeCell") is True
+        assert (tab.table.currentRow(), tab.table.currentColumn()) == (tab._row_for_position(1), 4)
+        selected = tab.table.selectedIndexes()
+        assert len(selected) == 1 and (selected[0].row(), selected[0].column()) == (tab._row_for_position(1), 4)
+        row = tab._row_for_position(1)
+        QTest.mouseMove(tab.table.viewport(), tab.table.visualItemRect(tab.table.item(row, 3)).center())
+        assert tab.table.selectedIndexes() == selected
+        assert QApplication.focusWidget() in (first, first.lineEdit())
+        assert not tab.table._hover_outline.isVisible()
+        second_point = second.mapTo(tab.table.viewport(), QPoint(4, second.height() // 2))
+        QTest.mouseMove(tab.table.viewport(), second_point)
+        assert tab.table._hovered_input is second
+        assert tab.table.selectedIndexes() == selected
+
+        for target in (second.lineEdit(), choice, cash.lineEdit(), first.lineEdit()):
+            QTest.mouseMove(target, QPoint(4, 4))
+            app.processEvents()
+            assert QApplication.focusWidget() in (first, first.lineEdit())
+            assert first.lineEdit().selectedText()
+            assert first.property("activeCell") is True
+            assert tab.table.selectedIndexes() == selected
+            assert tab.table.currentIndex() == selected[0]
+            if target is not choice:
+                assert target.cursor().shape() == Qt.ArrowCursor
+        QTest.mouseMove(second.lineEdit(), QPoint(4, 4))
+        assert visible_border(first) == border
+        assert visible_border(second) == border
+        assert tab.table._hover_outline.isVisible()
+        assert tab.table._hover_outline.parentWidget() is tab.table.viewport()
+        assert tab.table._hover_outline.geometry() == second.geometry()
+        # A late event from the previous cell must not override the actual
+        # pointer location or the editor that still owns keyboard focus.
+        QApplication.sendEvent(first, QMouseEvent(
+            QEvent.MouseMove, QPointF(4, 4),
+            QPointF(first.mapToGlobal(QPoint(4, 4))),
+            Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+        assert tab.table._hovered_input is second
+        assert tab.table._hover_outline.geometry() == second.geometry()
+        assert QApplication.focusWidget() in (first, first.lineEdit())
+        assert first.lineEdit().selectedText()
+        QApplication.sendEvent(first, QEvent(QEvent.Leave))
+        assert tab.table._hovered_input is second
+        assert tab.table._hover_outline.isVisible()
+        QTest.mouseMove(first.lineEdit(), QPoint(4, first.lineEdit().height() + 5))
+        assert tab.table._hovered_input is second
+
+        # A move delivered to the selected outer widget can carry coordinates
+        # inside the next row. The pointer location must determine the border.
+        second_on_first = first.mapFromGlobal(second.mapToGlobal(QPoint(4, second.height() // 2)))
+        QTest.mouseMove(first, second_on_first)
+        assert tab.table._hovered_input is second
+        assert tab.table._hover_outline.isVisible()
+        assert tab.table._hover_outline.geometry() == second.geometry()
+
+        x = second.lineEdit().mapToGlobal(QPoint(4, 4)).x()
+        lower_y = second.lineEdit().mapToGlobal(QPoint(4, 4)).y()
+        upper_y = first.lineEdit().mapToGlobal(QPoint(4, 4)).y()
+        for start_y, end_y in ((lower_y, upper_y), (upper_y, lower_y)):
+            step = -2 if start_y > end_y else 2
+            for y in range(start_y, end_y + step, step):
+                point = QPoint(x, y)
+                target = app.widgetAt(point)
+                if target is not None:
+                    QTest.mouseMove(target, target.mapFromGlobal(point))
+                    if target in (first.lineEdit(), second.lineEdit()):
+                        assert target.cursor().shape() == Qt.ArrowCursor
+                        assert tab.table._hovered_input is target.parentWidget()
+                        assert tab.table._hover_outline.isVisible()
+                        assert tab.table._hover_outline.geometry() == target.parentWidget().geometry()
+            app.processEvents()
+            assert QApplication.focusWidget() in (first, first.lineEdit())
+            assert tab.table.selectedIndexes() == selected
+        # The same path must behave identically when the lower input is active.
+        QTest.mouseClick(second.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+        selected = tab.table.selectedIndexes()
+        assert len(selected) == 1 and selected[0].row() == tab._row_for_position(2)
+        # Native moves crossing editor edges can reach the viewport. QTest's
+        # usual mouseMove dispatches to a child instead, missing Qt's
+        # mouseMoveEvent -> edit(NoEditTriggers) -> persistent-editor setFocus.
+        for target in (third, first, second, first, third, choice):
+            QTest.mouseMove(target, QPoint(4, 4))
+            position = target.mapTo(tab.table.viewport(), QPoint(4, 4))
+            QApplication.sendEvent(tab.table.viewport(), QMouseEvent(
+                QEvent.MouseMove, QPointF(position),
+                QPointF(tab.table.viewport().mapToGlobal(position)),
+                Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+            assert QApplication.focusWidget() in (second, second.lineEdit())
+            assert second.lineEdit().selectedText()
+            assert tab.table.selectedIndexes() == selected
+            assert tab.table._hovered_input is target
+            assert tab.table._hover_outline.geometry() == target.geometry()
+        QTest.mouseMove(third.lineEdit(), QPoint(4, 4))
+        assert tab.table._hovered_input is third
+        assert tab.table._hover_outline.geometry() == third.geometry()
+        assert visible_border(third) == border
+        assert third.lineEdit().cursor().shape() == Qt.ArrowCursor
+        assert QApplication.focusWidget() in (second, second.lineEdit())
+        assert second.lineEdit().selectedText()
+        assert tab.table.selectedIndexes() == selected
+        for start_y, end_y in ((lower_y, upper_y), (upper_y, lower_y)):
+            step = -2 if start_y > end_y else 2
+            for y in range(start_y, end_y + step, step):
+                point = QPoint(x, y)
+                target = app.widgetAt(point)
+                if target is not None:
+                    QTest.mouseMove(target, target.mapFromGlobal(point))
+                    if target in (first.lineEdit(), second.lineEdit()):
+                        assert target.cursor().shape() == Qt.ArrowCursor
+                        assert tab.table._hovered_input is target.parentWidget()
+                        assert tab.table._hover_outline.isVisible()
+                        assert tab.table._hover_outline.geometry() == target.parentWidget().geometry()
+            app.processEvents()
+            assert QApplication.focusWidget() in (second, second.lineEdit())
+            assert second.lineEdit().selectedText()
+            assert tab.table.selectedIndexes() == selected
+        QTest.mouseClick(first.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+
+        first.lineEdit().setCursor(Qt.IBeamCursor)
+        app.processEvents()
+        assert first.lineEdit().cursor().shape() == Qt.ArrowCursor
+
+        choice.setFocus()
+        choice.showPopup()
+        app.processEvents()
+        assert choice.view().isVisible()
+        choice_index = tab.table.currentIndex()
+        QTest.mouseMove(first.lineEdit(), QPoint(4, 4))
+        assert choice.view().isVisible()
+        assert tab.table.currentIndex() == choice_index
+        choice.hidePopup()
+
+        QTest.mouseMove(cash.lineEdit(), QPoint(4, 4))
+        cash.setValue(12.34)
+        QTest.mouseClick(cash.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+        assert QApplication.focusWidget() in (cash, cash.lineEdit())
+        assert cash.lineEdit().selectedText() == "12.34"
+        assert not tab.table.selectedIndexes()
+        assert not tab.table.currentIndex().isValid()
+        QTest.mouseClick(cash.lineEdit(), Qt.LeftButton,
+                         pos=QPoint(cash.lineEdit().width() - 4, cash.lineEdit().height() // 2))
+        app.processEvents()
+        assert not cash.lineEdit().selectedText()
+        QTest.mouseMove(second.lineEdit(), QPoint(4, 4))
+        assert QApplication.focusWidget() in (cash, cash.lineEdit())
+        assert not tab.table.selectedIndexes()
+        QTest.mouseClick(second.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+        assert (tab.table.currentRow(), tab.table.currentColumn()) == (tab._row_for_position(2), 4)
+        assert second.lineEdit().selectedText()
+        QTest.mouseClick(cash, Qt.LeftButton, pos=QPoint(2, cash.height() // 2))
+        app.processEvents()
+        assert cash.lineEdit().selectedText() == cash.text().removesuffix(" %")
+        QTest.mouseClick(second.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+
+        second.lineEdit().setText("22.00 %")
+        QTest.mouseMove(first.lineEdit(), QPoint(4, 4))
+        assert tab.targets == {}
+        assert QApplication.focusWidget() in (second, second.lineEdit())
+        assert second.property("activeCell") is True
+        QTest.mouseClick(first.lineEdit(), Qt.LeftButton)
+        app.processEvents()
+        assert tab.targets["2"] == 0.22
+        assert first.property("activeCell") is True
+        assert second.property("activeCell") is False
+    finally:
+        tab.close()
+        db.conn.close()
 
 
 def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
@@ -157,7 +401,7 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
                 _assert_input_text_fits(tab)
                 for position_id in (1, "idea:NEW"):
                     row = tab._row_for_position(position_id)
-                    assert tab.table.rowHeight(row) == 25
+                    assert tab.table.rowHeight(row) == TABLE_ROW_HEIGHT
                     weight = tab.table.cellWidget(row, 4)
                     assert weight.buttonSymbols() == QAbstractSpinBox.NoButtons
                     assert weight.height() >= weight.sizeHint().height()
@@ -173,10 +417,33 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
                         assert widget.height() <= tab.table.rowHeight(row)
                 assert tab.cash_editor.buttonSymbols() == QAbstractSpinBox.NoButtons
                 assert tab.cash_editor.height() == tab.table.verticalHeader().defaultSectionSize()
-                tab.table.setColumnWidth(8, 100)
-                tab.table.setColumnWidth(4, 100)
-                assert tab.table.columnWidth(8) >= 100
-                assert tab.table.columnWidth(4) >= 145
+                row = tab._row_for_position(1)
+                weight = tab.table.cellWidget(row, 4)
+                mode = tab.table.cellWidget(row, 8)
+                tab.table.select_cell(row, 4, focus=True)
+                app.processEvents()
+                assert weight.property("activeCell") is True
+                assert (weight.grab().toImage().pixelColor(0, weight.height() // 2).name() ==
+                        COLORS[theme]["selection_border"])
+                tab.table.select_cell(row, 8, focus=True)
+                app.processEvents()
+                assert weight.property("activeCell") is False
+                assert mode.property("activeCell") is True
+                assert (mode.grab().toImage().pixelColor(0, mode.height() // 2).name() ==
+                        COLORS[theme]["selection_border"])
+                tab.table.select_cell(row, 3, focus=True)
+                assert mode.property("activeCell") is False
+                header = tab.table.horizontalHeader()
+                header_x = header.sectionViewportPosition(3) + 2
+                header_border = header.viewport().grab().toImage().pixelColor(
+                    header_x, header.height() - 1).name()
+                assert header_border == COLORS[theme]["line"]
+        resized = {4: 95, 7: 120, 8: 80, 9: 100, 11: 80, 12: 100}
+        for column, width in resized.items():
+            tab.table.setColumnWidth(column, width)
+            assert tab.table.columnWidth(column) == width
+        tab.refresh()
+        assert all(tab.table.columnWidth(column) == width for column, width in resized.items())
     finally:
         tab.close()
         db.conn.close()
@@ -264,8 +531,8 @@ def test_toolbar_labels_spacing_and_alignment(window):
         assert abs(label.mapTo(window, QPoint(0, label.height() // 2)).y() -
                    control.mapTo(window, QPoint(0, control.height() // 2)).y()) <= 2
         assert control.objectName() == "toolbarDropdown"
-        assert control.maximumHeight() == 32
-        assert control.minimumHeight() >= 31
+        assert control.maximumHeight() == CONTROL_HEIGHT
+        assert control.minimumHeight() == CONTROL_HEIGHT
 
     for name, label_text, control in (
             ("Portfolio", "Show", None),
@@ -284,10 +551,11 @@ def test_toolbar_labels_spacing_and_alignment(window):
     check_pair(_label(window.cash_tab.range_controls, "Range"), window.cash_tab.range_combo)
 
     window.tabs.setCurrentWidget(window.analytics_tab)
-    window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.pnl_page)
+    window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.capital_page)
     app.processEvents()
-    check_pair(_label(window.analytics_tab, "Chart"), window.analytics_tab.metric_combo)
-    check_pair(_label(window.analytics_tab, "Range"), window.analytics_tab.range_combo)
+    check_pair(_label(window.analytics_tab, "Chart"), window.analytics_tab.capital_combo)
+    check_pair(_label(window.analytics_tab.capital_controls, "Range"),
+               window.analytics_tab.capital_controls.range_combo)
     window.analytics_tab.sections.setCurrentWidget(window.analytics_tab.exposure_page)
     app.processEvents()
     exposure = window.analytics_tab.exposure_page
@@ -330,11 +598,48 @@ def test_body_fonts_page_margins_and_cash_alignment(window, theme):
 
     assert _margins(window.cash_tab) == _margins(window.analytics_tab) == _margins(window.calcs_tab)
     assert len({_margins(window.views[name].parentWidget()) for name in window.views}) == 1
-    assert window.cash_tab.summary_list.contentsMargins().left() == 12
-    assert window.cash_tab.summary_list.contentsMargins().right() == 12
+    assert window.cash_tab.summary_list.contentsMargins().left() == CARD_MARGINS[0]
+    assert window.cash_tab.summary_list.contentsMargins().right() == CARD_MARGINS[2]
     amounts = window.cash_tab.summary_content.findChildren(QLabel, "cashAmount")
     assert amounts
     assert all(label.alignment() & Qt.AlignRight for label in amounts)
+
+
+def test_overview_summary_reflows_without_losing_metrics(window):
+    layout = window.summary_metrics_layout
+    cells = window.summary_metric_cells
+    labels = [cell.findChild(QLabel, "metricLabel") for cell in cells]
+    values = list(window.metric_values.values())
+    assert window.sync_button.text() == "Sync"
+    assert len({label.fontMetrics().height() for label in labels}) == 1
+    assert len({value.fontMetrics().height() for value in values}) == 1
+    assert labels[0].fontMetrics().height() < values[0].fontMetrics().height()
+    assert _label(window.grid_tabs["Portfolio"], "Positions").isVisible()
+    assert all(layout.itemAtPosition(0, index).widget() is cell
+               for index, cell in enumerate(cells))
+
+    window.resize(900, 850)
+    QApplication.instance().processEvents()
+    assert all(layout.itemAtPosition(index // 3, index % 3).widget() is cell
+               for index, cell in enumerate(cells))
+    assert all(cell.isVisible() for cell in cells)
+
+
+def test_grid_row_numbers_fit_the_shared_row_height(window):
+    app = QApplication.instance()
+    position = window.db.add_position({"display_ticker": "SYNTH", "ib_symbol": "SYNTH"})
+    window.db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                         "side": "BUY", "quantity": 1, "price": 10})
+    window.service.matching.rebuild_auto([position])
+    window._refresh_models()
+    assert all(view.model().rowCount() for view in window.views.values())
+    for theme in ("light", "dark"):
+        window._apply_theme(theme)
+        for zoom in (100, 150):
+            window.set_zoom(zoom)
+            app.processEvents()
+            for view in window.views.values():
+                assert view.verticalHeader().sectionSizeHint(0) <= view.rowHeight(0)
 
 
 def test_data_tables_keep_shared_sorting_and_filtering_contract(window):
@@ -354,9 +659,15 @@ def test_data_tables_keep_shared_sorting_and_filtering_contract(window):
         assert table.editTriggers() == QAbstractItemView.NoEditTriggers
         assert not table.wordWrap()
         assert not table.showGrid()
-        assert table.verticalHeader().defaultSectionSize() == 25
+        assert table.verticalHeader().defaultSectionSize() == TABLE_ROW_HEIGHT
+        if table.model().rowCount():
+            assert table.rowHeight(0) == TABLE_ROW_HEIGHT
         assert table.horizontalHeader().sectionsClickable()
         assert table.horizontalHeader().sectionsMovable()
+    window.set_zoom(120)
+    for table in (*grid_views, *report_tables):
+        assert table.verticalHeader().defaultSectionSize() == round(TABLE_ROW_HEIGHT * 1.2)
+    window.set_zoom(100)
     assert all(table.isSortingEnabled() for table in report_tables)
     for name, view in window.views.items():
         assert view.horizontalHeader().sectionsMovable()
@@ -383,11 +694,43 @@ def test_data_tables_keep_shared_sorting_and_filtering_contract(window):
 def test_shared_cards_and_buttons_follow_theme(window, theme):
     window._apply_theme(theme)
     QApplication.instance().processEvents()
-    cards = (window.summary,
-             window.analytics_tab.findChild(QWidget, "analyticsSummary"),
-             window.cash_tab.summary_content)
+    cards = (window.summary, window.cash_tab.summary_content)
     assert all(card.palette().color(QPalette.Window).name() == COLORS[theme]["surface"]
                for card in cards)
+    assert window.sync_button.palette().color(QPalette.Button).name() == COLORS[theme]["sync_action"]
+    window.tabs.setCurrentIndex(window._tab_index("Trades"))
+    QApplication.instance().processEvents()
+    combo = window.trade_side_combo
+    assert not combo.font().bold()
+    window.tabs.setFocus()
+    QApplication.instance().processEvents()
+    border = combo.grab().toImage().pixelColor(0, combo.height() // 2).name()
+    assert border == COLORS[theme]["line"]
+    columns = next(button for button in window.findChild(QWidget, "TradesToolbar").findChildren(QPushButton)
+                   if button.text() == "Columns")
+    for control in (combo, columns):
+        QTest.mouseMove(control, QPoint(control.width() // 2, control.height() // 2))
+        QApplication.instance().processEvents()
+        assert control.grab().toImage().pixelColor(0, control.height() // 2).name() == COLORS[theme]["line"]
+    combo.setFocus()
+    QApplication.instance().processEvents()
+    border = combo.grab().toImage().pixelColor(0, combo.height() // 2).name()
+    assert border == COLORS[theme]["line"]
+    assert combo.grab().toImage().pixelColor(1, combo.height() // 2).name() != COLORS[theme]["selection_border"]
+    combo.showPopup()
+    QApplication.instance().processEvents()
+    border = combo.grab().toImage().pixelColor(0, combo.height() // 2).name()
+    assert border == COLORS[theme]["selection_border"]
+    combo.hidePopup()
+    cash_index = window._tab_index("Cash")
+    navigation = window.navigation
+    QTest.mouseClick(navigation.viewport(), Qt.LeftButton,
+                     pos=navigation.visualItemRect(navigation.item(cash_index)).center())
+    QApplication.instance().processEvents()
+    cash_combo = window.cash_tab.range_combo
+    cash_image = cash_combo.grab().toImage()
+    assert cash_image.pixelColor(0, cash_combo.height() // 2).name() != COLORS[theme]["selection_border"]
+    assert cash_image.pixelColor(1, cash_combo.height() // 2).name() != COLORS[theme]["selection_border"]
     cash_panel = window.calcs_tab.findChild(QWidget, "card")
     assert cash_panel.palette().color(QPalette.Window).name() == COLORS[theme]["surface"]
     secondary = [button for button in window.findChildren(QPushButton)
@@ -401,6 +744,40 @@ def test_shared_cards_and_buttons_follow_theme(window, theme):
         columns = next(button for button in toolbar.findChildren(QPushButton)
                        if button.text() == "Columns")
         assert columns.palette().color(QPalette.Button).name() == COLORS[theme]["surface"]
+    columns.setFocus()
+    QApplication.instance().processEvents()
+    border = columns.grab().toImage().pixelColor(0, columns.height() // 2).name()
+    assert border == COLORS[theme]["line"]
+    menu = columns.menu()
+    menu.popup(columns.mapToGlobal(QPoint(0, columns.height())))
+    QApplication.instance().processEvents()
+    border = columns.grab().toImage().pixelColor(1, columns.height() // 2).name()
+    assert border == COLORS[theme]["selection_border"]
+    action = next(action for action in menu.actions() if action.text() == "Instrument")
+    menu.setActiveAction(action)
+    QApplication.instance().processEvents()
+    action_rect = menu.actionGeometry(action)
+    choice_border = menu.grab().toImage().pixelColor(action_rect.left() + 1,
+                                                     action_rect.center().y()).name()
+    assert choice_border == COLORS[theme]["selection_border"]
+    menu.hide()
+    window.open_history_import()
+    dialog = window.history_import_dialog
+    dialog.source.setFocus()
+    QApplication.instance().processEvents()
+    border = dialog.source.grab().toImage().pixelColor(0, dialog.source.height() // 2).name()
+    assert border == COLORS[theme]["line"]
+    dialog.close()
+
+
+def test_date_fields_share_calendar_and_follow_theme(window):
+    editors = (window.cash_tab.start_date, window.cash_tab.end_date,
+               window.analytics_tab.start_date, window.analytics_tab.end_date)
+    assert all(isinstance(editor, CalendarDateEdit) for editor in editors)
+    assert all(isinstance(editor.calendarWidget(), DatePickerCalendar) for editor in editors)
+    for theme in ("dark", "light"):
+        window._apply_theme(theme)
+        assert all(editor.calendarWidget().colors is COLORS[theme] for editor in editors)
 
 
 def test_match_lots_availability_follows_selection_and_click_away(window):
@@ -491,7 +868,35 @@ def test_history_dialog_uses_shared_theme_and_compact_controls(window, theme):
         edit = date_input.line_edit
         assert edit.width() >= edit.fontMetrics().horizontalAdvance(edit.text()) + 12
     assert not dialog.details.isVisible()
+    for button in (dialog.older_import_button, dialog.from_date.calendar_button,
+                   dialog.to_date.calendar_button):
+        dialog.source.setFocus()
+        QApplication.instance().processEvents()
+        assert button.grab().toImage().pixelColor(1, button.height() // 2).name() != COLORS[theme]["selection_border"]
+        button.setFocus()
+        QApplication.instance().processEvents()
+        assert button.grab().toImage().pixelColor(1, button.height() // 2).name() == COLORS[theme]["selection_border"]
+    assert dialog.from_date.calendar_button.focusPolicy() == Qt.ClickFocus
     dialog.close()
+
+
+def test_startup_tables_have_no_selected_or_current_cell(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "startup-selection.sqlite3"
+    seed = Database(path)
+    seed.add_position({"display_ticker": "SYNTH", "ib_symbol": "SYNTH"})
+    seed.conn.close()
+    monkeypatch.setattr(ui, "Database", lambda: Database(path))
+    window = ui.MainWindow()
+    window.show()
+    app.processEvents()
+    try:
+        assert window.models["Portfolio"].rowCount() == 1
+        for view in (*window.views.values(), *window.findChildren(ReportTable)):
+            assert not view.selectedIndexes()
+            assert not view.currentIndex().isValid()
+    finally:
+        window.close()
 
 
 def test_input_table_keyboard_contract_covers_spin_combo_and_text(tmp_path):
@@ -599,6 +1004,7 @@ def test_rebalance_registers_every_table_input_with_shared_navigation(tmp_path):
         app.processEvents()
         table = tab.table
         assert isinstance(table, InputReportTable)
+        assert not table.toolTip()
         for identity, columns in ((1, (4, 8, 9, 11, 12)),
                                   ("idea:NEW", (4, 7, 8, 9, 11, 12))):
             for column in columns:
@@ -606,6 +1012,10 @@ def test_rebalance_registers_every_table_input_with_shared_navigation(tmp_path):
                 widget = table.cellWidget(row, column)
                 assert isinstance(widget, (QAbstractSpinBox, QComboBox))
                 assert widget in table._input_bindings
+                assert not widget.toolTip()
+                if isinstance(widget, QAbstractSpinBox):
+                    assert widget.lineEdit().cursor().shape() == Qt.ArrowCursor
+                    assert not widget.lineEdit().hasMouseTracking()
                 table.select_cell(row, column, focus=True)
                 widget.setFocus()
                 target = widget.lineEdit() if isinstance(widget, QAbstractSpinBox) else widget
@@ -634,12 +1044,33 @@ def test_rebalance_registers_every_table_input_with_shared_navigation(tmp_path):
         QTest.keyClick(target.lineEdit(), Qt.Key_Right)
         assert table.currentColumn() == 8
         assert header.visualIndex(8) == 5
+        table.select_cell(row, 3, focus=True)
+        target = table.cellWidget(row, 4)
+        QTest.mouseMove(target.lineEdit(), QPoint(8, target.lineEdit().height() // 2))
+        app.processEvents()
+        assert not target.lineEdit().selectedText()
+        assert target.lineEdit().cursor().shape() == Qt.ArrowCursor
+        QTest.mouseClick(target.lineEdit(), Qt.LeftButton,
+                         pos=QPoint(8, target.lineEdit().height() // 2))
+        app.processEvents()
+        assert table.currentColumn() == 4
+        assert target.lineEdit().selectedText()
+        assert target.lineEdit().cursor().shape() == Qt.ArrowCursor
+        QTest.mouseClick(target.lineEdit(), Qt.LeftButton,
+                         pos=QPoint(8, target.lineEdit().height() // 2))
+        app.processEvents()
+        assert not target.lineEdit().selectedText()
+        table.setFocus()
+        app.processEvents()
+        assert target.lineEdit().cursor().shape() == Qt.ArrowCursor
+        table.setColumnWidth(4, 95)
         tab.save_view()
     finally:
         tab.close()
     reopened = CalcsTab(db, Service(), 1)
     try:
         assert reopened.table.horizontalHeader().visualIndex(8) == 5
+        assert reopened.table.columnWidth(4) == 95
     finally:
         reopened.close()
         db.conn.close()
@@ -1123,7 +1554,7 @@ def test_every_report_table_follows_the_shared_table_contract(window, monkeypatc
         assert not table.wordWrap()
         assert not table.showGrid()
         assert not table.verticalHeader().isVisible()
-        assert table.verticalHeader().defaultSectionSize() == 25
+        assert table.verticalHeader().defaultSectionSize() == TABLE_ROW_HEIGHT
         assert table.horizontalHeader().sectionsMovable()
     details_dialog.close()
 
@@ -1151,6 +1582,27 @@ def test_analytics_subtabs_are_movable_and_persist_order(tmp_path, monkeypatch):
         assert [bar.tabData(i) for i in range(bar.count())][-1] == order_before[0]
     finally:
         reopened.close()
+
+
+def test_analytics_subtabs_stay_visible_while_section_scrolls(window):
+    app = QApplication.instance()
+    window.resize(1000, 450)
+    window.tabs.setCurrentWidget(window.analytics_tab)
+    sections = window.analytics_tab.sections
+    sections.setCurrentWidget(window.analytics_tab.pnl_page)
+    app.processEvents()
+
+    scroller = window.analytics_tab.pnl_page.findChild(QScrollArea, "analyticsScroller")
+    bar = sections.tabBar()
+    before = bar.mapToGlobal(QPoint(0, 0)).y()
+    scrollbar = scroller.verticalScrollBar()
+    assert scrollbar.maximum() > 0
+    scrollbar.setValue(scrollbar.maximum())
+    app.processEvents()
+
+    assert scrollbar.value() == scrollbar.maximum()
+    assert bar.isVisible()
+    assert bar.mapToGlobal(QPoint(0, 0)).y() == before
 
 
 def test_section_titles_share_one_font_size_and_weight(window):

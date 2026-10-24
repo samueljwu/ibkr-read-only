@@ -8,10 +8,11 @@ import tempfile
 
 from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from app.platform.app_update import RELEASES_API, MAX_DOWNLOAD_BYTES, installed_app_path, select_update
 from app.version import VERSION
+from app.views import widgets
 
 
 class UpdateDialog(QDialog):
@@ -34,9 +35,17 @@ class UpdateDialog(QDialog):
         self.message = QLabel(f"Checking for updates to version {VERSION}…")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
-        self.progress = QProgressBar()
+        progress_row = QHBoxLayout()
+        self.progress = widgets.progress_bar()
+        self.progress.setTextVisible(False)
         self.progress.setVisible(False)
-        layout.addWidget(self.progress)
+        progress_row.addWidget(self.progress, 1)
+        self.progress_percent = QLabel("0%")
+        self.progress_percent.setObjectName("progressPercent")
+        self.progress_percent.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.progress_percent.setVisible(False)
+        progress_row.addWidget(self.progress_percent)
+        layout.addLayout(progress_row)
         buttons = QHBoxLayout()
         buttons.addStretch()
         self.action = QPushButton("Download and install")
@@ -95,6 +104,8 @@ class UpdateDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
+        self.progress_percent.setText("0%")
+        self.progress_percent.setVisible(True)
         try:
             self._download_dir = Path(tempfile.mkdtemp(prefix="ibkr-dashboard-update-"))
             self._download_file = (self._download_dir / self._update.name).open("wb")
@@ -125,7 +136,9 @@ class UpdateDialog(QDialog):
 
     def _show_progress(self, received, total):
         if total > 0:
-            self.progress.setValue(min(100, int(received * 100 / total)))
+            value = min(100, int(received * 100 / total))
+            self.progress.setValue(value)
+            self.progress_percent.setText(f"{value}%")
 
     def _downloaded(self):
         reply = self._reply
@@ -153,6 +166,7 @@ class UpdateDialog(QDialog):
     def _failed(self, exc):
         self._cleanup_download()
         self.progress.setVisible(False)
+        self.progress_percent.setVisible(False)
         self.message.setText(f"Could not install update: {exc}")
         self.action.setEnabled(self._update is not None and installed_app_path() is not None)
         self._installing = False

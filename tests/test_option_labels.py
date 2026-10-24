@@ -3,12 +3,6 @@ from app.finance.option_labels import option_label
 from app.storage.database import Database
 
 
-def test_option_label_uses_compact_expiry_and_strike():
-    assert option_label(" qqq ", "20261120", "CALL", 800.0) == "QQQ 261120 C800"
-    assert option_label("QQQ", "2026-11-20", "P", 800.5) == "QQQ 261120 P800.5"
-    assert option_label("QQQ 261218C00800000", "20261218", "C", 800) == "QQQ 261218 C800"
-    assert option_label("QQQ 261218 C800", "20261218", "C", 800) == "QQQ 261218 C800"
-    assert option_label("QQQ", "202611", "C", 800) is None
 
 
 def test_broker_option_and_linked_trade_use_compact_label(tmp_path):

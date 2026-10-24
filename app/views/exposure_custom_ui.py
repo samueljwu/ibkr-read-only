@@ -11,6 +11,7 @@ from app.finance.exposure import (add_custom_set, custom_labels, custom_sets,
                           set_custom_label)
 from app.views import widgets
 from app.views.table_ui import InputReportTable
+from app.views.ui_theme import style_combo_selection
 
 
 class CustomSetDialog(QDialog):
@@ -27,7 +28,7 @@ class CustomSetDialog(QDialog):
         widgets.apply_layout(layout, "dialog")
         header = QHBoxLayout()
         header.addWidget(QLabel("Set"))
-        self.set_combo = QComboBox()
+        self.set_combo = style_combo_selection(QComboBox())
         self.set_combo.addItems(custom_sets(self.db, self.portfolio_id))
         self.set_combo.setCurrentText(set_name)
         self.current_set = self.set_combo.currentText()
@@ -55,7 +56,7 @@ class CustomSetDialog(QDialog):
         layout.addWidget(self.empty_status)
         apply_row = QHBoxLayout()
         apply_row.addWidget(QLabel("For selected rows"))
-        self.apply_category = QComboBox()
+        self.apply_category = style_combo_selection(QComboBox())
         self.apply_category.setEditable(True)
         apply_row.addWidget(self.apply_category, 1)
         apply_button = QPushButton("Apply category")
@@ -101,7 +102,7 @@ class CustomSetDialog(QDialog):
             item.setData(Qt.UserRole, con_id)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(index, 0, item)
-            editor = QComboBox()
+            editor = style_combo_selection(QComboBox())
             editor.setEditable(True)
             editor.lineEdit().setPlaceholderText("Choose or type a category")
             editor.addItems([""] + categories)

@@ -5,11 +5,12 @@ from datetime import date, timedelta
 import math
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from app.views.calendar_ui import (CalendarGrid, CalendarNavigation, CalendarToolbar,
                                    DecimalPlacesControl)
 from app.views.widgets import hint
+from app.views.ui_theme import style_toolbar_dropdown
 
 
 def _signed_money(value, places=2):
@@ -31,7 +32,7 @@ def _signed_percent(value, places=2):
 class PnlCalendar(QWidget):
     """Browse daily or aggregated P&L within the selected analytics range."""
 
-    def __init__(self, parent=None, *, inline_toolbar=True):
+    def __init__(self, parent=None, *, inline_toolbar=True, toolbar=None):
         super().__init__(parent)
         self._first = self._last = self._anchor = date.today()
         self._rows = {}
@@ -39,8 +40,15 @@ class PnlCalendar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        self.toolbar = CalendarToolbar(("Daily", "Weekly", "Monthly", "Quarterly", "Yearly"))
-        self.interval_combo = self.toolbar.interval_combo
+        intervals = ("Daily", "Weekly", "Monthly", "Quarterly", "Yearly")
+        self.toolbar = toolbar if toolbar is not None else CalendarToolbar(intervals)
+        if toolbar is None:
+            self.interval_combo = self.toolbar.interval_combo
+            self.control_groups = [self.toolbar.interval_group]
+        else:
+            self.interval_combo = style_toolbar_dropdown(QComboBox())
+            self.interval_combo.addItems(intervals)
+            self.control_groups = [toolbar.add_control(self.interval_combo, "Interval")]
         self.interval_combo.currentIndexChanged.connect(self._render)
         self.navigator = CalendarNavigation()
         self.previous_button = self.navigator.previous_button
@@ -52,9 +60,9 @@ class PnlCalendar(QWidget):
         self.percent_decimal_control = DecimalPlacesControl("P&L %")
         self.usd_decimals = self.usd_decimal_control
         self.percent_decimals = self.percent_decimal_control
-        self.toolbar.add_control(self.usd_decimal_control)
-        self.toolbar.add_control(self.percent_decimal_control)
-        if inline_toolbar:
+        self.control_groups.extend((self.toolbar.add_control(self.usd_decimal_control),
+                                    self.toolbar.add_control(self.percent_decimal_control)))
+        if inline_toolbar and toolbar is None:
             layout.addWidget(self.toolbar)
         self.usd_decimals.valueChanged.connect(self._render)
         self.percent_decimals.valueChanged.connect(self._render)

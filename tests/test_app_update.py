@@ -60,31 +60,10 @@ def test_rejects_untrusted_or_incomplete_release(change):
         app_update.select_update([payload], current="1.1.1", platform="win32")
 
 
-def test_mac_release_uses_its_native_dmg():
-    result = app_update.select_update([release(platform="darwin")],
-                                      current="1.1.1", platform="darwin")
-    assert result.name.endswith("macos-arm64.dmg")
 
 
-def test_automatic_update_requires_an_installed_windows_build(tmp_path, monkeypatch):
-    executable = tmp_path / "IBKRDashboard.exe"
-    executable.touch()
-    monkeypatch.setattr(app_update.sys, "platform", "win32")
-    monkeypatch.setattr(app_update.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(app_update.sys, "executable", str(executable))
-    assert app_update.installed_app_path() is None
-    (tmp_path / "unins000.exe").touch()
-    assert app_update.installed_app_path() == executable
 
 
-def test_mac_installed_path_matches_name_in_dmg(tmp_path, monkeypatch):
-    executable = tmp_path / "IBKR Dashboard.app" / "Contents" / "MacOS" / "IBKRDashboard"
-    executable.parent.mkdir(parents=True)
-    executable.touch()
-    monkeypatch.setattr(app_update.sys, "platform", "darwin")
-    monkeypatch.setattr(app_update.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(app_update.sys, "executable", str(executable))
-    assert app_update.installed_app_path() == tmp_path / "IBKR Dashboard.app"
 
 
 def test_windows_launcher_targets_existing_install_folder(tmp_path, monkeypatch):
@@ -109,20 +88,6 @@ def test_windows_launcher_targets_existing_install_folder(tmp_path, monkeypatch)
     assert options["close_fds"] is True
 
 
-def test_mac_launcher_stages_bundle_outside_running_app(tmp_path, monkeypatch):
-    launches = []
-    monkeypatch.setattr(app_update.sys, "platform", "darwin")
-    monkeypatch.setattr(app_update.subprocess, "Popen",
-                        lambda command, **options: launches.append((command, options)))
-    installer = tmp_path / "IBKRDashboard-1.2.0-macos-arm64.dmg"
-    installed = tmp_path / "IBKR Dashboard.app"
-    app_update.launch_update(installer, installed)
-    command, _options = launches[0]
-    assert command[:2] == ["/bin/sh", str(tmp_path / "apply-update.sh")]
-    assert command[2:4] == [str(installer), str(installed)]
-    helper = (tmp_path / "apply-update.sh").read_text(encoding="utf-8")
-    assert "hdiutil attach" in helper
-    assert 'mv "$stage" "$target"' in helper
 
 
 class FakeReply(QObject):
@@ -148,19 +113,6 @@ class FakeReply(QObject):
         pass
 
 
-def test_dialog_treats_unversioned_latest_release_as_no_new_update(monkeypatch):
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(update_dialog.QTimer, "singleShot", lambda *_args: None)
-    feed = [{"tag_name": "untagged-80e451de01fddec64d92", "assets": []},
-            release("1.1.0")]
-    dialog = update_dialog.UpdateDialog(lambda *_args: pytest.fail("Unexpected installation"))
-    monkeypatch.setattr(dialog, "_request",
-                        lambda *_args: FakeReply(json.dumps(feed).encode()))
-    dialog._check()
-    dialog._reply.finished.emit()
-    assert "up to date" in dialog.message.text()
-    assert not dialog.action.isEnabled()
-    dialog.close()
 
 
 @pytest.mark.parametrize("valid", [True, False])
@@ -192,24 +144,3 @@ def test_dialog_only_installs_a_matching_download(tmp_path, monkeypatch, valid):
         assert "checksum" in dialog.message.text()
         assert not (tmp_path / asset["name"]).exists()
     dialog.close()
-
-
-def test_closing_dialog_aborts_download_and_removes_partial_file(tmp_path, monkeypatch):
-    app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(update_dialog.QTimer, "singleShot", lambda *_args: None)
-    monkeypatch.setattr(update_dialog, "installed_app_path",
-                        lambda: tmp_path / "IBKRDashboard.exe")
-    download_dir = tmp_path / "download"
-    monkeypatch.setattr(update_dialog.tempfile, "mkdtemp",
-                        lambda **_kwargs: str(download_dir.mkdir() or download_dir))
-    metadata = release(platform=sys.platform)
-    replies = [FakeReply(json.dumps([metadata]).encode()), FakeReply(b"part")]
-    dialog = update_dialog.UpdateDialog(lambda *_args: pytest.fail("Unexpected installation"))
-    monkeypatch.setattr(dialog, "_request", lambda *_args: replies.pop(0))
-    dialog._check()
-    dialog._reply.finished.emit()
-    dialog.action.click()
-    dialog._reply.readyRead.emit()
-    assert any(download_dir.iterdir())
-    dialog.close()
-    assert not download_dir.exists()

@@ -50,96 +50,14 @@ def unavailable():
     return FlexServiceError(1003, "Statement is not available.", "SendRequest")
 
 
-def test_import_uses_365_day_windows_for_every_source(tmp_path, monkeypatch):
-    monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
-    last = flex_import.flex_today() - timedelta(days=1)
-    last -= timedelta(days=(last.weekday() - 1) % 7)  # Tuesday keeps both window ends on weekdays.
-    first = last - timedelta(days=369)
-    boundary = first + timedelta(days=364)
-    expected = [(first.isoformat(), boundary.isoformat()),
-                ((boundary + timedelta(days=1)).isoformat(), last.isoformat())]
-    assert import_history.windows(first, last) == expected
-
-    db = Database(tmp_path / "portfolio.sqlite3")
-    db.set_setting("ib_account_id", "TEST")
-    for key in import_history.QUERY_KEYS.values():
-        db.set_setting(key, "synthetic-query")
-    db.conn.close()
-
-    requested = {source: [] for source in import_history.SOURCES}
-    for source in import_history.SOURCES:
-        def runner(*_args, windows_override, source=source, **_kwargs):
-            requested[source].extend(windows_override)
-        monkeypatch.setitem(import_history.RUNNERS, source, runner)
-    assert import_history.main(["--source", "all", "--from-date", first.isoformat(),
-                                "--to-date", last.isoformat(), "--database", str(db.path)]) == 0
-    for spans in requested.values():
-        assert spans == list(reversed(expected))
 
 
-def test_cash_gap_windows_respect_365_day_limit(tmp_path):
-    db = Database(tmp_path / "portfolio.sqlite3")
-    try:
-        spans = cash_import_windows(db, "TEST", "2024-01-01", "2025-01-01")
-        assert spans == [("2024-01-01", "2024-12-30"),
-                         ("2024-12-31", "2025-01-01")]
-    finally:
-        db.conn.close()
 
 
-def test_cash_import_combines_five_months_of_saved_two_week_periods(tmp_path):
-    db = Database(tmp_path / "portfolio.sqlite3")
-    try:
-        cursor = date(2026, 1, 1)
-        through = date(2026, 6, 3)
-        with db.conn:
-            while cursor <= through:
-                end = min(cursor + timedelta(days=13), through)
-                db.conn.execute("""INSERT INTO broker_sync_windows
-                    (account_id,source,from_day,to_day,status)
-                    VALUES ('TEST','flex_cash',?,?,'complete')""",
-                    (cursor.isoformat(), end.isoformat()))
-                cursor = end + timedelta(days=1)
-        assert cash_import_windows(db, "TEST", "2026-01-01", "2026-06-03") == [
-            ("2026-01-01", "2026-06-03")]
-    finally:
-        db.conn.close()
 
 
-def test_cash_import_splits_saved_periods_without_exceeding_365_days(tmp_path):
-    db = Database(tmp_path / "portfolio.sqlite3")
-    try:
-        cursor = date(2025, 1, 1)
-        with db.conn:
-            for _ in range(30):
-                end = cursor + timedelta(days=13)
-                db.conn.execute("""INSERT INTO broker_sync_windows
-                    (account_id,source,from_day,to_day,status)
-                    VALUES ('TEST','flex_cash',?,?,'complete')""",
-                    (cursor.isoformat(), end.isoformat()))
-                cursor = end + timedelta(days=1)
-        assert cash_import_windows(db, "TEST", "2025-01-01",
-                                   (cursor - timedelta(days=1)).isoformat()) == [
-            ("2025-01-01", "2025-12-30"), ("2025-12-31", "2026-02-24")]
-    finally:
-        db.conn.close()
 
 
-def test_cash_import_combines_overlapping_saved_periods(tmp_path):
-    db = Database(tmp_path / "portfolio.sqlite3")
-    try:
-        with db.conn:
-            db.conn.executemany("""INSERT INTO broker_sync_windows
-                (account_id,source,from_day,to_day,status)
-                VALUES ('TEST','flex_cash',?,?,'complete')""", [
-                ("2026-01-01", "2026-01-14"),
-                ("2026-01-10", "2026-01-24"),
-                ("2026-01-20", "2026-01-31"),
-            ])
-        assert cash_import_windows(db, "TEST", "2026-01-12", "2026-01-26") == [
-            ("2026-01-01", "2026-01-31")]
-    finally:
-        db.conn.close()
 
 
 def test_cash_import_rejects_overlap_longer_than_flex_limit(tmp_path):

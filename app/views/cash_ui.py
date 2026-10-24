@@ -5,14 +5,15 @@ from datetime import date
 from decimal import Decimal
 
 from PySide6.QtCore import QByteArray, QDate, QTimer, Qt
-from PySide6.QtWidgets import (QComboBox, QDateEdit, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout,
                                QHeaderView, QHBoxLayout, QLabel,
                                QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
                                QWidget)
 
 from app.views import widgets
+from app.views.date_input import CalendarDateEdit
 from app.views.table_ui import ReportTable, SortItem, money
-from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
+from app.views.ui_theme import (PAGE_MARGINS, PAGE_SPACING, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                           style_toolbar_dropdown)
 
 
@@ -35,8 +36,8 @@ class CashMovementsTab(QWidget):
         super().__init__(parent)
         self.db, self.portfolio_id = db, portfolio_id
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*PAGE_MARGINS)
+        layout.setSpacing(PAGE_SPACING)
 
         self.toolbar = QWidget()
         self.toolbar_grid = QGridLayout(self.toolbar)
@@ -64,13 +65,10 @@ class CashMovementsTab(QWidget):
         dates.setContentsMargins(0, 0, 0, 0)
         dates.setSpacing(TOOLBAR_ITEM_SPACING)
         self.from_label = QLabel("From")
-        self.start_date = QDateEdit(QDate.currentDate().addYears(-1))
+        self.start_date = CalendarDateEdit(QDate.currentDate().addYears(-1))
         self.to_label = QLabel("To")
-        self.end_date = QDateEdit(QDate.currentDate())
+        self.end_date = CalendarDateEdit(QDate.currentDate())
         for editor in (self.start_date, self.end_date):
-            editor.setCalendarPopup(True)
-            editor.setDisplayFormat("yyyy-MM-dd")
-            editor.setFixedWidth(170)
             editor.dateChanged.connect(self.refresh)
         for widget in (self.from_label, self.start_date, self.to_label, self.end_date):
             dates.addWidget(widget)
@@ -89,7 +87,7 @@ class CashMovementsTab(QWidget):
         self.summary_pane = QWidget()
         self.summary_pane.setObjectName("cashSummaryPanel")
         self.summary_pane.setMinimumWidth(250)
-        self.summary_pane.setMinimumHeight(120)
+        self.summary_pane.setMinimumHeight(90)
         summary_layout = QVBoxLayout(self.summary_pane)
         summary_layout.setContentsMargins(0, 0, 0, 0)
         summary_layout.setSpacing(6)
@@ -104,7 +102,7 @@ class CashMovementsTab(QWidget):
         self.summary_content = QWidget()
         self.summary_content.setObjectName("cashBreakdownContent")
         self.summary_list = QVBoxLayout(self.summary_content)
-        self.summary_list.setContentsMargins(12, 10, 12, 10)
+        self.summary_list.setContentsMargins(14, 12, 14, 12)
         self.summary_list.setSpacing(10)
         self.summary_scroll.setWidget(self.summary_content)
         summary_layout.addWidget(self.summary_scroll, 1)
@@ -115,7 +113,7 @@ class CashMovementsTab(QWidget):
         transactions_layout = QVBoxLayout(self.transactions_pane)
         transactions_layout.setContentsMargins(0, 0, 0, 0)
         transactions_layout.setSpacing(6)
-        self.transactions_pane.setMinimumHeight(135)
+        self.transactions_pane.setMinimumHeight(110)
         self.transactions_pane.setMinimumWidth(360)
 
         self.transactions_heading = widgets.section_title("Transactions · USD")
@@ -234,6 +232,7 @@ class CashMovementsTab(QWidget):
         while self.summary_list.count():
             item = self.summary_list.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
         self.summary_values = {}
         by_currency = defaultdict(lambda: defaultdict(Decimal))
@@ -293,6 +292,13 @@ class CashMovementsTab(QWidget):
                     sum(totals.values(), Decimal(0)), total=True)
             self.summary_list.addWidget(section)
         self.summary_list.addStretch()
+        self.fit_summary_text()
+        QTimer.singleShot(0, self.fit_summary_text)
+
+    def fit_summary_text(self):
+        """Let the scroll area scroll instead of compressing summary rows."""
+        self.summary_list.activate()
+        self.summary_content.setMinimumHeight(self.summary_content.sizeHint().height())
 
     def _show_transactions(self, rows):
         self.table.setSortingEnabled(False)

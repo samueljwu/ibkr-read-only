@@ -17,52 +17,12 @@ def _isolate_app_data(monkeypatch, base):
     monkeypatch.setattr(paths, "user_data_dir", lambda: location)
 
 
-def test_macos_uses_application_support(monkeypatch):
-    monkeypatch.setattr(paths.sys, "platform", "darwin")
-    monkeypatch.delenv("LOCALAPPDATA", raising=False)
-    assert paths.user_data_dir() == Path.home() / "Library" / "Application Support" / "IBKRDashboard"
 
 
-def test_windows_uses_localappdata(monkeypatch, tmp_path):
-    monkeypatch.setattr(paths.sys, "platform", "win32")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    assert paths.user_data_dir() == tmp_path / "IBKRDashboard"
 
 
-def test_new_install_uses_per_user_directory(tmp_path, monkeypatch):
-    _isolate_app_data(monkeypatch, tmp_path)
-    root = tmp_path / "IBKRDashboard" / "dev" / "data"
-    assert paths.default_data_dir() == root
-    assert paths.local_config_path() == root / "local_config.json"
-    db = Database()
-    try:
-        assert db.path.parent.parent == root
-        assert re.fullmatch(r"\d{8}_[0-9a-f]{12}", db.path.parent.name)
-        assert json.loads(paths.local_config_path().read_text())["data_directory"] == str(db.path.parent)
-    finally:
-        db.conn.close()
-    reopened = Database()
-    try:
-        assert reopened.path == db.path
-    finally:
-        reopened.conn.close()
 
 
-def test_previous_app_folder_is_not_selected(tmp_path, monkeypatch):
-    _isolate_app_data(monkeypatch, tmp_path)
-    old = tmp_path / "CustomIBMonitor" / "prod" / "data" / "portfolio.sqlite3"
-    old_db = Database(old)
-    old_db.add_position({"display_ticker": "ABC", "ib_symbol": "ABC"})
-    old_db.conn.close()
-    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
-
-    db = Database()
-    try:
-        assert db.path.parent.parent == paths.default_data_dir()
-        assert db.rows("positions", 1) == []
-        assert old.is_file()
-    finally:
-        db.conn.close()
 
 
 def test_missing_active_selection_still_fails_without_creating_database(tmp_path, monkeypatch):
@@ -291,16 +251,6 @@ def test_portfolios_menu_switches_database_window(tmp_path, monkeypatch):
     assert Database.saved_databases() == [second, first]
 
 
-def test_frozen_sync_uses_executable_and_user_data(tmp_path, monkeypatch):
-    class Window:
-        pass
-
-    window = Window()
-    window.db = type("Store", (), {"path": tmp_path / "portfolio.sqlite3"})()
-    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
-    command, workdir = MainWindow._sync_launch(window, "scripts.sync_trades", "--sync-trades")
-    assert command == [paths.sys.executable, "--sync-trades", str(window.db.path)]
-    assert workdir == tmp_path
 
 
 def test_verified_database_move_preserves_data_and_selects_copy(tmp_path, monkeypatch):

@@ -109,7 +109,7 @@ def test_open_and_unattributed_income_show_partial_total(tmp_path):
 
 
 def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp_path):
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QToolTip
     from app.views.returns_ui import ReturnPanel
 
     app = QApplication.instance() or QApplication([])
@@ -138,10 +138,12 @@ def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp
         panel = ReturnPanel(db, service, 1)
         panel.refresh(valuations, lots)
         assert panel.note.isHidden()
+        assert panel.notes_button.text() == "i"
+        assert "Estimated opening" in panel.notes_button.toolTip()
+        assert panel.notes_button.accessibleDescription() == panel.note.text()
         panel.notes_button.click()
-        assert not panel.note.isHidden()
-        assert "Estimated opening" in panel.note.text()
-        panel.notes_button.click()
+        assert QToolTip.text() == panel.note.text()
+        QToolTip.hideText()
         assert panel.note.isHidden()
         assert panel.table.item(0, 5).text() == "≈ $5.00"
         assert "Cash history is incomplete" in panel.table.item(0, 5).toolTip()
@@ -246,7 +248,12 @@ def test_return_panel_lists_closed_instrument_and_income_detail(tmp_path):
         _income(db, "income", "2026-01-05", "Dividend", 2, con_id=101)
         _cover_cash(db, "2026-01-02", "2026-01-05")
         valuations = [{"id": pid, "position_qty": 0, "reconciliation": "OK"}]
+        # Existing installations stored splitter sizes as JSON.
+        db.set_setting("position_return_splitter_1_horizontal", "[300, 700]")
         panel = ReturnPanel(db, service, 1)
+        panel.resize(1200, 700)
+        panel.setVisible(True)
+        app.processEvents()
         panel.refresh(valuations, service.lots_rows(valuations))
         assert panel.table.rowCount() == 1
         assert panel.table.item(0, 5).text() == "$4.00"
@@ -261,6 +268,9 @@ def test_return_panel_lists_closed_instrument_and_income_detail(tmp_path):
         assert panel.details_table.item(0, 0).text() == "Income"
         panel.layout_combo.setCurrentText("Side by side")
         assert panel.splitter.orientation() == Qt.Horizontal
+        app.processEvents()
+        sizes = panel.splitter.sizes()
+        assert abs(sizes[0] / sum(sizes) - 0.3) < 0.05
         assert panel.view_state()["layout"] == "Side by side"
         panel.show.setCurrentText("Currently held")
         assert panel.table.rowCount() == 0

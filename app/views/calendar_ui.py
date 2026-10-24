@@ -5,31 +5,20 @@ from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel,
                                QSizePolicy, QWidget)
 
 from app.views.action_icons import action_icon
+from app.views.toolbar import Toolbar
 from app.views.ui_theme import COLORS, style_toolbar_dropdown
 from app.views.widgets import button, section_title
 
 
-class CalendarToolbar(QWidget):
-    """Interval and optional filters on one row."""
+class CalendarToolbar(Toolbar):
+    """Interval and optional filters, wrapping together with their labels."""
 
     def __init__(self, intervals, parent=None):
         super().__init__(parent)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        self._row = row
-        row.addWidget(QLabel("Interval"))
         self.interval_combo = style_toolbar_dropdown(QComboBox())
         self.interval_combo.addItems(intervals)
         self.interval_combo.setFixedWidth(120)
-        row.addWidget(self.interval_combo)
-        self._next_control_index = row.count()
-        row.addStretch()
-
-    def add_control(self, widget):
-        """Place another filter beside the interval selector."""
-        self._row.insertWidget(self._next_control_index, widget)
-        self._next_control_index += 1
+        self.interval_group = self.add_control(self.interval_combo, "Interval")
 
 
 class CalendarNavigation(QWidget):

@@ -13,8 +13,9 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QS
 
 import app.ui as ui
 from app.storage.database import Database
-from app.views.ui_theme import COLORS, TOOLBAR_GROUP_SPACING
-from app.views.shortcuts import native_text, shortcut
+from app.views.ui_theme import COLORS, CONTROL_HEIGHT, TOOLBAR_GROUP_SPACING
+from app.views.typography import install_app_font
+from app.views.shortcuts import NEXT_TAB, PREVIOUS_TAB, native_text, shortcut
 
 
 def test_grid_filter_reuses_sorted_source_until_data_or_order_changes(tmp_path, monkeypatch):
@@ -142,7 +143,9 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
     try:
         buttons = (window.sync_button, window.pause_sync_button, window.theme_button,
                    window.help_button, window.settings_button)
-        assert all(button.text() == "" and not button.icon().isNull() for button in buttons)
+        assert window.sync_button.text() == "Sync"
+        assert all(button.text() == "" for button in buttons[1:])
+        assert all(not button.icon().isNull() for button in buttons)
         assert [button.accessibleName() for button in buttons] == [
             "Sync IBKR", "Pause sync", "Switch to dark mode", "Help", "Settings"]
         assert all(button.toolTip() for button in buttons)
@@ -156,7 +159,7 @@ def test_header_actions_use_icons_with_accessible_labels(tmp_path, monkeypatch):
         assert all(not button.icon().isNull() for button in buttons)
         window._history_process = object()
         window._update_sync_button()
-        assert window.sync_button.text() == ""
+        assert window.sync_button.text() == "Sync"
         assert window.sync_button.accessibleName() == "Importing Flex history…"
         assert not window.sync_button.isEnabled()
         window._history_process = None
@@ -411,6 +414,65 @@ def test_rebalance_quote_refresh_waits_for_editor_focus_to_leave(tmp_path, monke
         window.close()
 
 
+@pytest.mark.parametrize("worker_pause", [False, True])
+def test_rebalance_database_close_commits_focused_edit(tmp_path, monkeypatch, worker_pause):
+    app = QApplication.instance() or QApplication([])
+    db_path = tmp_path / "rebalance-close.sqlite3"
+    seed = Database(db_path)
+    try:
+        position_id = seed.add_position({"display_ticker": "SYNTH", "ib_symbol": "SYNTH"})
+        seed.add_trade({"position_id": position_id, "trade_date": "2026-01-02",
+                        "side": "BUY", "quantity": 1, "price": 10})
+    finally:
+        seed.conn.close()
+    monkeypatch.setattr(ui, "Database", lambda path=None: Database(path or db_path))
+    window = ui.MainWindow()
+    writes = []
+    set_setting = window.db.set_setting
+
+    def track_setting(key, value):
+        writes.append(key)
+        set_setting(key, value)
+
+    monkeypatch.setattr(window.db, "set_setting", track_setting)
+    try:
+        tab = window.calcs_tab
+        window.tabs.setCurrentWidget(tab)
+        window.show()
+        app.processEvents()
+        row = tab._row_for_position(position_id)
+        editor = tab.table.cellWidget(row, 4)
+        editor.setFocus()
+        app.processEvents()
+        editor.lineEdit().setText("43.50 %")
+        if worker_pause:
+            window._pause_for_database_worker()
+        else:
+            window.close()
+        app.processEvents()
+
+        reopened = Database(db_path)
+        try:
+            saved = json.loads(reopened.setting(f"calcs_targets_{window.portfolio_id}"))
+        finally:
+            reopened.conn.close()
+        assert saved["targets"][str(position_id)] == 0.435
+        # Qt may deliver another focus-loss signal as the closed window is torn down.
+        writes_before = len(writes)
+        editor.editingFinished.emit()
+        assert len(writes) == writes_before
+        if worker_pause:
+            window._resume_database_worker(db_path, start_services=False)
+            tab._position_changed(position_id, 44)
+            resumed = json.loads(window.db.setting(f"calcs_targets_{window.portfolio_id}"))
+            assert resumed["targets"][str(position_id)] == 0.44
+    finally:
+        if worker_pause and not window.isEnabled():
+            window._resume_database_worker(db_path, start_services=False)
+        if window.isVisible():
+            window.close()
+
+
 def test_special_tab_switch_reuses_current_portfolio_projection(tmp_path, monkeypatch):
     QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "tab-switch-cache.sqlite3"))
@@ -459,6 +521,7 @@ def test_tab_order_can_be_saved_restored_and_keeps_view_actions_on_right_tab(tmp
         bar = window.tabs.tabBar()
         bar.moveTab(window._tab_index("Rebalance"), 0)
         assert bar.tabData(0) == "Rebalance"
+        assert window.navigation.item(0).text() == "Rebalance"
         window.tabs.setCurrentIndex(window._tab_index("Trades"))
         assert window._current_table_name() == "Trades"
         window.save_view_action.trigger()
@@ -486,7 +549,67 @@ def test_tab_order_can_be_saved_restored_and_keeps_view_actions_on_right_tab(tmp
         bar = reopened.tabs.tabBar()
         assert [bar.tabData(i) for i in range(bar.count())] == [
             "Rebalance", "Portfolio", "Trades", "Lots", "Cash", "Analytics"]
+        assert reopened.navigation.item(0).text() == "Rebalance"
         assert reopened._current_table_name() == "Trades"
+    finally:
+        reopened.close()
+
+
+def test_sidebar_can_be_hidden_and_restored(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    db_path = tmp_path / "sidebar.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    try:
+        window.resize(1280, 700)
+        window.show()
+        app.processEvents()
+        assert window.navigation.isVisible()
+        assert not window.tabs.tabBar().isVisible()
+        index = window._tab_index("Analytics")
+        item = window.navigation.item(index)
+        QTest.mouseClick(window.navigation.viewport(), Qt.LeftButton,
+                         pos=window.navigation.visualItemRect(item).center())
+        assert window.tabs.currentWidget() is window.analytics_tab
+        assert window.analytics_tab.sections.tabBar().isVisible()
+        assert window.navigation.currentRow() == index
+        window.navigation.blockSignals(True)
+        window.navigation.insertItem(0, window.navigation.takeItem(index))
+        window.navigation.blockSignals(False)
+        window.navigation.orderChanged.emit()
+        index = window._tab_index("Analytics")
+        assert index == 0
+        assert window.navigation.item(0).text() == "Analytics"
+        assert json.loads(window.db.setting(window.TAB_LAYOUT_KEY))["order"][0] == "Analytics"
+        window.resize(800, 700)
+        app.processEvents()
+        assert not window.navigation.isVisible()
+        window.resize(1280, 700)
+        app.processEvents()
+        assert window.navigation.isVisible()
+
+        window.navigation_toggle.click()
+        app.processEvents()
+        assert not window.navigation.isVisible()
+        assert window.navigation_toggle.accessibleName() == "Show sidebar"
+        assert window.db.setting("show_sidebar") == "0"
+        window.navigation_toggle.click()
+        app.processEvents()
+        assert window.navigation.isVisible()
+        assert window.navigation.currentRow() == index
+        window.navigation_toggle.click()
+    finally:
+        window.close()
+
+    reopened = ui.MainWindow()
+    try:
+        reopened.resize(1280, 700)
+        reopened.show()
+        app.processEvents()
+        assert not reopened.navigation.isVisible()
+        assert reopened.tabs.currentWidget() is reopened.analytics_tab
+        reopened.navigation_toggle.click()
+        assert reopened.navigation.currentRow() == reopened._tab_index("Analytics")
     finally:
         reopened.close()
 
@@ -502,14 +625,15 @@ def test_tab_and_summary_keyboard_shortcuts_follow_visible_layout(tmp_path, monk
         bar.moveTab(window._tab_index("Rebalance"), 0)
         window.tabs.setCurrentIndex(0)
 
-        QTest.keyClick(window.tabs, Qt.Key_Tab, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_PageDown, Qt.ControlModifier)
         assert bar.tabData(window.tabs.currentIndex()) == "Portfolio"
         window.views["Portfolio"].setFocus()
-        QTest.keyClick(window.views["Portfolio"], Qt.Key_Tab,
-                       Qt.ControlModifier | Qt.ShiftModifier)
+        QTest.keyClick(window.views["Portfolio"], Qt.Key_PageUp, Qt.ControlModifier)
         assert bar.tabData(window.tabs.currentIndex()) == "Rebalance"
-        QTest.keyClick(window.tabs, Qt.Key_Tab, Qt.ControlModifier | Qt.ShiftModifier)
+        QTest.keyClick(window.tabs, Qt.Key_PageUp, Qt.ControlModifier)
         assert bar.tabData(window.tabs.currentIndex()) == "Analytics"
+        QTest.keyClick(window.tabs, Qt.Key_PageDown, Qt.ControlModifier)
+        assert bar.tabData(window.tabs.currentIndex()) == "Rebalance"
         QTest.keyClick(window.tabs, Qt.Key_Tab, Qt.ControlModifier)
         assert bar.tabData(window.tabs.currentIndex()) == "Rebalance"
 
@@ -538,6 +662,11 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "compact-summary.sqlite3"))
     window = ui.MainWindow()
     try:
+        def click_navigation(name):
+            item = window.navigation.item(window._tab_index(name))
+            QTest.mouseClick(window.navigation.viewport(), Qt.LeftButton,
+                             pos=window.navigation.visualItemRect(item).center())
+
         window.resize(1200, 700)
         window.show()
         app.processEvents()
@@ -551,15 +680,15 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
         assert window.compact_summary_action.isChecked()
         assert window.tabs.currentIndex() == window._tab_index("Portfolio")
         assert window.summary.isVisible()
-        assert window.tabs.tabBar().isVisible()
+        assert window.navigation.isVisible()
+        assert not window.tabs.tabBar().isVisible()
         assert not window.tabs.currentWidget().isVisible()
         assert window.height() < original.height()
         assert window.width() < original.width()
         assert window.height() <= window.sizeHint().height() + 2
         assert not window.statusBar().isVisible()
 
-        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
-                         pos=window.tabs.tabBar().tabRect(window._tab_index("Portfolio")).center())
+        click_navigation("Portfolio")
         app.processEvents()
         assert not window.compact_summary_action.isChecked()
         assert window.geometry() == original
@@ -586,15 +715,14 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
 
         window.compact_summary_action.trigger()
         app.processEvents()
-        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
-                         pos=window.tabs.tabBar().tabRect(window._tab_index("Trades")).center())
+        click_navigation("Trades")
         app.processEvents()
         assert not window.compact_summary_action.isChecked()
         assert window.tabs.currentIndex() == window._tab_index("Trades")
         assert window.geometry() == original
 
         window.compact_summary_action.trigger()
-        QTest.keyClick(window.tabs, Qt.Key_Tab, Qt.ControlModifier)
+        QTest.keyClick(window.tabs, Qt.Key_PageDown, Qt.ControlModifier)
         app.processEvents()
         assert not window.compact_summary_action.isChecked()
         assert window.tabs.currentIndex() == window._tab_index("Trades")
@@ -605,8 +733,7 @@ def test_compact_summary_restores_window_when_tab_is_clicked(tmp_path, monkeypat
         window.compact_summary_action.trigger()
         app.processEvents()
         assert not window.isMaximized()
-        QTest.mouseClick(window.tabs.tabBar(), Qt.LeftButton,
-                         pos=window.tabs.tabBar().tabRect(window._tab_index("Portfolio")).center())
+        click_navigation("Portfolio")
         app.processEvents()
         assert window.isMaximized()
     finally:
@@ -628,7 +755,7 @@ def test_grid_toolbar_dropdowns_stay_grouped_and_aligned(tmp_path, monkeypatch):
             columns = next(button for button in toolbar.findChildren(QPushButton)
                            if button.text() == "Columns")
             assert combo.objectName() == columns.objectName() == "toolbarDropdown"
-            assert combo.height() == columns.height() == 32
+            assert combo.height() == columns.height() == CONTROL_HEIGHT
             assert columns.geometry().left() - combo.geometry().right() - 1 == TOOLBAR_GROUP_SPACING
             assert abs(columns.geometry().center().y() - combo.geometry().center().y()) <= 2
         window.tabs.setCurrentWidget(window.views["Portfolio"].parentWidget())
@@ -644,7 +771,7 @@ def test_grid_toolbar_dropdowns_stay_grouped_and_aligned(tmp_path, monkeypatch):
         assert overview_gap == TOOLBAR_GROUP_SPACING
         assert window.cash_tab.range_combo.objectName() == "toolbarDropdown"
         assert window.analytics_tab.range_combo.objectName() == "toolbarDropdown"
-        assert window.analytics_tab.metric_combo.objectName() == "toolbarDropdown"
+        assert window.analytics_tab.pnl_display_combo.objectName() == "toolbarDropdown"
     finally:
         window.close()
 
@@ -1062,7 +1189,7 @@ def test_analytics_and_rebalance_view_menu_save_restore_after_restart(tmp_path, 
         analytics.range_combo.setCurrentText("Custom")
         analytics.start_date.setDate(QDate(2026, 1, 2))
         analytics.end_date.setDate(QDate(2026, 2, 3))
-        analytics.metric_combo.setCurrentText("NAV")
+        analytics.set_pnl_metric("NAV")
         analytics.capital_combo.setCurrentText("Cash / portfolio")
         analytics.benchmark_toggle.setChecked(False)
         analytics.pnl_layout_combo.setCurrentText("Side by side")
@@ -1086,7 +1213,7 @@ def test_analytics_and_rebalance_view_menu_save_restore_after_restart(tmp_path, 
 
         analytics.sections.setCurrentWidget(analytics.pnl_page)
         analytics.range_combo.setCurrentText("3 months")
-        analytics.metric_combo.setCurrentText("Adjusted performance")
+        analytics.set_pnl_metric("Adjusted performance")
         analytics.pnl_layout_combo.setCurrentText("Top and bottom")
         analytics.capital_layout_combo.setCurrentText("Top and bottom")
         analytics.pnl_table.set_column_decimals(1, 2)
@@ -1101,10 +1228,10 @@ def test_analytics_and_rebalance_view_menu_save_restore_after_restart(tmp_path, 
         assert analytics.range_combo.currentText() == "Custom"
         assert analytics.start_date.date() == QDate(2026, 1, 2)
         assert analytics.end_date.date() == QDate(2026, 2, 3)
-        assert analytics.metric_combo.currentText() == "NAV"
+        assert analytics.pnl_metric == "NAV"
         assert analytics.capital_combo.currentText() == "Cash / portfolio"
         assert not analytics.benchmark_toggle.isChecked()
-        assert analytics.pnl_layout_combo.currentText() == "Side by side"
+        assert analytics.pnl_layout_combo.currentData() == "horizontal"
         assert analytics.capital_layout_combo.currentText() == "Side by side"
         assert analytics.pnl_table.decimals_for(1) == 3
         assert analytics.cash_share_table.decimals_for(3) == 4
@@ -1157,7 +1284,7 @@ def test_analytics_and_rebalance_view_menu_save_restore_after_restart(tmp_path, 
         assert reopened.analytics_tab.range_combo.currentText() == "Custom"
         assert reopened.analytics_tab.capital_combo.currentText() == "Cash / portfolio"
         assert reopened.analytics_tab.cash_share_table.decimals_for(3) == 4
-        assert reopened.analytics_tab.pnl_layout_combo.currentText() == "Side by side"
+        assert reopened.analytics_tab.pnl_layout_combo.currentData() == "horizontal"
         assert reopened.analytics_tab.exposure_page.group_combo.currentText() == "Custom"
         assert reopened.calcs_tab.view_mode == "cases"
         assert reopened.calcs_tab.table.columnWidth(0) == 210
@@ -1377,7 +1504,8 @@ def test_window_content_fits_small_desktop(tmp_path, monkeypatch):
                 app.processEvents()
                 assert window.width() <= width
                 assert window.height() <= height
-                assert window.views[name].width() >= width - 80
+                sidebar_width = window.navigation.width() + 8 if window.navigation.isVisible() else 0
+                assert window.views[name].width() >= width - 80 - sidebar_width
                 assert window.views[name].height() >= 120
     finally:
         window.close()
@@ -1459,6 +1587,46 @@ def test_account_summary_and_theme_persist(tmp_path, monkeypatch):
         reopened.close()
 
 
+def test_summary_border_menu_color_and_style_persist(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    db_path = tmp_path / "summary-border.sqlite3"
+    monkeypatch.setattr(ui, "Database", lambda: Database(db_path))
+    window = ui.MainWindow()
+    try:
+        view_action = next(action for action in window.menuBar().actions()
+                           if action.text() == "View")
+        view_menu = view_action.menu()
+        assert any(action.text() == "Summary border" for action in view_menu.actions())
+        toolbar_menu = window._build_toolbar_menu("Portfolio")
+        toolbar_border_action = next(action for action in toolbar_menu.actions()
+                                     if action.text() == "Summary border")
+        border_menu = toolbar_border_action.menu()
+        next(action for action in border_menu.actions() if action.text() == "Flight deck").trigger()
+        assert window.summary.style_name == "flight"
+        assert window.summary_style_actions["flight"].isChecked()
+        assert window.db.setting("summary_border_style") == "flight"
+
+        window.summary_color_menu.swatch_buttons["#b87b31"].click()
+        assert window.summary.solid_color == "#b87b31"
+        window.summary_color_menu.hex_input.setText("#ab42cd")
+        window.summary_color_menu.hex_input.returnPressed.emit()
+        assert window.summary.palette_name == "solid"
+        assert window.summary.solid_color == "#ab42cd"
+        assert window.db.setting("summary_border_color") == "#ab42cd"
+
+    finally:
+        window.close()
+
+    reopened = ui.MainWindow()
+    try:
+        assert reopened.summary.style_name == "flight"
+        assert reopened.summary.palette_name == "solid"
+        assert reopened.summary.solid_color == "#ab42cd"
+        assert reopened.summary_color_menu.hex_input.text() == "#ab42cd"
+    finally:
+        reopened.close()
+
+
 def test_account_summary_visibility_persists_across_tabs_and_launches(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     db_path = tmp_path / "summary-visibility.sqlite3"
@@ -1493,7 +1661,12 @@ def test_account_summary_visibility_persists_across_tabs_and_launches(tmp_path, 
         assert reopened.summary.isVisible()
         reopened.tabs.setCurrentWidget(reopened.calcs_tab)
         app.processEvents()
-        assert not reopened.summary.isVisible()
+        assert reopened.summary.isVisible()
+        reopened.resize(800, 600)
+        app.processEvents()
+        assert reopened.calcs_tab.table.height() >= (
+            reopened.calcs_tab.table.horizontalHeader().height() +
+            reopened.calcs_tab.table.verticalHeader().defaultSectionSize())
         reopened.tabs.setCurrentIndex(0)
         app.processEvents()
         assert reopened.summary.isVisible()
@@ -1555,6 +1728,7 @@ def test_unused_header_area_follows_theme(tmp_path, monkeypatch):
 
 def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
+    install_app_font(app)
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "help.sqlite3"))
     window = ui.MainWindow()
     try:
@@ -1566,8 +1740,11 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             window._apply_theme(theme)
             app.processEvents()
             assert settings_page.palette().color(settings_page.backgroundRole()).name() == COLORS[theme]["canvas"]
-            assert len(window.help_screenshots) == 28
+            assert [image.name for image in window.help_screenshots] == [
+                "start_flex", "rebalance_table", "rebalance_cases", "views_view_menu"]
             assert all(not image._original.isNull()
+                       for image in window.help_screenshots)
+            assert all(image._original.devicePixelRatioF() == 2
                        for image in window.help_screenshots)
         window.settings_dialog.close()
         window.help_button.click()
@@ -1578,8 +1755,8 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
             "Take a tour…", "Start", "Portfolio", "Matched lots", "Analytics", "Rebalance",
             "Views & data", "Shortcuts"]
         guide = " ".join(label.text() for label in window.help_dialog.findChildren(QLabel))
-        next_tab = native_text(shortcut("Ctrl+Tab", "Meta+Tab"))
-        previous_tab = native_text(shortcut("Ctrl+Shift+Tab", "Meta+Shift+Tab"))
+        next_tab = native_text(NEXT_TAB)
+        previous_tab = native_text(PREVIOUS_TAB)
         for term in ("Overview", "Trades", "P&L", "Shift+Space",
                      native_text(shortcut("Ctrl+Space")), native_text(QKeySequence(QKeySequence.Copy)),
                      next_tab, previous_tab, native_text(shortcut("Ctrl+H", "Ctrl+Shift+H")),
@@ -1621,6 +1798,14 @@ def test_settings_and_help_are_readable_in_both_themes(tmp_path, monkeypatch):
                 assert [button.text() for button in disclosures] == [
                     "Trades query · fields to select", "Analytics query · fields to select",
                     "Cash query · fields to select"]
+                assert window.help_sections.currentWidget().widget().layout().spacing() == 14
+                for theme in ("light", "dark"):
+                    window._apply_theme(theme)
+                    app.processEvents()
+                    assert all(button.palette().color(QPalette.ButtonText).name() == COLORS[theme]["text"]
+                               for button in disclosures)
+                    assert all(button.height() >= button.fontMetrics().height() + 8
+                               for button in disclosures)
                 disclosures[0].click()
                 app.processEvents()
                 assert disclosures[0].isChecked()

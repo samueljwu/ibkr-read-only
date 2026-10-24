@@ -2,17 +2,18 @@
 
 from PySide6.QtCharts import QChart, QChartView, QPieSeries
 from PySide6.QtCore import QByteArray, QMargins, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QGridLayout, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QPushButton, QSplitter, QBoxLayout,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QBoxLayout,
+                               QComboBox, QHBoxLayout, QHeaderView, QInputDialog,
+                               QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from app.finance.exposure import add_custom_set, custom_sets, exposure_mix, exposure_snapshot
 from app.views import widgets
 from app.views.exposure_custom_ui import CustomSetDialog
+from app.views.metric_summary import MetricInfoButton, MetricSummary, MetricValue
+from app.views.toolbar import Toolbar
 from app.views.table_ui import ReportTable, SortItem, money as _money, percent
-from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
-                          style_toolbar_dropdown)
+from app.views.ui_theme import COLORS, style_toolbar_dropdown
 
 
 def _percent(value, nav):
@@ -29,81 +30,66 @@ class ExposurePanel(QWidget):
         self.category_filter = None
         self._rendering = False
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 0)
+        widgets.apply_layout(layout, "subpage")
         layout.setSpacing(8)
-        self.net_summary = QLabel()
-        self.net_summary.setObjectName("exposureNetSummary")
-        self.net_summary.setWordWrap(True)
-        layout.addWidget(self.net_summary)
-        controls = QGridLayout()
-        self.controls = controls
-        controls.setContentsMargins(0, 0, 0, 0)
-        controls.setHorizontalSpacing(TOOLBAR_GROUP_SPACING)
-        controls.setVerticalSpacing(TOOLBAR_ITEM_SPACING)
-        group_controls = QHBoxLayout()
-        group_controls.setSpacing(TOOLBAR_ITEM_SPACING)
-        group_controls.addWidget(QLabel("Group by"))
+        self.toolbar = Toolbar()
         self.group_combo = style_toolbar_dropdown(QComboBox())
-        self.group_combo.setMinimumWidth(120)
-        self.group_combo.setMaximumWidth(170)
         self.group_combo.addItems(("Sector", "Custom"))
         self.group_combo.currentTextChanged.connect(self._group_changed)
-        group_controls.addWidget(self.group_combo)
-        controls.addLayout(group_controls, 0, 0)
-        basis_controls = QHBoxLayout()
-        basis_controls.setSpacing(TOOLBAR_ITEM_SPACING)
-        basis_controls.addWidget(QLabel("Exposure"))
+        self.toolbar.add_control(self.group_combo, "Group by")
         self.basis_combo = style_toolbar_dropdown(QComboBox())
-        self.basis_combo.setMinimumWidth(120)
-        self.basis_combo.setMaximumWidth(180)
         self.basis_combo.addItems(("Adjusted", "Market value"))
         self.basis_combo.setToolTip("Changes the pie, category breakdown, and position % NAV column together.")
         self.basis_combo.currentTextChanged.connect(self._basis_changed)
-        basis_controls.addWidget(self.basis_combo)
-        controls.addLayout(basis_controls, 0, 1)
-        custom_controls = QHBoxLayout()
-        custom_controls.setContentsMargins(0, 0, 0, 0)
-        custom_controls.setSpacing(TOOLBAR_ITEM_SPACING)
-        self.custom_set_label = QLabel("Set")
-        custom_controls.addWidget(self.custom_set_label)
+        self.toolbar.add_control(self.basis_combo, "Exposure")
         self.custom_set_combo = style_toolbar_dropdown(QComboBox())
         self.custom_set_combo.setMinimumWidth(120)
         self.custom_set_combo.setMaximumWidth(170)
         self.custom_set_combo.currentTextChanged.connect(self._custom_set_changed)
-        custom_controls.addWidget(self.custom_set_combo)
-        self.custom_controls = QWidget()
-        self.custom_controls.setLayout(custom_controls)
-        controls.addWidget(self.custom_controls, 0, 2)
-        self.assign_button = QPushButton("Manage categories")
-        self.assign_button.setObjectName("secondary")
-        self.assign_button.setFixedHeight(32)
-        self.assign_button.clicked.connect(self._assign_category)
-        controls.addWidget(self.assign_button, 0, 3)
-        controls.setColumnStretch(4, 1)
-        layout.addLayout(controls)
-        self._controls_wrapped = False
-        self._arrange_controls()
+        self.custom_controls = self.toolbar.add_control(self.custom_set_combo, "Set")
+        self.assign_button = widgets.button("Manage categories", self._assign_category)
+        self.assign_controls = self.toolbar.add_control(self.assign_button)
+        layout.addWidget(self.toolbar)
+        self.summary = MetricSummary(framed=False)
+        self.market_metric = MetricValue("Market net · % NAV", info=True)
+        self.adjusted_metric = MetricValue("Adjusted net · % NAV", info=True)
+        self.summary.set_blocks([self.market_metric, self.adjusted_metric])
+        layout.addWidget(self.summary)
+        self.status = widgets.hint("")
+        layout.addWidget(self.status)
         self.notice = QLabel()
         self.notice.setObjectName("notice")
         self.notice.setWordWrap(True)
         layout.addWidget(self.notice)
-        self.splitter = QSplitter(Qt.Vertical)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(8)
         self.mix_pane = QWidget()
         mix_layout = QVBoxLayout(self.mix_pane)
         mix_layout.setContentsMargins(0, 0, 0, 0)
         mix_layout.setSpacing(5)
+        self.chart_card = QWidget()
+        self.chart_card.setObjectName("card")
+        self.chart_card.setAttribute(Qt.WA_StyledBackground)
+        card_layout = QVBoxLayout(self.chart_card)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(2)
         self.mix_heading = widgets.section_title("Adjusted exposure mix")
-        mix_layout.addWidget(self.mix_heading)
+        self.mix_info = MetricInfoButton("Exposure mix")
+        heading = QHBoxLayout()
+        heading.setSpacing(5)
+        heading.addWidget(self.mix_heading)
+        heading.addWidget(self.mix_info)
+        heading.addStretch()
+        card_layout.addLayout(heading)
         self.chart_layout = QBoxLayout(QBoxLayout.LeftToRight)
         self.chart_layout.setSpacing(8)
         self.chart_view = QChartView()
         self.chart_view.setMinimumHeight(165)
-        self.chart_layout.addWidget(self.chart_view, 2)
+        card_layout.addWidget(self.chart_view, 1)
+        self.chart_layout.addWidget(self.chart_card, 2)
         self.groups = ReportTable(0, 3)
         self.groups.setHorizontalHeaderLabels(("Category", "Gross USD", "Mix %"))
         self.groups.verticalHeader().setVisible(False)
+        self.groups.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.groups.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.groups.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.groups.setSelectionMode(QAbstractItemView.SingleSelection)
         self.groups.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -116,11 +102,8 @@ class ExposurePanel(QWidget):
         self.groups.remember_layout(db, f"exposure_groups_layout_{portfolio_id}")
         self.groups.itemSelectionChanged.connect(self._category_selected)
         self.chart_layout.addWidget(self.groups, 3)
+        self.chart_layout.setAlignment(self.groups, Qt.AlignTop)
         mix_layout.addLayout(self.chart_layout, 1)
-        self.mix_caption = QLabel("Share of gross absolute security exposure · cash excluded")
-        self.mix_caption.setObjectName("hint")
-        mix_layout.addWidget(self.mix_caption)
-        self.splitter.addWidget(self.mix_pane)
         self.positions_pane = QWidget()
         positions_layout = QVBoxLayout(self.positions_pane)
         positions_layout.setContentsMargins(0, 0, 0, 0)
@@ -150,25 +133,13 @@ class ExposurePanel(QWidget):
         self.positions.setColumnHidden(1, True)
         self.positions.setColumnHidden(2, True)
         positions_layout.addWidget(self.positions, 1)
-        self.splitter.addWidget(self.positions_pane)
-        self.splitter.setStretchFactor(0, 2)
-        self.splitter.setStretchFactor(1, 3)
+        self.positions.fit_header_widths()
+        self.splitter = widgets.pane_splitter(
+            db, f"exposure_splitter_{portfolio_id}", self.mix_pane, self.positions_pane,
+            description="exposure mix and positions", sizes=(400, 600))
         layout.addWidget(self.splitter, 1)
-        self.status = QLabel()
-        self.status.setObjectName("hint")
-        layout.addWidget(self.status)
         self._load_custom_sets()
         self._group_changed()
-
-    def _arrange_controls(self):
-        wrapped = self.width() < 900
-        if wrapped == self._controls_wrapped:
-            return
-        self._controls_wrapped = wrapped
-        for widget in (self.custom_controls, self.assign_button):
-            self.controls.removeWidget(widget)
-        self.controls.addWidget(self.custom_controls, 1 if wrapped else 0, 0 if wrapped else 2)
-        self.controls.addWidget(self.assign_button, 1 if wrapped else 0, 1 if wrapped else 3)
 
     def _load_custom_sets(self, selected=None):
         current = (selected or self.custom_set_combo.currentText()).removeprefix("Custom: ")
@@ -199,7 +170,7 @@ class ExposurePanel(QWidget):
         group = self.group_combo.currentText()
         self.category_filter = None
         self.custom_controls.setVisible(group == "Custom")
-        self.assign_button.setVisible(group == "Custom")
+        self.assign_controls.setVisible(group == "Custom")
         self.assign_button.setText("Manage categories" if self._selected_custom_set() else "Create set")
         self.refresh()
 
@@ -309,10 +280,12 @@ class ExposurePanel(QWidget):
         nav = self.snapshot["nav"]
         market = self.snapshot["totals"]["value"]
         adjusted = self.snapshot["totals"]["adjusted"]
-        self.net_summary.setText(
-            f"Market net {_money(market)} ({_percent(market, nav)} NAV)"
-            f"     ·     Adjusted net {_money(adjusted)} ({_percent(adjusted, nav)} NAV)"
-            + (" · partial" if adjusted is None and self.snapshot["positions"] else ""))
+        for metric, value, basis in ((self.market_metric, market, "Market net"),
+                                     (self.adjusted_metric, adjusted, "Delta-adjusted net")):
+            metric.value.setText(_percent(value, nav))
+            metric.info.set_detail(
+                f"{basis}: {_money(value)} USD\nAccount NAV: {_money(nav)} USD\n"
+                "Signed net exposure divided by account NAV.")
         as_of = self.snapshot["as_of"]
         self.status.setText(f"Latest snapshot{' · ' + as_of if as_of else ''} · USD · options use IBKR delta")
         self.render()
@@ -343,11 +316,9 @@ class ExposurePanel(QWidget):
                                     palette[index % len(palette)])
                              for index, name in enumerate(categories)}
         chart = QChart()
-        chart.setBackgroundVisible(True)
-        chart.setBackgroundBrush(QColor(colors["surface"]))
-        chart.setBackgroundPen(QPen(QColor(colors["line"]), 1))
-        chart.setBackgroundRoundness(6)
+        chart.setBackgroundVisible(False)
         chart.setMargins(QMargins(4, 4, 4, 4))
+        chart.setTitleFont(self.font())
         chart.legend().hide()
         series = QPieSeries()
         series.setHoleSize(.57)
@@ -364,11 +335,11 @@ class ExposurePanel(QWidget):
             chart.setTitle("Create a set to classify positions" if no_custom_set else
                            "No valued positions")
             chart.setTitleBrush(QColor(colors["muted"]))
-        self.chart_view.setBackgroundBrush(QColor(colors["canvas"]))
+        self.chart_view.setBackgroundBrush(QColor(colors["surface"]))
         self.chart_view.setFrameShape(QChartView.NoFrame)
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         self.chart_view.setChart(chart)
-        self.mix_caption.setText(
+        self.mix_info.set_detail(
             "Use Create set to name categories and assign underlyings." if no_custom_set else
             "Share of gross absolute security exposure · cash excluded"
             + (f" · {mix['missing']} unavailable" if mix["missing"] else ""))
@@ -460,6 +431,5 @@ class ExposurePanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._arrange_controls()
         self.chart_layout.setDirection(QBoxLayout.TopToBottom if self.width() < 610
                                        else QBoxLayout.LeftToRight)

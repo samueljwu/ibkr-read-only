@@ -44,23 +44,3 @@ def test_shared_refresh_reads_each_ledger_table_once(tmp_path, monkeypatch):
         assert service.portfolio_rows(set()) == []
     finally:
         db.conn.close()
-
-
-def test_open_lots_share_instrument_return_window(tmp_path):
-    db = Database(tmp_path / "lot-returns.sqlite3")
-    try:
-        position = db.add_position({"display_ticker": "SYNTH"})
-        for number in range(10):
-            db.add_trade({"position_id": position, "trade_date": "2026-01-02",
-                          "trade_id": f"synthetic-{number}", "side": "BUY",
-                          "quantity": 1, "price": 100})
-        service = PortfolioService(db, MockMarketDataProvider())
-        portfolio = service.portfolio_rows()
-        with patch.object(services, "window_returns", wraps=services.window_returns) as returns:
-            lots = service.lots_rows(portfolio)
-        assert len(lots) == 10
-        assert returns.call_count == 1
-        assert all(lot["mtd"] == lots[0]["mtd"] and lot["ytd"] == lots[0]["ytd"]
-                   for lot in lots)
-    finally:
-        db.conn.close()

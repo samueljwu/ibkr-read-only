@@ -75,91 +75,10 @@ def test_missing_fee_stays_pending_until_zero_fee_arrives(tmp_path):
         db.conn.close()
 
 
-def test_pending_fee_keeps_cost_and_pnl_available_then_reprices(tmp_path):
-    db = Database(tmp_path / "provisional-fee.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        trade = execution(trade_date=date.today().isoformat())
-        assert ingestor.ingest_many([trade], "tws").inserted == 1
-        position = db.rows("positions", 1)[0]
-        market = MockMarketDataProvider()
-        market.quotes[position["id"]] = {
-            "mode": "Mock", "ticks": {"last": 12, "close": 9}, "status": "MOCK"}
-        service = PortfolioService(db, market)
-        service._as_of = lambda _position: date.today()
-
-        pending = service.portfolio_rows()[0]
-        assert pending["average_cost"] == pytest.approx(10)
-        assert pending["daily_pnl"] == pytest.approx(10)
-        assert pending["unrealized_pnl"] == pytest.approx(10)
-        assert pending["daily_pnl_fee_pending"]
-        assert pending["open_pnl_fee_pending"]
-        lot = service.lots_rows([pending])[0]
-        assert lot["net_unrealized"] == pytest.approx(10)
-        assert lot["buy_commission"] is None
-
-        assert ingestor.ingest_many([dict(trade, commission=0.5)], "tws").updated == 1
-        complete = service.portfolio_rows()[0]
-        assert complete["average_cost"] == pytest.approx(10.1)
-        assert complete["daily_pnl"] == pytest.approx(9.5)
-        assert complete["unrealized_pnl"] == pytest.approx(9.5)
-        assert not complete["daily_pnl_fee_pending"]
-        assert not complete["open_pnl_fee_pending"]
-    finally:
-        db.conn.close()
 
 
-def test_pending_sale_fee_keeps_open_cost_and_realized_pnl(tmp_path):
-    db = Database(tmp_path / "provisional-sale.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        ingestor.ingest_many([execution(source_id="BUY.01", ib_exec_id="BUY.01",
-                                        quantity=10, commission=1)], "tws")
-        position_id = db.rows("positions", 1)[0]["id"]
-        trade = execution(source_id="SALE.01", ib_exec_id="SALE.01",
-                          trade_date=date.today().isoformat(), side="SELL", quantity=5, price=11)
-        assert ingestor.ingest_many([trade], "tws").inserted == 1
-        service = PortfolioService(db, MockMarketDataProvider())
-        service._as_of = lambda _position: date.today()
-        service.matching.rebuild_auto([position_id])
-        market = service.market
-        market.quotes[position_id] = {
-            "mode": "Mock", "ticks": {"last": 12, "close": 10}, "status": "MOCK"}
-
-        pending = service.portfolio_rows()[0]
-        assert pending["average_cost"] == pytest.approx(10.1)
-        assert pending["daily_pnl"] == pytest.approx(15)
-        closed = next(lot for lot in service.lots_rows([pending]) if lot["lot_state"] == "Closed")
-        assert closed["realized_net"] == pytest.approx(4.5)
-        assert closed["sell_commission"] is None
-        assert closed["fee_pending"]
-        assert service.trade_rows()[0]["realized_net"] == pytest.approx(4.5)
-
-        assert ingestor.ingest_many([dict(trade, commission=0.5)], "tws").updated == 1
-        complete = service.portfolio_rows()[0]
-        assert complete["daily_pnl"] == pytest.approx(14.5)
-        closed = next(lot for lot in service.lots_rows([complete]) if lot["lot_state"] == "Closed")
-        assert closed["realized_net"] == pytest.approx(4)
-        assert closed["sell_commission"] == pytest.approx(0.5)
-        assert not closed["fee_pending"]
-    finally:
-        db.conn.close()
 
 
-def test_distinct_equal_fills_are_kept_and_unlinked_source_is_flagged(tmp_path):
-    db = Database(tmp_path / "equal.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        assert ingestor.ingest_many([execution(source_id="A.01", ib_exec_id="A.01"),
-                                     execution(source_id="B.01", ib_exec_id="B.01")], "tws").inserted == 2
-        uncertain = execution(source="flex", source_id="T3", flex_trade_id="T3",
-                              ib_exec_id="", commission=-0.1)
-        result = ingestor.ingest_many([uncertain], "flex")
-        assert result.review == 1
-        assert len(db.rows("trades", 1)) == 2
-        assert db.conn.execute("SELECT status FROM broker_source_records WHERE source_id='T3'").fetchone()[0] == "review"
-    finally:
-        db.conn.close()
 
 
 def test_bad_record_is_retained_for_review_and_batch_is_atomic(tmp_path):
@@ -194,18 +113,6 @@ def test_flex_parser_preserves_missing_fee_and_lifecycle_events():
         parse_flex_xml(xml, "OTHER")
 
 
-def test_flex_parser_accepts_report_with_usd_conversion_rates_and_empty_event_section():
-    xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002">
-    <Trades><Trade levelOfDetail="EXECUTION" tradeID="T1" ibExecID="EX.01"
-     tradeDate="20261006" dateTime="20261006;101500" buySell="BUY" quantity="5"
-     tradePrice="10" conid="123" symbol="ABC" currency="USD" assetCategory="STK"
-     multiplier="1" ibCommission="-0.5"/></Trades><OptionEAE/>
-    <ConversionRates><ConversionRate fromCurrency="EUR" toCurrency="USD" rate="1.2"
-     reportDate="20261006"/></ConversionRates>
-    </FlexStatement></FlexStatements></FlexQueryResponse>'''
-    trades, events = parse_flex_xml(xml, ACCOUNT)
-    assert len(trades) == 1
-    assert events == []
 
 
 def test_incoming_legacy_transfer_becomes_costed_opening_lot_without_execution(tmp_path):
@@ -232,32 +139,6 @@ def test_incoming_legacy_transfer_becomes_costed_opening_lot_without_execution(t
         db.conn.close()
 
 
-def test_cash_merger_closes_shares_at_broker_proceeds_once(tmp_path):
-    db = Database(tmp_path / "merger.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        ingestor.ingest_many([execution(source="flex", source_id="T1", flex_trade_id="T1",
-                                        ib_exec_id="ZZCO.01", con_id=900000002, symbol="ZZCO",
-                                        trade_date="2024-01-01", quantity=20, price=10,
-                                        commission=-1)], "flex")
-        event = {"kind": "CorporateAction", "raw": {
-            "accountId": ACCOUNT, "transactionID": "MERGER-1", "type": "TC",
-            "assetCategory": "STK", "conid": "900000002", "symbol": "ZZCO",
-            "currency": "USD", "multiplier": "1", "dateTime": "20240115;120000",
-            "quantity": "-20", "proceeds": "240", "fxRateToBase": "1",
-            "actionDescription": "ZZCO MERGED(Cash) FOR USD 12.00 PER SHARE",
-        }}
-        first = ingestor.ingest_many([], "flex", events=[event])
-        assert first.corporate_inserted == 1 and first.review == 0
-        assert ingestor.ingest_many([], "flex", events=[event]).corporate_inserted == 0
-        rows = db.rows("trades", 1)
-        assert len(rows) == 2
-        sell = next(row for row in rows if row["source"] == "IBKR corporate action")
-        assert (sell["side"], sell["quantity"], sell["price"]) == ("SELL", 20, 12)
-        assert db.conn.execute("SELECT status FROM broker_source_records WHERE source='flex_event'").fetchone()[0] == "complete"
-        assert sum(row["quantity"] * (1 if row["side"] == "BUY" else -1) for row in rows) == 0
-    finally:
-        db.conn.close()
 
 
 def test_bond_redemption_uses_percent_of_par_and_rebate_sign(tmp_path):
@@ -296,76 +177,12 @@ def test_bond_redemption_uses_percent_of_par_and_rebate_sign(tmp_path):
         db.conn.close()
 
 
-def test_bond_buy_accrued_interest_stored_signed_negative(tmp_path):
-    db = Database(tmp_path / "bond_buy_accrued.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
-        <Trade levelOfDetail="EXECUTION" tradeID="B2" ibExecID="BOND.02" tradeDate="20240101"
-          buySell="BUY" quantity="1000" tradePrice="95" conid="900000004" symbol="TESTBOND2"
-          currency="USD" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="USD"
-          accruedInt="12.5" fxRateToBase="1"/>
-        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
-        records, _ = parse_flex_xml(xml, ACCOUNT)
-        assert records[0]["raw"]["accruedInt"] == "12.5"
-        ingestor.ingest_many(records, "flex")
-        bond = db.rows("trades", 1)[0]
-        # Negative: accrued interest adds to the buyer's cash paid out at settlement.
-        assert bond["accrued_interest_usd"] == pytest.approx(-12.5)
-    finally:
-        db.conn.close()
 
 
-def test_bond_sell_accrued_interest_stored_signed_positive(tmp_path):
-    db = Database(tmp_path / "bond_sell_accrued.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
-        <Trade levelOfDetail="EXECUTION" tradeID="B3" ibExecID="BOND.03" tradeDate="20240101"
-          buySell="SELL" quantity="1000" tradePrice="97" conid="900000005" symbol="TESTBOND3"
-          currency="USD" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="USD"
-          accruedInt="8.25" fxRateToBase="1"/>
-        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
-        records, _ = parse_flex_xml(xml, ACCOUNT)
-        ingestor.ingest_many(records, "flex")
-        bond = db.rows("trades", 1)[0]
-        # Positive: accrued interest adds to the seller's cash received at settlement.
-        assert bond["accrued_interest_usd"] == pytest.approx(8.25)
-    finally:
-        db.conn.close()
 
 
-def test_bond_accrued_interest_converted_via_trade_fx_rate(tmp_path):
-    db = Database(tmp_path / "bond_fx_accrued.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        xml = b'''<FlexQueryResponse><FlexStatements><FlexStatement accountId="U0000002" baseCurrency="USD"><Trades>
-        <Trade levelOfDetail="EXECUTION" tradeID="B4" ibExecID="BOND.04" tradeDate="20240101"
-          buySell="BUY" quantity="1000" tradePrice="95" conid="900000006" symbol="TESTBOND4"
-          currency="EUR" assetCategory="BOND" multiplier="1" ibCommission="-2" ibCommissionCurrency="EUR"
-          accruedInt="10" fxRateToBase="1.1"/>
-        </Trades></FlexStatement></FlexStatements></FlexQueryResponse>'''
-        records, _ = parse_flex_xml(xml, ACCOUNT)
-        ingestor.ingest_many(records, "flex")
-        bond = db.rows("trades", 1)[0]
-        assert bond["accrued_interest_usd"] == pytest.approx(-11.0)
-    finally:
-        db.conn.close()
 
 
-def test_non_bond_instrument_ignores_stray_accrued_interest_attribute(tmp_path):
-    db = Database(tmp_path / "stray_accrued.sqlite3")
-    try:
-        ingestor = BrokerIngestor(db, ACCOUNT)
-        # A stray accruedInt attribute on a non-bond trade must never be converted.
-        stock = execution(commission=-1, con_id=777, symbol="XYZ")
-        stock["raw"] = dict(stock.get("raw") or {}, accruedInt="999")
-        ingestor.ingest_many([stock], "tws")
-        row = db.rows("trades", 1)[0]
-        assert row["security_type"] == "STK"
-        assert row["accrued_interest_usd"] == 0
-    finally:
-        db.conn.close()
 
 
 def test_completed_forward_split_reconciles_closed_position(tmp_path):

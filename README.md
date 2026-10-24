@@ -123,19 +123,10 @@ python main.py
       </a>
     </td>
     <td align="center" valign="top" width="50%">
-      <strong>Monthly P&amp;L</strong><br>
-      <a href="docs/images/demo-analytics-monthly.png">
-        <img src="docs/images/demo-analytics-monthly.png" width="100%">
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="top" width="50%">
       <strong>Buy / sell levels</strong><br>
       <a href="docs/images/demo-analytics-levels.png">
         <img src="docs/images/demo-analytics-levels.png" alt="Buy and sell markers on synthetic stock prices" width="100%">
       </a>
     </td>
-    <td width="50%"></td>
   </tr>
 </table>

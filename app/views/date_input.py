@@ -1,11 +1,23 @@
 """Reusable ISO date entry with a keyboard-friendly calendar grid."""
 
-from PySide6.QtCore import QDate, QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPen, QTextCharFormat
-from PySide6.QtWidgets import (QAbstractSpinBox, QCalendarWidget, QHBoxLayout, QLineEdit,
+from PySide6.QtCore import QDate, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCharFormat
+from PySide6.QtWidgets import (QAbstractSpinBox, QCalendarWidget, QDateEdit, QHBoxLayout, QLineEdit,
                                QMenu, QSpinBox, QToolButton, QWidget, QWidgetAction)
 
 from app.views.ui_theme import COLORS
+
+
+def _paint_calendar_icon(painter, x, y, color):
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.drawRoundedRect(QRectF(x - 7, y - 6, 14, 13), 2, 2)
+    painter.drawLine(QPointF(x - 6, y - 2), QPointF(x + 6, y - 2))
+    for offset in (-3, 3):
+        painter.drawLine(QPointF(x + offset, y - 8), QPointF(x + offset, y - 5))
+        painter.drawPoint(QPointF(x + offset, y + 2))
+    painter.restore()
 
 
 class DatePickerCalendar(QCalendarWidget):
@@ -13,7 +25,6 @@ class DatePickerCalendar(QCalendarWidget):
 
     def __init__(self, colors, parent=None):
         super().__init__(parent)
-        self.colors = colors
         self.range_start = None
         self.range_end = None
         self.setObjectName("datePickerCalendar")
@@ -22,13 +33,6 @@ class DatePickerCalendar(QCalendarWidget):
         self.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
         self.setGridVisible(False)
         self.setMinimumSize(310, 260)
-        header = QTextCharFormat()
-        header.setForeground(QColor(colors["muted"]))
-        header.setFontWeight(QFont.DemiBold)
-        self.setHeaderTextFormat(header)
-        for weekday in (Qt.Monday, Qt.Tuesday, Qt.Wednesday, Qt.Thursday,
-                        Qt.Friday, Qt.Saturday, Qt.Sunday):
-            self.setWeekdayTextFormat(weekday, header)
         for name, direction in (("qt_calendar_prevmonth", Qt.LeftArrow),
                                 ("qt_calendar_nextmonth", Qt.RightArrow)):
             button = self.findChild(QToolButton, name)
@@ -37,6 +41,18 @@ class DatePickerCalendar(QCalendarWidget):
         year_editor = self.findChild(QSpinBox, "qt_calendar_yearedit")
         if year_editor is not None:
             year_editor.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.set_colors(colors)
+
+    def set_colors(self, colors):
+        self.colors = colors
+        header = QTextCharFormat()
+        header.setForeground(QColor(colors["muted"]))
+        header.setFontWeight(QFont.DemiBold)
+        self.setHeaderTextFormat(header)
+        for weekday in (Qt.Monday, Qt.Tuesday, Qt.Wednesday, Qt.Thursday,
+                        Qt.Friday, Qt.Saturday, Qt.Sunday):
+            self.setWeekdayTextFormat(weekday, header)
+        self.updateCells()
 
     def setRange(self, first, last):
         self.range_start = first if first.isValid() and last.isValid() and first <= last else None
@@ -51,7 +67,7 @@ class DatePickerCalendar(QCalendarWidget):
         selected = day == self.selectedDate()
         in_range = (self.range_start is not None and self.range_start <= day <= self.range_end)
         if selected or in_range:
-            painter.setPen(Qt.NoPen)
+            painter.setPen(QPen(QColor(colors["selection_border"]), 2) if selected else Qt.NoPen)
             painter.setBrush(QColor(colors["calendar_selected"] if selected else
                                     colors["calendar_range"]))
             painter.drawRoundedRect(tile, 6, 6)
@@ -65,6 +81,33 @@ class DatePickerCalendar(QCalendarWidget):
                                colors["text"] if available and current_month else colors["muted"]))
         painter.drawText(rect, Qt.AlignCenter, str(day.day()))
         painter.restore()
+
+
+class CalendarDateEdit(QDateEdit):
+    """ISO date field with the shared popup and a clear calendar affordance."""
+
+    def __init__(self, selected, parent=None):
+        super().__init__(selected, parent)
+        self.setCalendarPopup(True)
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setCalendarWidget(DatePickerCalendar(COLORS["light"], self))
+        self.setFixedWidth(170)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        _paint_calendar_icon(painter, self.width() - 15, self.height() / 2,
+                             self.palette().color(self.foregroundRole()))
+        painter.end()
+
+
+class CalendarButton(QToolButton):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        _paint_calendar_icon(painter, self.width() / 2, self.height() / 2,
+                             self.palette().color(self.foregroundRole()))
+        painter.end()
 
 
 class CalendarDateInput(QWidget):
@@ -84,12 +127,11 @@ class CalendarDateInput(QWidget):
         self.line_edit.setToolTip("Type a date as YYYY-MM-DD.")
         self.setFocusProxy(self.line_edit)
         row.addWidget(self.line_edit)
-        self.calendar_button = QToolButton()
+        self.calendar_button = CalendarButton()
         self.calendar_button.setObjectName("calendarDateButton")
-        self.calendar_button.setArrowType(Qt.DownArrow)
         self.calendar_button.setFixedWidth(28)
         self.calendar_button.setToolTip("Choose a date from the calendar")
-        self.calendar_button.setFocusPolicy(Qt.NoFocus)
+        self.calendar_button.setFocusPolicy(Qt.ClickFocus)
         self.calendar_button.clicked.connect(self._show_calendar)
         row.addWidget(self.calendar_button)
         self._minimum = None
@@ -131,6 +173,13 @@ class CalendarDateInput(QWidget):
             owner = owner.parentWidget()
         return COLORS["light"]
 
+    def _set_calendar_open(self, is_open):
+        button = self.calendar_button
+        button.setProperty("calendarOpen", is_open)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+
     def _show_calendar(self):
         menu = QMenu(self)
         menu.setObjectName("datePickerMenu")
@@ -151,6 +200,7 @@ class CalendarDateInput(QWidget):
         action = QWidgetAction(menu)
         action.setDefaultWidget(calendar)
         menu.addAction(action)
+        menu.aboutToHide.connect(lambda: self._set_calendar_open(False))
 
         def choose(day):
             self.setDate(day)
@@ -166,5 +216,6 @@ class CalendarDateInput(QWidget):
         if y + size.height() > screen.bottom() + 1:
             y = self.calendar_button.mapToGlobal(QPoint(0, 0)).y() - size.height()
         y = max(screen.top(), min(y, screen.bottom() - size.height() + 1))
+        self._set_calendar_open(True)
         menu.popup(QPoint(x, y))
         calendar.setFocus()

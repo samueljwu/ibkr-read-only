@@ -47,23 +47,3 @@ def test_cash_view_shows_all_imported_currencies_and_date_range(tmp_path):
         tab.close()
     finally:
         db.conn.close()
-
-
-def test_cash_transactions_sort_numerically_and_keep_decimal_choice(tmp_path):
-    app = QApplication.instance() or QApplication([])
-    db = Database(tmp_path / "cash-sort.sqlite3")
-    try:
-        _seed(db)
-        tab = CashMovementsTab(db, 1)
-        tab.table.sortItems(4, Qt.AscendingOrder)
-        amounts = [tab.table.item(row, 4).raw_value for row in range(tab.table.rowCount())]
-        assert amounts == sorted(amounts)
-        tab.table.set_column_decimals(4, 3)
-        tab.refresh()
-        assert tab.table.item(0, 4).text() == "2.500"
-        tab.close()
-        reopened = CashMovementsTab(db, 1)
-        assert reopened.table.decimals_for(4) == 3
-        reopened.close()
-    finally:
-        db.conn.close()

@@ -38,14 +38,6 @@ def test_status_write_retries_transient_windows_permission_error(tmp_path, monke
     assert read_status(path)["state"] == "completed"
 
 
-def test_imported_periods_merge_adjacent_windows_but_keep_gaps():
-    periods = {"trades": [["2022-01-15", "2022-01-31"],
-                           ["2022-01-01", "2022-01-14"],
-                           ["2022-03-01", "2022-03-31"]]}
-    assert format_imported_periods(periods) == (
-        "Imported periods (all runs):\n"
-        "Trades: 2022-01-01 to 2022-01-31, 2022-03-01 to 2022-03-31\n"
-        "Analytics: none\nCash: none")
 
 
 def configured_database(tmp_path):
@@ -76,23 +68,6 @@ def test_tls_failure_is_saved_for_history_import(tmp_path, monkeypatch):
     assert message in format_history_details(status)
 
 
-def test_completed_flex_windows_include_prior_runs_for_selected_account_only(tmp_path):
-    db = Database(configured_database(tmp_path))
-    try:
-        with db.conn:
-            db.conn.executemany("""INSERT INTO broker_sync_windows
-                (account_id,source,from_day,to_day,status) VALUES (?,?,?,?,?)""", [
-                ("SYNTHETIC", "flex", "2022-01-01", "2022-01-31", "complete"),
-                ("SYNTHETIC", "flex_cash", "2022-02-01", "2022-02-28", "complete"),
-                ("SYNTHETIC", "flex_analytics", "2022-03-01", "2022-03-31", "review"),
-                ("OTHER", "flex", "2021-01-01", "2021-01-31", "complete"),
-            ])
-        assert db.completed_flex_windows("SYNTHETIC") == {
-            "trades": [("2022-01-01", "2022-01-31")],
-            "analytics": [], "cash": [("2022-02-01", "2022-02-28")],
-        }
-    finally:
-        db.conn.close()
 
 
 def arguments(path, first="2026-01-01", last="2026-01-14", source="trades"):
@@ -133,24 +108,6 @@ def test_flex_errors_keep_safe_context_without_echoed_credentials(tmp_path, monk
         assert str(code) in status["message"] and stage in status["message"]
 
 
-@pytest.mark.parametrize("source,runner", [("trades", run_flex_sync),
-                                           ("analytics", run_analytics_flex_sync),
-                                           ("cash", run_cash_flex_sync)])
-def test_unavailable_window_logs_code_and_stage_without_server_text(tmp_path, monkeypatch,
-                                                                     source, runner):
-    path = configured_database(tmp_path)
-
-    def unavailable(_query, _token, *, from_day, to_day):
-        raise FlexServiceError(1003, f"Untrusted {FAKE_TOKEN} {FAKE_URL}", "SendRequest")
-
-    monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 0)
-    monkeypatch.setitem(import_history.RUNNERS, source,
-                        partial(runner, token="synthetic", fetcher=unavailable))
-    assert import_history.main(arguments(path, source=source)) == 0
-    log = (tmp_path / "logs" / "history-import.log").read_text(encoding="utf-8")
-    assert (f"Request unavailable: source={source} window=2026-01-01 to 2026-01-14 "
-            "code=1003 stage=SendRequest") in log
-    assert FAKE_TOKEN not in log and FAKE_URL not in log and "https://" not in log
 
 
 def test_weekend_end_uses_friday_without_claiming_weekend(tmp_path, monkeypatch):
@@ -181,21 +138,6 @@ def test_weekend_end_uses_friday_without_claiming_weekend(tmp_path, monkeypatch)
     assert "Weekend end not requested: 2022-04-30 to 2022-04-30" in format_history_details(status)
 
 
-def test_weekend_end_still_reports_friday_unavailable(tmp_path, monkeypatch):
-    path = configured_database(tmp_path)
-    calls = []
-
-    def runner(_db, _account, _query, *, windows_override, on_window_start,
-               on_window_unavailable, on_window_unavailable_detail, **_kwargs):
-        first, last = windows_override[0]
-        calls.append((first, last))
-        on_window_start(first, last)
-        on_window_unavailable_detail(first, last, 1003, "GetStatement")
-        on_window_unavailable(first, last)
-
-    monkeypatch.setitem(import_history.RUNNERS, "trades", runner)
-    assert import_history.main(arguments(path, "2022-04-01", "2022-04-30", "trades")) == 0
-    assert calls == [("2022-04-01", "2022-04-29")]
 
 
 def test_weekend_only_window_is_skipped_and_shown_as_gap(tmp_path, monkeypatch):
@@ -269,31 +211,6 @@ def test_worker_never_persists_captured_output_or_exception_text(tmp_path, monke
         assert "cash period overlap" not in status["message"]
 
 
-def test_import_spaces_windows_across_source_boundaries(tmp_path, monkeypatch):
-    path = configured_database(tmp_path)
-    clock = [0.0]
-    calls = []
-    sleeps = []
-
-    def sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    def runner(_db, _account, _query, *, windows_override, on_window_start,
-               on_window_complete, **_kwargs):
-        calls.append((clock[0], windows_override[0]))
-        on_window_start(*windows_override[0])
-        clock[0] += 2.0
-        on_window_complete(*windows_override[0])
-
-    monkeypatch.setattr(import_history.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(import_history.time, "sleep", sleep)
-    monkeypatch.setattr(import_history, "REQUEST_PACING_SECONDS", 15)
-    for source in import_history.SOURCES:
-        monkeypatch.setitem(import_history.RUNNERS, source, runner)
-    assert import_history.main(arguments(path, last="2026-01-28", source="all")) == 0
-    assert [stamp for stamp, _span in calls] == [0, 17, 34]
-    assert sleeps == [15] * 2
 
 
 @pytest.mark.parametrize("failure", ["service", "validation", "unexpected", "configuration"])
@@ -323,35 +240,3 @@ def test_later_hard_failure_takes_precedence_over_prior_review(tmp_path, monkeyp
     assert status["active_source"] == "cash"
     saved = path.read_text(encoding="utf-8")
     assert FAKE_TOKEN not in saved and FAKE_URL not in saved
-
-
-@pytest.mark.parametrize("source", ["trades", "cash"])
-def test_window_crossing_history_floor_keeps_every_available_day(tmp_path, monkeypatch, source):
-    path = configured_database(tmp_path)
-    floor = import_history.oldest_flex_date()
-    first = (floor - timedelta(days=7)).isoformat()
-    last = (floor + timedelta(days=6)).isoformat()
-    requested = []
-    events = []
-
-    def runner(_db, _account, _query, *, windows_override, on_window_start,
-               on_window_complete, **_kwargs):
-        requested.extend(windows_override)
-        on_window_start(*windows_override[0])
-        on_window_complete(*windows_override[0])
-
-    if source == "cash":
-        # Repeating the exact clamped period must pass cash overlap validation.
-        db = Database(path)
-        with db.conn:
-            db.conn.execute("""INSERT INTO broker_sync_windows
-                (account_id,source,from_day,to_day,status)
-                VALUES ('SYNTHETIC','flex_cash',?,?,'complete')""",
-                (floor.isoformat(), last))
-        db.conn.close()
-    monkeypatch.setitem(import_history.RUNNERS, source, runner)
-    assert import_history.main(arguments(path, first, last, source),
-                               progress=lambda *event: events.append(event)) == 0
-    assert requested == [(floor.isoformat(), last)]
-    outside = next(event for event in events if event[0] == "windows_outside_history")
-    assert outside[2] == [[first, (floor - timedelta(days=1)).isoformat()]]

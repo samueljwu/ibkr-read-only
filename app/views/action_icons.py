@@ -6,8 +6,18 @@ from PySide6.QtSvg import QSvgRenderer
 
 
 _PATHS = {
+    "sidebar_show": ('<rect x="2" y="3" width="20" height="18" rx="2"/>'
+                     '<path d="M9 3v18m8-12-3 3 3 3"/>'),
+    "sidebar_hide": ('<rect x="2" y="3" width="20" height="18" rx="2"/>'
+                     '<path d="M9 3v18m4-12 3 3-3 3"/>'),
     "chevron_left": '<path d="m15 18-6-6 6-6"/>',
     "chevron_right": '<path d="m9 6 6 6-6 6"/>',
+    "zoom_in": ('<circle cx="10.5" cy="10.5" r="7.5"/>'
+                '<path d="M16 16l5 5M7.5 10.5h6m-3-3v6"/>'),
+    "zoom_out": ('<circle cx="10.5" cy="10.5" r="7.5"/>'
+                 '<path d="M16 16l5 5M7.5 10.5h6"/>'),
+    "reset_view": ('<path d="M3 11a9 9 0 1 1 2.6 7.4"/>'
+                   '<path d="M3 4v7h7"/>'),
     "sync": ('<path d="M3 12a9 9 0 0 1 15.36-6.36L21 8"/>'
              '<path d="M21 3v5h-5"/>'
              '<path d="M21 12a9 9 0 0 1-15.36 6.36L3 16"/>'

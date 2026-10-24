@@ -39,6 +39,7 @@ def test_main_passes_explicit_database_to_window(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(main, "QApplication", App)
+    monkeypatch.setattr(main, "install_app_font", lambda app: None)
     monkeypatch.setattr(main, "QIcon", lambda path: None)
     monkeypatch.setattr(main, "MainWindow", Window)
     monkeypatch.setattr(main, "DatabaseSelectionWindow", lambda *args: None)
