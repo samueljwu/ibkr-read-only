@@ -331,6 +331,10 @@ def test_rebalance_input_hover_preserves_selection_and_cursor(tmp_path, theme):
         assert choice.view().isVisible()
         assert tab.table.currentIndex() == choice_index
         choice.hidePopup()
+        # The offscreen macOS plugin can deactivate the parent after a popup closes.
+        app.setActiveWindow(tab)
+        cash.lineEdit().setFocus(Qt.MouseFocusReason)
+        app.processEvents()
 
         QTest.mouseMove(cash.lineEdit(), QPoint(4, 4))
         cash.setValue(12.34)

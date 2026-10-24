@@ -123,7 +123,8 @@ def test_dialog_only_installs_a_matching_download(tmp_path, monkeypatch, valid):
                         lambda: tmp_path / "IBKRDashboard.exe")
     monkeypatch.setattr(update_dialog.tempfile, "mkdtemp", lambda **_kwargs: str(tmp_path))
     content = b"synthetic installer bytes"
-    metadata = release(platform=sys.platform)
+    major, minor, patch = map(int, app_update.VERSION.split("."))
+    metadata = release(f"{major}.{minor}.{patch + 1}", platform=sys.platform)
     asset = metadata["assets"][0]
     asset["size"] = len(content)
     asset["digest"] = "sha256:" + hashlib.sha256(content if valid else b"other").hexdigest()
