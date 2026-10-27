@@ -463,14 +463,17 @@ class AnalyticsTab(QWidget):
                 places = precision.get(name)
                 if isinstance(places, int) and not isinstance(places, bool) and 0 <= places <= 30:
                     control.setValue(places)
-        try:
-            first = date.fromisoformat(state["start"])
-            last = date.fromisoformat(state["end"])
-        except (KeyError, TypeError, ValueError):
-            pass
+        if self.range_combo.currentText() == "Custom":
+            try:
+                first = date.fromisoformat(state["start"])
+                last = date.fromisoformat(state["end"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                self._set_dates(first, last)
         else:
-            self._set_dates(first, last)
-            self.refresh()
+            self._set_dates(*self._preset_bounds(self.range_combo.currentText()))
+        self.refresh()
         for name, combo, splitter, table, setting_key in (
                 ("pnl", self.pnl_layout_combo, self.pnl_splitter, self.pnl_table,
                  "analytics_pnl_splitter"),
@@ -954,7 +957,8 @@ class AnalyticsTab(QWidget):
              row["performance"] if complete else None,
              row["external_flow"],
              row["daily_pnl"] if complete else None,
-             row["daily_return"] if complete else None) for row in pnl_rows])
+             row["daily_return"] if complete else None) for row in pnl_rows
+            if date.fromisoformat(row["day"]).weekday() < 5])
 
     def refresh_exposure(self, portfolio_rows=None):
         self.exposure_page.refresh(portfolio_rows)
