@@ -457,6 +457,64 @@ def test_weekend_flow_keeps_its_date_and_does_not_count_as_gain():
     assert rows[-1]["adjusted_change"] == 0
 
 
+def test_pnl_daily_table_omits_weekend_rows_without_dropping_flow(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    import app.ui as ui
+
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "weekend-table.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        for day, nav in (("2026-01-02", 1000), ("2026-01-05", 1500)):
+            window.db.save_account_history(1, day, nav, 100, "flex", True)
+        window.db.save_external_flow(1, "weekend-flow", "2026-01-03", 500, "net external")
+        tab = window.analytics_tab
+        tab.range_combo.setCurrentText("All")
+        tab.sections.setCurrentWidget(tab.pnl_page)
+        tab.refresh()
+        assert [row["day"] for row in tab._pnl_rows] == [
+            "2026-01-02", "2026-01-03", "2026-01-05"]
+        assert sorted(tab.pnl_table.item(row, 0).text()
+                      for row in range(tab.pnl_table.rowCount())) == [
+            "2026-01-02", "2026-01-05"]
+        assert tab.stats["Adjusted NAV change"].text() == "$0.00"
+    finally:
+        window.close()
+
+
+def test_ytd_replaces_custom_end_date_and_ignores_saved_preset_dates(tmp_path, monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QDate
+    from PySide6.QtWidgets import QApplication
+    import app.ui as ui
+
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "ytd-range.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        tab = window.analytics_tab
+        today = date.today()
+        tab.capital_controls.range_combo.setCurrentText("Custom")
+        stale = today - timedelta(days=10)
+        tab.capital_controls.end_date.setDate(QDate(stale.year, stale.month, stale.day))
+        assert tab.end_date.date().toPython() == stale
+        tab.capital_controls.range_combo.setCurrentText("YTD")
+        for controls in (tab.pnl_controls, tab.capital_controls):
+            assert controls.range_combo.currentText() == "YTD"
+            assert controls.start_date.date().toPython() == date(today.year, 1, 1)
+            assert controls.end_date.date().toPython() == today
+        saved = tab.view_state()
+        saved["end"] = stale.isoformat()
+        assert tab.apply_view_state(saved)
+        assert tab.end_date.date().toPython() == today
+        assert tab.capital_controls.end_date.date().toPython() == today
+    finally:
+        window.close()
+
+
 def test_range_adjusted_values_are_cumulative_while_daily_pnl_is_one_period():
     snapshots = [
         {"day": "2026-01-02", "nav_usd": 1000, "source": "flex", "flow_covered": 1},

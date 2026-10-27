@@ -128,7 +128,7 @@ def performance_window_rows(snapshots, flows, first, last):
                      "external_flow": visible_flow_by_day[day], "source": snapshot["source"]})
         previous = snapshot
 
-    # Show weekend and holiday transfers on their actual dates in the table.
+    # Retain transfer-only dates in analysis rows, including hidden weekend rows.
     observed_days = {row["day"] for row in rows}
     for day, amount in visible_flow_by_day.items():
         if first.isoformat() <= day <= last.isoformat() and day not in observed_days:
