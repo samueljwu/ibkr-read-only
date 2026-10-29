@@ -404,10 +404,12 @@ class MatchingService:
         position_qty = defaultdict(float)
         anchored = set()
         traded_pct = {}
+        position_before_qty = {}
         for trade in sorted(trades, key=lambda item: (
                 item["trade_date"], item.get("executed_at") or "", item["id"])):
             if trade["security_type"] == "CASH":
                 traded_pct[trade["id"]] = None
+                position_before_qty[trade["id"]] = None
                 continue
             position_id = trade["position_id"]
             opening = openings.get(position_id)
@@ -415,6 +417,7 @@ class MatchingService:
                 position_qty[position_id] = float(opening["quantity"])
                 anchored.add(position_id)
             prior = position_qty[position_id]
+            position_before_qty[trade["id"]] = prior
             traded_pct[trade["id"]] = (float(trade["quantity"]) / abs(prior)
                                         if abs(prior) > 1e-9 else None)
             position_qty[position_id] = prior + float(trade["quantity"]) * (
@@ -423,6 +426,10 @@ class MatchingService:
         for trade in trades:
             row = dict(trade)
             row["traded_pct"] = traded_pct[trade["id"]]
+            row["position_before_qty"] = position_before_qty[trade["id"]]
+            clock = str(trade.get("executed_at") or "")
+            row["execution_time"] = (f"{clock[:2]}:{clock[2:4]}:{clock[4:]}"
+                                     if len(clock) == 6 and clock.isdigit() else None)
             if not trade["commission_complete"]:
                 row["commission_usd"] = None
             multiplier = valid_multiplier(trade["multiplier"])
