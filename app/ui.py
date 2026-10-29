@@ -87,6 +87,7 @@ TRADES = [
     col("unrealized_pct", "Open P&L %", "pct"),
     # Append logical columns to preserve saved sort indices and header layouts.
     col("traded_pct", "Position traded %", "pct"),
+    col("execution_time", "Time"),
 ]
 LOTS = [
     col("lot_state", "Status"), col("ticker", "Instrument"), col("buy_date", "Bought", "date"),
@@ -292,6 +293,10 @@ class GridModel(QAbstractTableModel):
         row = self.rows[index.row()]
         value = row.get(key)
         if role == Qt.ToolTipRole:
+            if key == "execution_time":
+                return ("Execution time as recorded by IBKR." if value else
+                        "Execution time unavailable; the order of trades on this date cannot be confirmed. "
+                        "Position traded % places untimed trades before timed trades for the day.")
             if key == "commission_usd" and not row.get("commission_complete", True):
                 return "Fee or rebate has not arrived from IBKR; P&L excludes it for now."
             if self.name == "Portfolio" and row.get("estimated_baseline") and key in (
@@ -317,6 +322,10 @@ class GridModel(QAbstractTableModel):
             if key == "daily_pnl" and row.get("daily_pnl_fee_pending"):
                 return ("Estimated daily P&L excludes fees or rebates pending from IBKR. "
                         "It will update when they arrive.")
+            if key == "traded_pct" and row.get("position_before_qty") is not None:
+                return (f"{display_number(row['quantity'])} traded ÷ "
+                        f"{display_number(abs(row['position_before_qty']))} position size before this trade "
+                        f"= {float(value):,.{self.decimals_for(index.column())}%}.")
             if self.name == "Portfolio" and key in ("average_cost", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
                 return "Estimated without pending fees or rebates; this value will update when they arrive."
             if self.name in ("Lots", "Trades") and key in ("realized_net", "realized_pct", "net_unrealized", "unrealized_pct") and row.get("fee_pending"):
@@ -338,6 +347,8 @@ class GridModel(QAbstractTableModel):
         if role in (Qt.DisplayRole, Qt.EditRole):
             if role == Qt.EditRole:
                 return "" if value is None else str(value)
+            if key == "execution_time" and not value:
+                return "Unknown"
             if value is None or value == "":
                 if value is None and key in (
                     "gross_usd", "value", "daily_pnl", "unrealized_pnl", "portfolio_pct",
@@ -399,6 +410,11 @@ class GridModel(QAbstractTableModel):
         _, _, kind = self.columns[self.sort_column]
         populated = [row for row in rows if row.get(key) is not None and row.get(key) != ""]
         missing = [row for row in rows if row.get(key) is None or row.get(key) == ""]
+        if self.name == "Trades" and key == "trade_date":
+            populated.sort(key=lambda row: (str(row[key]).casefold(),
+                                            row.get("executed_at") or "", row.get("id", 0)),
+                           reverse=self.sort_order == Qt.DescendingOrder)
+            return populated + missing
         populated.sort(key=lambda row: float(row[key]) if kind in NUMERIC_KINDS
                        else str(row[key]).casefold(), reverse=self.sort_order == Qt.DescendingOrder)
         return populated + missing
@@ -2530,6 +2546,9 @@ class MainWindow(QMainWindow):
             if name == "Trades" and self.db.setting("trades_position_pct_version") != "1":
                 self._place_trade_position_pct()
                 self.db.set_setting("trades_position_pct_version", "1")
+            if name == "Trades" and self.db.setting("trades_execution_time_version") != "1":
+                self._place_trade_execution_time()
+                self.db.set_setting("trades_execution_time_version", "1")
             if name == "Portfolio" and self.db.setting("price_move_bars_intro_applied") != "1":
                 for column in (9, 10, 11):
                     view.showColumn(column)
@@ -2561,6 +2580,17 @@ class MainWindow(QMainWindow):
         target = header.visualIndex(columns["quantity"])
         header.moveSection(source, target + (source > target))
         view.setColumnWidth(column, 145)
+        view.showColumn(column)
+
+    def _place_trade_execution_time(self):
+        view = self.views["Trades"]
+        header = view.horizontalHeader()
+        columns = {key: index for index, (key, _, _) in enumerate(TRADES)}
+        column = columns["execution_time"]
+        source = header.visualIndex(column)
+        target = header.visualIndex(columns["trade_date"])
+        header.moveSection(source, target + (source > target))
+        view.setColumnWidth(column, 95)
         view.showColumn(column)
 
     def _current_table_name(self):

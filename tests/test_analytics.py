@@ -923,6 +923,8 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, 
     try:
         today = date.today()
         first = today - timedelta(days=40)
+        recorded_days = [first + timedelta(days=offset) for offset in range(41)
+                         if (first + timedelta(days=offset)).weekday() < 5]
         for offset in range(41):
             day = first + timedelta(days=offset)
             if day.weekday() < 5:
@@ -950,8 +952,8 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, 
         assert tab.range_combo.currentText() == "Custom"
         assert active_controls.start_date.isVisible()
         assert active_controls.end_date.isVisible()
-        assert tab.start_date.date().toPython() == first
-        assert tab.end_date.date().toPython() == today
+        assert tab.start_date.date().toPython() == recorded_days[0]
+        assert tab.end_date.date().toPython() == recorded_days[-1]
         view = getattr(tab, f"{section}_chart")
         area = view.chart().plotArea()
         assert area.width() > 100
@@ -1002,8 +1004,8 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, 
         assert tab.capital_controls.start_date.date() == tab.start_date.date()
         navigation.reset.click()
         assert tab.range_combo.currentText() == "All"
-        assert tab.start_date.date().toPython() == first
-        assert tab.end_date.date().toPython() == today
+        assert tab.start_date.date().toPython() == recorded_days[0]
+        assert tab.end_date.date().toPython() == recorded_days[-1]
         if navigation.select_dates.isChecked():
             navigation.select_dates.click()
         assert view.cursor().shape() == Qt.ArrowCursor

@@ -64,6 +64,41 @@ def test_trades_grid_displays_position_traded_percent(tmp_path):
         db.conn.close()
 
 
+def test_trades_date_sort_uses_execution_time_and_shows_position_basis(tmp_path):
+    from app.finance.services import PortfolioService
+    from app.market.market_data import MockMarketDataProvider
+
+    db = Database(tmp_path / "trade-order.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "AAPL"})
+        later = db.add_trade({"position_id": position, "trade_date": "2026-08-04",
+                              "executed_at": "103000", "side": "BUY", "quantity": 80,
+                              "price": 10, "commission_usd": 0})
+        earlier = db.add_trade({"position_id": position, "trade_date": "2026-08-04",
+                                "executed_at": "093000", "side": "BUY", "quantity": 20,
+                                "price": 10, "commission_usd": 0})
+        unknown = db.add_trade({"position_id": position, "trade_date": "2026-08-04",
+                                "side": "BUY", "quantity": 10, "price": 10,
+                                "commission_usd": 0})
+        rows = PortfolioService(db, MockMarketDataProvider()).trade_rows()
+        model = ui.GridModel("Trades", db, SimpleNamespace(trade_rows=lambda: rows))
+        time_column = next(i for i, (key, _, _) in enumerate(ui.TRADES)
+                           if key == "execution_time")
+        pct_column = next(i for i, (key, _, _) in enumerate(ui.TRADES)
+                          if key == "traded_pct")
+        model.sort(0, Qt.AscendingOrder)
+        assert [row["id"] for row in model.rows] == [unknown, earlier, later]
+        assert [model.data(model.index(i, time_column)) for i in range(3)] == [
+            "Unknown", "09:30:00", "10:30:00"]
+        assert "20.00 traded ÷ 10.00 position size before this trade" in model.data(
+            model.index(1, pct_column), Qt.ToolTipRole)
+        assert "order of trades" in model.data(model.index(0, time_column), Qt.ToolTipRole)
+        model.sort(0, Qt.DescendingOrder)
+        assert [row["id"] for row in model.rows] == [later, earlier, unknown]
+    finally:
+        db.conn.close()
+
+
 def test_trade_fee_refreshes_after_another_process_updates_shared_database(tmp_path, monkeypatch):
     QApplication.instance() or QApplication([])
     db_path = tmp_path / "shared-fee.sqlite3"
@@ -1395,16 +1430,17 @@ def test_displayed_financial_numbers_use_commas_and_two_decimals(tmp_path, monke
         trades, lots = window.models["Trades"], window.models["Lots"]
         assert trades.data(trades.index(0, 3), Qt.DisplayRole) == "12,345.68"
         assert trades.data(trades.index(0, 5), Qt.DisplayRole) == "-12.35"
-        assert [label for _, label, _ in trades.columns[-5:]] == [
+        assert [label for _, label, _ in trades.columns[-6:]] == [
             "Realized P&L USD", "Realized P&L %", "Open P&L USD", "Open P&L %",
-            "Position traded %"]
+            "Position traded %", "Time"]
         header = window.views["Trades"].horizontalHeader()
-        assert header.visualIndex(trades.columnCount() - 1) == header.visualIndex(3) + 1
+        assert header.visualIndex(trades.columnCount() - 2) == header.visualIndex(3) + 1
+        assert header.visualIndex(trades.columnCount() - 1) == header.visualIndex(0) + 1
         assert all(not window.views["Trades"].isColumnHidden(column)
-                   for column in range(trades.columnCount() - 5, trades.columnCount()))
+                   for column in range(trades.columnCount() - 6, trades.columnCount()))
         assert [trades.data(trades.index(0, column), Qt.DisplayRole)
-                for column in range(trades.columnCount() - 5, trades.columnCount())] == [
-                    "123.46", "12.34%", "-45.68", "-5.67%", "20.00%"]
+                for column in range(trades.columnCount() - 6, trades.columnCount())] == [
+                    "123.46", "12.34%", "-45.68", "-5.67%", "20.00%", "Unknown"]
         assert lots.data(lots.index(0, 3), Qt.DisplayRole) == "12,345.68"
         assert lots.data(lots.index(0, 7), Qt.DisplayRole) == "9,876,543.22"
         assert "number_decimals" not in window.settings_fields
