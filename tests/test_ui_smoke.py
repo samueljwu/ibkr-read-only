@@ -390,6 +390,27 @@ def test_window_text_copy_menu_and_settings_paste(tmp_path, monkeypatch):
         window.close()
 
 
+def test_settings_port_shortcuts_fill_editable_field(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "port-shortcuts.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        field = window.settings_fields["ib_port"]
+        buttons = {button.text(): button for button in
+                   window.settings_dialog.findChildren(QPushButton)}
+        buttons["TWS 7496"].click()
+        assert field.text() == "7496"
+        buttons["Gateway 4001"].click()
+        assert field.text() == "4001"
+        field.setText("5000")
+        assert field.text() == "5000"
+        buttons["TWS 7496"].click()
+        window.apply_settings()
+        assert window.db.setting("ib_port") == "7496"
+    finally:
+        window.close()
+
+
 def test_mock_window_trade_derived_lots(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "ui.sqlite3"))

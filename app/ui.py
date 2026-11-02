@@ -1804,7 +1804,15 @@ class MainWindow(QMainWindow):
             target = advanced_form if key in (
                 "provider", "ib_client_id", "data_mode", "refresh_seconds",
                 "backup_directory") else form
-            target.addRow(label, widget)
+            if key == "ib_port":
+                port_row = QHBoxLayout()
+                port_row.addWidget(widget, 1)
+                for name, port in (("TWS 7496", "7496"), ("Gateway 4001", "4001")):
+                    port_row.addWidget(widgets.button(
+                        name, lambda _checked=False, value=port: self.settings_fields["ib_port"].setText(value)))
+                target.addRow(label, port_row)
+            else:
+                target.addRow(label, widget)
         self.database_location = QLabel(str(self.db.path))
         self.database_location.setTextFormat(Qt.PlainText)
         self.database_location.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
