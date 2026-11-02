@@ -2137,7 +2137,7 @@ def test_overview_removes_quantity_diagnostics_without_losing_reconciliation(tmp
         model = window.models["Portfolio"]
         assert {"broker_qty", "qty_difference"}.isdisjoint(
             key for key, _, _ in model.columns)
-        assert model.columnCount() == 16
+        assert model.columnCount() == 17
         assert model.columns[12][0] == "reconciliation"
         assert not window.views["Portfolio"].isColumnHidden(12)
         assert model.sort_column == 1
@@ -2219,7 +2219,7 @@ def test_overview_migrates_saved_difference_column_sort(tmp_path, monkeypatch):
     window = ui.MainWindow()
     try:
         model = window.models["Portfolio"]
-        assert model.columnCount() == 16
+        assert model.columnCount() == 17
         assert model.columns[12][0] == "reconciliation"
         assert not window.views["Portfolio"].isColumnHidden(12)
         assert model.sort_column == 12

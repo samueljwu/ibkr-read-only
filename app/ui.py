@@ -71,6 +71,8 @@ PORTFOLIO = [
     col("one_day", "DTD", "pct"), col("mtd", "MTD", "pct"), col("ytd", "YTD", "pct"),
     col("reconciliation", "Reconciliation"), col("data_status", "Data status"),
     col("price_source", "Price source"), col("last_updated", "Updated"),
+    # Append logical columns to preserve saved sort indices and header layouts.
+    col("total_cost_usd", "Total cost USD", "money"),
 ]
 TRADES = [
     col("trade_date", "Date", "date"), col("display_ticker", "Instrument"),
@@ -300,7 +302,7 @@ class GridModel(QAbstractTableModel):
             if key == "commission_usd" and not row.get("commission_complete", True):
                 return "Fee or rebate has not arrived from IBKR; P&L excludes it for now."
             if self.name == "Portfolio" and row.get("estimated_baseline") and key in (
-                    "average_cost", "unrealized_pnl", "unrealized_pct", "data_status"):
+                    "average_cost", "total_cost_usd", "unrealized_pnl", "unrealized_pct", "data_status"):
                 return (f"Estimated from the Activity Statement closing market price on "
                         f"{row['estimated_baseline']}. This is a performance starting value, "
                         "not the original purchase cost or tax basis; earlier gains are excluded.")
@@ -326,11 +328,12 @@ class GridModel(QAbstractTableModel):
                 return (f"{display_number(row['quantity'])} traded ÷ "
                         f"{display_number(abs(row['position_before_qty']))} position size before this trade "
                         f"= {float(value):,.{self.decimals_for(index.column())}%}.")
-            if self.name == "Portfolio" and key in ("average_cost", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
+            if self.name == "Portfolio" and key in ("average_cost", "total_cost_usd", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
                 return "Estimated without pending fees or rebates; this value will update when they arrive."
             if self.name in ("Lots", "Trades") and key in ("realized_net", "realized_pct", "net_unrealized", "unrealized_pct") and row.get("fee_pending"):
                 return "Estimated without pending fees or rebates; this value will update when they arrive."
             return {"gross_usd": "Gross trade value in USD, before commission.",
+                    "total_cost_usd": "USD purchase cost of shares still held, using each buy's acquisition FX rate and allocated buy fees or rebates. Excludes accrued interest and shares already sold.",
                     "traded_pct": "Trade quantity divided by the absolute position quantity immediately before this execution.",
                     "one_day": "Price change from the prior session close in the instrument's currency. Excludes FX, trades, fees and position direction.",
                     "daily_pnl": "Security-position P&L in USD since the prior session, including today's trades, their commissions and FX changes. Excludes cash income, bond accrued interest and standalone FX effects.",
@@ -351,7 +354,7 @@ class GridModel(QAbstractTableModel):
                 return "Unknown"
             if value is None or value == "":
                 if value is None and key in (
-                    "gross_usd", "value", "daily_pnl", "unrealized_pnl", "portfolio_pct",
+                    "gross_usd", "value", "total_cost_usd", "daily_pnl", "unrealized_pnl", "portfolio_pct",
                     "realized_net", "realized_pct", "net_unrealized", "unrealized_pct",
                     "traded_pct"):
                     return "—"
@@ -2553,6 +2556,16 @@ class MainWindow(QMainWindow):
                 for column in (9, 10, 11):
                     view.showColumn(column)
                 self.db.set_setting("price_move_bars_intro_applied", "1")
+            if name == "Portfolio" and self.db.setting("total_cost_column_intro_applied") != "1":
+                header = view.horizontalHeader()
+                column = next(index for index, (key, _, _) in enumerate(PORTFOLIO)
+                              if key == "total_cost_usd")
+                target = header.visualIndex(2)
+                source = header.visualIndex(column)
+                header.moveSection(source, target + (source > target))
+                view.setColumnWidth(column, 125)
+                view.showColumn(column)
+                self.db.set_setting("total_cost_column_intro_applied", "1")
         if not use_saved:
             self.db.set_setting("header_layout_version", "3")
         if not portfolio_saved:
