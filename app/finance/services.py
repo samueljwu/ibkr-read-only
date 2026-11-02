@@ -647,6 +647,11 @@ class PortfolioService:
                            effective_commission_usd(t) / t["quantity"] / t["fx_to_usd"])
                     for t, qty in open_buys) / (open_qty * multiplier)
                 if complete_open_lots else None)
+            row["total_cost_usd"] = (
+                sum(qty * t["price"] * multiplier * t["fx_to_usd"] +
+                    effective_commission_usd(t) * qty / t["quantity"]
+                    for t, qty in open_buys)
+                if complete_open_lots and position["security_type"] != "FUT" else None)
             current_fx = fx_rate(position["currency"], date.today().isoformat())
             row["fx_to_usd"] = current_fx
             quote = self.market.quote(position["id"])
