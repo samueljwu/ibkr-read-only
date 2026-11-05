@@ -37,6 +37,7 @@ def test_stock_and_option_exposure_with_signed_delta_and_custom_underlying(tmp_p
     assert snapshot["totals"]["value"] == pytest.approx(-2300)
     assert snapshot["totals"]["adjusted"] == pytest.approx(21000)
     assert snapshot["totals"]["adjusted_gross"] == pytest.approx(27000)
+    assert snapshot["adjusted_nav"] == pytest.approx(123300)
     assert [item["equivalent_shares"] for item in snapshot["positions"]] == [None, 120, 40]
     assert {item["custom"] for item in snapshot["positions"]} == {"AI"}
     assert grouped_exposure(snapshot["positions"], "sector", "adjusted") == [
@@ -66,6 +67,7 @@ def test_missing_delta_keeps_adjusted_total_unavailable(tmp_path):
     snapshot = exposure_snapshot(db, service, 1)
     assert snapshot["totals"]["value"] == 50
     assert snapshot["totals"]["adjusted"] is None
+    assert snapshot["adjusted_nav"] is None
     assert "delta" in snapshot["issues"][0]
     assert grouped_exposure(snapshot["positions"], "sector", "adjusted") == [
         ("Unclassified", None, None, 1)]
@@ -282,6 +284,34 @@ def test_exposure_panel_drilldown_and_custom_controls(tmp_path):
     panel.sections.setCurrentWidget(panel.pnl_page)
     assert not panel.range_combo.isHidden()
     panel.close()
+
+
+def test_exposure_positions_show_adjusted_value_over_adjusted_nav(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from app.views.exposure_ui import ExposurePanel
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "adjusted-nav.sqlite3")
+    db.set_portfolio_nav(1, 1000)
+    rows = [_row(301, "STOCK", "STK", 1, 100),
+            _row(401, "CALL", "OPT", 1, 50, 100)]
+    save_broker_fact(db, 1, ("exposure_delta", 401, .5, "Live"))
+    save_broker_fact(db, 1, ("exposure_underlying_price", 401, 10, "USD", "Live"))
+    panel = ExposurePanel(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
+    try:
+        panel.refresh()
+        assert panel.snapshot["adjusted_nav"] == pytest.approx(1450)
+        assert panel.positions.horizontalHeaderItem(7).text() == "Adjusted % adj. NAV"
+        option_row = next(index for index in range(panel.positions.rowCount())
+                          if panel.positions.item(index, 0).text() == "CALL")
+        assert panel.positions.item(option_row, 7).text() == "+34.48%"
+        panel.basis_combo.setCurrentText("Market value")
+        option_row = next(index for index in range(panel.positions.rowCount())
+                          if panel.positions.item(index, 0).text() == "CALL")
+        assert panel.positions.item(option_row, 7).text() == "+34.48%"
+    finally:
+        panel.close()
 
 
 
