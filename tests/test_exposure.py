@@ -301,15 +301,29 @@ def test_exposure_positions_show_adjusted_value_over_adjusted_nav(tmp_path):
     panel = ExposurePanel(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
     try:
         panel.refresh()
+        panel.resize(1680, 600)
+        panel.show()
+        QApplication.processEvents()
+        header = panel.positions.horizontalHeader()
+        assert header.visualIndex(7) < header.visualIndex(6)
+        assert header.sectionSize(7) < 300
         assert panel.snapshot["adjusted_nav"] == pytest.approx(1450)
         assert panel.positions.horizontalHeaderItem(7).text() == "Adjusted % adj. NAV"
         option_row = next(index for index in range(panel.positions.rowCount())
                           if panel.positions.item(index, 0).text() == "CALL")
         assert panel.positions.item(option_row, 7).text() == "+34.48%"
         panel.basis_combo.setCurrentText("Market value")
+        heading = panel.positions.horizontalHeaderItem(5).text()
+        assert header.sectionSize(5) >= header.fontMetrics().horizontalAdvance(heading) + 42
         option_row = next(index for index in range(panel.positions.rowCount())
                           if panel.positions.item(index, 0).text() == "CALL")
         assert panel.positions.item(option_row, 7).text() == "+34.48%"
+        header.moveSection(header.visualIndex(7), header.visualIndex(6))
+        old_view = panel.view_state()
+        old_view.pop("positions_layout_version")
+        panel.apply_view_state(old_view)
+        assert header.visualIndex(7) < header.visualIndex(6)
+        assert header.sectionSize(7) < 300
     finally:
         panel.close()
 
