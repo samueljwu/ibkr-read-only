@@ -124,6 +124,7 @@ class ExposurePanel(QWidget):
         self.positions.verticalHeader().setVisible(False)
         self.positions.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.positions.horizontalHeader().setStretchLastSection(True)
+        self.positions.horizontalHeader().moveSection(7, 6)
         self.positions.horizontalHeader().setDefaultSectionSize(125)
         self.positions.setColumnWidth(0, 160)
         self.positions.configure_numbers(db, f"exposure_decimals_{portfolio_id}",
@@ -219,6 +220,7 @@ class ExposurePanel(QWidget):
             "category": self.category_filter,
             "splitter": bytes(self.splitter.saveState().toBase64()).decode("ascii"),
             "positions_header": bytes(header.saveState().toBase64()).decode("ascii"),
+            "positions_layout_version": 2,
             "sort_column": header.sortIndicatorSection(),
             "sort_order": "desc" if header.sortIndicatorOrder() == Qt.DescendingOrder else "asc",
             "decimals": {str(column): self.positions.decimals_for(column)
@@ -252,6 +254,14 @@ class ExposurePanel(QWidget):
             saved = state.get(key)
             if isinstance(saved, str):
                 widget.restoreState(QByteArray.fromBase64(saved.encode("ascii", "ignore")))
+        if state.get("positions_layout_version") != 2:
+            header = self.positions.horizontalHeader()
+            if (header.visualIndex(7) == header.count() - 1 and
+                    header.visualIndex(6) == header.count() - 2):
+                header.moveSection(header.visualIndex(7), header.visualIndex(6))
+                self.positions.setColumnWidth(
+                    7, header.fontMetrics().horizontalAdvance("Adjusted % adj. NAV") + 42)
+            self.positions.fit_header_widths()
         decimals = state.get("decimals")
         if isinstance(decimals, dict):
             for column in self.positions._number_formats:
@@ -298,9 +308,12 @@ class ExposurePanel(QWidget):
         group = self.group_combo.currentText()
         field = "custom" if group == "Custom" else "sector"
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
-        self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
-                                                   "Adjusted USD", f"{self.basis_combo.currentText()} % NAV",
-                                                   "Category", "Adjusted % adj. NAV"))
+        percent_heading = f"{self.basis_combo.currentText()} % NAV"
+        if self.positions.horizontalHeaderItem(5).text() != percent_heading:
+            self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
+                                                       "Adjusted USD", percent_heading,
+                                                       "Category", "Adjusted % adj. NAV"))
+            self.positions.fit_header_widths()
         self.mix_heading.setText(f"{'Delta-adjusted' if value_field == 'adjusted' else 'Market value'} mix")
         self._render_mix(field, value_field)
         self._render_positions()
