@@ -780,6 +780,17 @@ class Database:
         return [dict(r) for r in self.conn.execute("SELECT * FROM broker_positions WHERE portfolio_id=? ORDER BY con_id",
                                                    (portfolio_id,))]
 
+    def sync_position_currency(self, portfolio_id, con_id, currency):
+        """Refresh a known instrument's currency from a broker position callback."""
+        currency = str(currency or "").strip().upper()
+        if not currency:
+            return False
+        with self.conn:
+            changed = self.conn.execute("""UPDATE positions SET currency=?, updated_at=CURRENT_TIMESTAMP
+                WHERE portfolio_id=? AND con_id=? AND currency<>?""",
+                (currency, portfolio_id, con_id, currency)).rowcount
+        return bool(changed)
+
     def update(self, table, row_id, field, value):
         allowed = POSITION_FIELDS if table == "positions" else TRADE_FIELDS if table == "trades" else ()
         if field not in allowed:

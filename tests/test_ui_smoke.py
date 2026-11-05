@@ -2199,6 +2199,35 @@ def test_live_position_delta_refreshes_reconciliation(tmp_path, monkeypatch):
         window.close()
 
 
+def test_existing_usd_option_refreshes_stale_currency_from_broker(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "option-currency.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        window.db.set_setting("ib_account_id", "U1")
+        position_id = window.db.add_position({
+            "display_ticker": "SMH 270115 P430", "ib_symbol": "SMH",
+            "security_type": "OPT", "currency": "", "multiplier": 100})
+        window.db.cache_contract(position_id, 123, multiplier=100)
+        window.db.add_trade({"position_id": position_id, "trade_date": "2026-11-02",
+                             "side": "BUY", "quantity": 1, "price": 10,
+                             "currency": "USD", "fx_to_usd": 1})
+        window.market.quotes[position_id] = {
+            "mode": "Live", "ticks": {"last": 12}, "status": "OK"}
+        window._refresh_models()
+        assert "holding missing FX" in window.data_notice.text()
+
+        broker_row = {"con_id": 123, "quantity": 1, "symbol": "SMH",
+                      "security_type": "OPT", "currency": "USD"}
+        window.market.other_events.append(("broker_position_delta", "U1", broker_row))
+        window._poll()
+        assert window.db.rows("positions", 1)[0]["currency"] == "USD"
+        assert "missing FX" not in window.data_notice.text()
+        assert window.models["Portfolio"].rows[0]["value"] == 1200
+    finally:
+        window.close()
+
+
 def test_sync_reuses_a_healthy_ibkr_connection(tmp_path, monkeypatch):
     QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "warm-sync.sqlite3"))

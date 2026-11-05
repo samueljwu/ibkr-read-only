@@ -3646,6 +3646,8 @@ class MainWindow(QMainWindow):
     def _remember_broker_instrument(self, broker_row):
         positions = self.db.rows("positions", self.portfolio_id)
         if any(p["con_id"] == broker_row["con_id"] for p in positions):
+            self.db.sync_position_currency(self.portfolio_id, broker_row["con_id"],
+                                           broker_row.get("currency"))
             return False
         symbol = broker_row["symbol"]
         candidate = next((p for p in positions if p["con_id"] is None and
