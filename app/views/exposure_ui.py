@@ -117,9 +117,10 @@ class ExposurePanel(QWidget):
         positions_header.addWidget(self.clear_filter_button)
         positions_header.addStretch()
         positions_layout.addLayout(positions_header)
-        self.positions = ReportTable(0, 7)
+        self.positions = ReportTable(0, 8)
         self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
-                                                   "Adjusted USD", "% NAV", "Category"))
+                                                   "Adjusted USD", "% NAV", "Category",
+                                                   "Adjusted % adj. NAV"))
         self.positions.verticalHeader().setVisible(False)
         self.positions.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.positions.horizontalHeader().setStretchLastSection(True)
@@ -127,7 +128,8 @@ class ExposurePanel(QWidget):
         self.positions.setColumnWidth(0, 160)
         self.positions.configure_numbers(db, f"exposure_decimals_{portfolio_id}",
                                          {2: (2, "plain"), 3: (2, "usd"),
-                                          4: (2, "usd"), 5: (2, "percent")})
+                                          4: (2, "usd"), 5: (2, "percent"),
+                                          7: (2, "percent")})
         self.positions.setSortingEnabled(True)
         self.positions.sortItems(4, Qt.DescendingOrder)
         self.positions.setColumnHidden(1, True)
@@ -298,7 +300,7 @@ class ExposurePanel(QWidget):
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
         self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
                                                    "Adjusted USD", f"{self.basis_combo.currentText()} % NAV",
-                                                   "Category"))
+                                                   "Category", "Adjusted % adj. NAV"))
         self.mix_heading.setText(f"{'Delta-adjusted' if value_field == 'adjusted' else 'Market value'} mix")
         self._render_mix(field, value_field)
         self._render_positions()
@@ -411,10 +413,13 @@ class ExposurePanel(QWidget):
         field = "custom" if group == "Custom" else "sector"
         rows = [row for row in self.snapshot["positions"]
                 if self.category_filter is None or row[field] == self.category_filter]
+        adjusted_nav = self.snapshot["adjusted_nav"]
         self.positions.setSortingEnabled(False)
         self.positions.setRowCount(len(rows))
         for index, row in enumerate(rows):
             detail = (f"Market: {_money(row['value'])} · Adjusted: {_money(row['adjusted'])}\n"
+                      f"Adjusted NAV: {_money(adjusted_nav)} "
+                      "(account NAV + total adjusted value − total market value)\n"
                       f"Price source: {row['price_source']}\n"
                       f"IBKR delta: {row['delta']} · {row['delta_mode'] or 'unavailable'} "
                       f"({row['delta_as_of'] or 'unavailable'})\n"
@@ -427,7 +432,10 @@ class ExposurePanel(QWidget):
                      self.positions.numeric_item(4, row["adjusted"]),
                      self.positions.numeric_item(5, row[value_field] / self.snapshot["nav"] * 100
                                                  if row[value_field] is not None and self.snapshot["nav"] else None),
-                     SortItem(row[field]))
+                     SortItem(row[field]),
+                     self.positions.numeric_item(7, row["adjusted"] / adjusted_nav * 100
+                                                 if row["adjusted"] is not None and
+                                                 adjusted_nav is not None and adjusted_nav > 0 else None))
             cells[0].setData(Qt.UserRole, row["under_con_id"])
             for column, item in enumerate(cells):
                 item.setToolTip(detail)
