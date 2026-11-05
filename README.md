@@ -95,7 +95,7 @@ python main.py
       </a>
     </td>
     <td align="center" valign="top" width="50%">
-      <strong>P&amp;L calendar</strong><br>
+      <strong>P&amp;L Calendar</strong><br>
       <a href="docs/images/demo-analytics-calendar.png">
         <img src="docs/images/demo-analytics-calendar.png" width="100%">
       </a>
@@ -109,7 +109,7 @@ python main.py
       </a>
     </td>
     <td align="center" valign="top" width="50%">
-      <strong>Capital deployment</strong><br>
+      <strong>Capital Deployment</strong><br>
       <a href="docs/images/demo-analytics-capital.png">
         <img src="docs/images/demo-analytics-capital.png" width="100%">
       </a>
@@ -123,7 +123,7 @@ python main.py
       </a>
     </td>
     <td align="center" valign="top" width="50%">
-      <strong>Buy / sell levels</strong><br>
+      <strong>Buy / Sell Levels</strong><br>
       <a href="docs/images/demo-analytics-levels.png">
         <img src="docs/images/demo-analytics-levels.png" alt="Buy and sell markers on synthetic stock prices" width="100%">
       </a>

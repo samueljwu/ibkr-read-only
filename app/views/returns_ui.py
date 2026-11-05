@@ -98,19 +98,23 @@ class ReturnPanel(QWidget):
         detail_layout.setSpacing(5)
         self.detail_title = widgets.section_title("Select an instrument to inspect its lots and income")
         detail_layout.addWidget(self.detail_title)
-        self.details_table = ReportTable(0, 14)
+        self.details_table = ReportTable(0, 16)
         self.details_table.setHorizontalHeaderLabels((
             "Entry", "Date", "Sell date", "Contract / description", "Detail", "Quantity",
             "Opening/purchase USD", "Realized USD", "Unrealized USD", "Income/accrual USD",
-            "Original amount", "Currency", "FX to USD", "Transaction ID"))
+            "Original amount", "Currency", "FX to USD", "Transaction ID",
+            "Buy execution price", "Sell execution price"))
         self.details_table.configure_numbers(db, f"position_return_detail_decimals_{portfolio_id}",
                                              {5: (2, "plain"), 6: (2, "usd"),
                                               7: (2, "usd"), 8: (2, "usd"),
                                               9: (2, "usd"), 10: (2, "plain"),
-                                              12: (6, "plain")})
+                                              12: (6, "plain"), 14: (4, "plain"),
+                                              15: (4, "plain")})
         self.details_table.verticalHeader().setVisible(False)
         self.details_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.details_table.horizontalHeader().setStretchLastSection(True)
+        self.details_table.horizontalHeader().moveSection(14, 6)
+        self.details_table.horizontalHeader().moveSection(15, 7)
         self.details_table.setColumnWidth(3, 200)
         self.details_table.setColumnWidth(4, 135)
         self.details_table.setColumnWidth(13, 170)
@@ -257,6 +261,16 @@ class ReturnPanel(QWidget):
                 item = table.numeric_item(column, value)
                 if column in (7, 8):
                     self._color_item(item, value)
+                table.setItem(index, column, item)
+            estimated_opening = "Estimated CSV closing value" in lot.get("lot_note", "")
+            for column, value, currency in (
+                    (14, None if estimated_opening else lot.get("buy_price"), lot.get("buy_currency")),
+                    (15, lot.get("sell_price"), lot.get("sell_currency"))):
+                item = table.numeric_item(column, value)
+                if estimated_opening and column == 14:
+                    item.setToolTip("Estimated opening value; no buy execution price is available.")
+                elif value is not None:
+                    item.setToolTip(f"Execution price in {currency}." if currency else "Execution price")
                 table.setItem(index, column, item)
         for offset, movement in enumerate(income):
             index = len(lots) + offset

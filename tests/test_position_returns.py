@@ -148,6 +148,11 @@ def test_pre_flex_opening_shows_labeled_partial_return_with_leading_cash_gap(tmp
         assert panel.table.item(0, 5).text() == "≈ $5.00"
         assert "Cash history is incomplete" in panel.table.item(0, 5).toolTip()
         assert "estimated opening value" in panel.table.item(0, 6).toolTip()
+        lot_index = next(index for index in range(panel.details_table.rowCount())
+                         if panel.details_table.item(index, 0).text() == "Lot")
+        assert panel.details_table.item(lot_index, 14).text() == "—"
+        assert "no buy execution price" in panel.details_table.item(lot_index, 14).toolTip()
+        assert panel.details_table.item(lot_index, 15).text() == "—"
         assert panel.stats["Total return"].text() == "≈ $5.00"
 
         with db.conn:
@@ -263,8 +268,14 @@ def test_return_panel_lists_closed_instrument_and_income_detail(tmp_path):
         assert set(entries) == {"Lot", "Income"}
         assert panel.details_table.item(entries["Lot"], 3).text() == "ABC"
         assert panel.details_table.item(entries["Lot"], 7).text() == "$2.00"
+        assert panel.details_table.horizontalHeader().visualIndex(14) == 6
+        assert panel.details_table.horizontalHeader().visualIndex(15) == 7
+        assert panel.details_table.item(entries["Lot"], 14).text() == "10.0000"
+        assert panel.details_table.item(entries["Lot"], 15).text() == "12.0000"
+        assert panel.details_table.item(entries["Lot"], 14).toolTip() == "Execution price in USD."
         assert panel.details_table.item(entries["Income"], 9).text() == "$2.00"
         assert panel.details_table.item(entries["Income"], 10).text() == "2.00"
+        assert panel.details_table.item(entries["Income"], 14) is None
         assert panel.details_table.item(0, 0).text() == "Income"
         panel.layout_combo.setCurrentText("Side by side")
         assert panel.splitter.orientation() == Qt.Horizontal
