@@ -209,9 +209,6 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
         values = [item[field] for item in positions]
         totals[field] = sum(values) if all(v is not None for v in values) else None
         totals[field + "_gross"] = sum(abs(v) for v in values) if all(v is not None for v in values) else None
-    adjusted_nav = (nav + totals["adjusted"] - totals["value"]
-                    if nav is not None and totals["adjusted"] is not None and
-                    totals["value"] is not None else None)
     cash_record = db.account_value(portfolio_id, "TotalCashValue")
     if cash_record and cash_record["currency"] == "USD":
         cash = _valid(cash_record["value"])
@@ -219,7 +216,7 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
         cash = _valid(nav - totals["value"])
     else:
         cash = None
-    return {"nav": nav, "adjusted_nav": adjusted_nav, "cash": cash,
+    return {"nav": nav, "cash": cash,
             "positions": positions, "totals": totals, "issues": issues,
             "as_of": max((item["mark_as_of"] for item in positions), default="")}
 
