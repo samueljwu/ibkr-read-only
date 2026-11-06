@@ -39,7 +39,7 @@ class ExposurePanel(QWidget):
         self.toolbar.add_control(self.group_combo, "Group by")
         self.basis_combo = style_toolbar_dropdown(QComboBox())
         self.basis_combo.addItems(("Adjusted", "Market value"))
-        self.basis_combo.setToolTip("Changes the pie, category breakdown, and position % NAV column together.")
+        self.basis_combo.setToolTip("Changes the pie and category breakdown.")
         self.basis_combo.currentTextChanged.connect(self._basis_changed)
         self.toolbar.add_control(self.basis_combo, "Exposure")
         self.custom_set_combo = style_toolbar_dropdown(QComboBox())
@@ -119,8 +119,8 @@ class ExposurePanel(QWidget):
         positions_layout.addLayout(positions_header)
         self.positions = ReportTable(0, 8)
         self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
-                                                   "Adjusted USD", "% NAV", "Category",
-                                                   "Adjusted % adj. NAV"))
+                                                   "Adjusted USD", "Market % NAV", "Category",
+                                                   "Adjusted % NAV"))
         self.positions.verticalHeader().setVisible(False)
         self.positions.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.positions.horizontalHeader().setStretchLastSection(True)
@@ -260,7 +260,7 @@ class ExposurePanel(QWidget):
                     header.visualIndex(6) == header.count() - 2):
                 header.moveSection(header.visualIndex(7), header.visualIndex(6))
                 self.positions.setColumnWidth(
-                    7, header.fontMetrics().horizontalAdvance("Adjusted % adj. NAV") + 42)
+                    7, header.fontMetrics().horizontalAdvance("Adjusted % NAV") + 42)
             self.positions.fit_header_widths()
         decimals = state.get("decimals")
         if isinstance(decimals, dict):
@@ -308,12 +308,6 @@ class ExposurePanel(QWidget):
         group = self.group_combo.currentText()
         field = "custom" if group == "Custom" else "sector"
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
-        percent_heading = f"{self.basis_combo.currentText()} % NAV"
-        if self.positions.horizontalHeaderItem(5).text() != percent_heading:
-            self.positions.setHorizontalHeaderLabels(("Instrument", "Type", "Qty", "Market USD",
-                                                       "Adjusted USD", percent_heading,
-                                                       "Category", "Adjusted % adj. NAV"))
-            self.positions.fit_header_widths()
         self.mix_heading.setText(f"{'Delta-adjusted' if value_field == 'adjusted' else 'Market value'} mix")
         self._render_mix(field, value_field)
         self._render_positions()
@@ -418,7 +412,6 @@ class ExposurePanel(QWidget):
             f"Positions · {'Cash' if self.category_filter == CASH_CATEGORY else self.category_filter}"
             if self.category_filter else "Positions · All categories")
         self.clear_filter_button.setVisible(self.category_filter is not None)
-        value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
         selected = self.positions.selectedItems()
         selected_under_id = (self.positions.item(selected[0].row(), 0).data(Qt.UserRole)
                              if selected and self.positions.item(selected[0].row(), 0) else None)
@@ -426,13 +419,12 @@ class ExposurePanel(QWidget):
         field = "custom" if group == "Custom" else "sector"
         rows = [row for row in self.snapshot["positions"]
                 if self.category_filter is None or row[field] == self.category_filter]
-        adjusted_nav = self.snapshot["adjusted_nav"]
+        nav = self.snapshot["nav"]
         self.positions.setSortingEnabled(False)
         self.positions.setRowCount(len(rows))
         for index, row in enumerate(rows):
             detail = (f"Market: {_money(row['value'])} · Adjusted: {_money(row['adjusted'])}\n"
-                      f"Adjusted NAV: {_money(adjusted_nav)} "
-                      "(account NAV + total adjusted value − total market value)\n"
+                      f"Account NAV: {_money(nav)} · both percentages use account NAV\n"
                       f"Price source: {row['price_source']}\n"
                       f"IBKR delta: {row['delta']} · {row['delta_mode'] or 'unavailable'} "
                       f"({row['delta_as_of'] or 'unavailable'})\n"
@@ -443,12 +435,11 @@ class ExposurePanel(QWidget):
                      self.positions.numeric_item(2, row["quantity"]),
                      self.positions.numeric_item(3, row["value"]),
                      self.positions.numeric_item(4, row["adjusted"]),
-                     self.positions.numeric_item(5, row[value_field] / self.snapshot["nav"] * 100
-                                                 if row[value_field] is not None and self.snapshot["nav"] else None),
+                     self.positions.numeric_item(5, row["value"] / nav * 100
+                                                 if row["value"] is not None and nav else None),
                      SortItem(row[field]),
-                     self.positions.numeric_item(7, row["adjusted"] / adjusted_nav * 100
-                                                 if row["adjusted"] is not None and
-                                                 adjusted_nav is not None and adjusted_nav > 0 else None))
+                     self.positions.numeric_item(7, row["adjusted"] / nav * 100
+                                                 if row["adjusted"] is not None and nav else None))
             cells[0].setData(Qt.UserRole, row["under_con_id"])
             for column, item in enumerate(cells):
                 item.setToolTip(detail)
