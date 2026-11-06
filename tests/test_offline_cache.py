@@ -142,6 +142,16 @@ def test_live_tick_is_saved_and_disconnection_uses_cached_price(tmp_path, monkey
         provider.events.put(("quote", [position_id], "last", 42.5, "Live"))
         window._poll()
         assert window.db.cached_quotes(1, "ACCOUNT-A")[position_id]["price"] == 42.5
+        assert window._last_db_data_version == window.db.conn.execute(
+            "PRAGMA data_version").fetchone()[0]
+
+        other_connection = Database(path)
+        try:
+            other_connection.set_metadata("synthetic_external_change", "1")
+        finally:
+            other_connection.conn.close()
+        assert window._last_db_data_version != window.db.conn.execute(
+            "PRAGMA data_version").fetchone()[0]
 
         provider.events.put(("connected", False))
         window._poll()

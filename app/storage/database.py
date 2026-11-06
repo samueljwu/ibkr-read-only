@@ -900,7 +900,7 @@ class Database:
 
     def save_quotes(self, portfolio_id, account_id, quotes):
         if not account_id or not quotes:
-            return
+            return False
         # A Flex sync may hold the writer lock. Quote caching is optional, so skip
         # that batch rather than blocking the UI behind the main 30-second timeout.
         try:
@@ -912,9 +912,11 @@ class Database:
                         DO UPDATE SET con_id=excluded.con_id,price=excluded.price,
                                       source=excluded.source,as_of=excluded.as_of""",
                         [(portfolio_id, account_id, *quote) for quote in quotes])
+            return True
         except sqlite3.OperationalError as exc:
             if "locked" not in str(exc).lower():
                 raise
+            return False
 
     def save_history(self, con_id, bars):
         with self.conn:

@@ -3052,6 +3052,7 @@ class MainWindow(QMainWindow):
             self.views[name].showColumn(column)
 
     def _refresh_models(self):
+        self.service.invalidate_quote_cache()
         if hasattr(self, "lots_refresh_timer"):
             self.lots_refresh_timer.stop()
         with self.service.shared_rows():
@@ -3716,7 +3717,7 @@ class MainWindow(QMainWindow):
             position_ids = {key for key in ids if isinstance(key, int)}
             if position_ids:
                 # Quotes change valuations only for their own instruments.
-                changed = self.service.portfolio_rows(position_ids)
+                changed = self.service.quote_rows(position_ids)
                 known_ids = {row["id"] for row in self._stream_rows or ()}
                 if self._stream_rows is None or any(
                         row["id"] not in known_ids for row in changed):
@@ -3755,8 +3756,16 @@ class MainWindow(QMainWindow):
                         saved.append((position_id, positions[position_id]["con_id"], price,
                                       source, as_of))
                 if account and saved:
-                    self.db.save_quotes(self.portfolio_id, account, saved)
-                    self._last_quote_cache_at = time.monotonic()
+                    before_cache_write = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+                    if self.db.save_quotes(self.portfolio_id, account, saved):
+                        after_cache_write = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+                        # A quote-cache commit is not a portfolio change. Preserve
+                        # other external writes so the periodic refresh still sees them.
+                        if (before_cache_write == self._last_db_data_version and
+                                after_cache_write == before_cache_write + 1):
+                            self._last_db_data_version = after_cache_write
+                            self.service.note_quote_cache_commit(after_cache_write)
+                        self._last_quote_cache_at = time.monotonic()
         if self.market.other_events:
             events = self.market.other_events[:]
             self.market.other_events.clear()

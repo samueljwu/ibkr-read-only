@@ -478,6 +478,47 @@ class PortfolioService:
         self._shared_positions = None
         self._shared_remaining = None
         self._shared_histories = None
+        self._quote_snapshot = None
+        self._quote_prepared_history = {}
+
+    def invalidate_quote_cache(self):
+        """Discard ledger and history inputs after a portfolio data change."""
+        self._quote_snapshot = None
+        self._quote_prepared_history = {}
+
+    def note_quote_cache_commit(self, data_version):
+        if self._quote_snapshot is not None:
+            self._quote_snapshot["data_version"] = data_version
+
+    def quote_rows(self, position_ids):
+        """Reprice changed positions using the last complete ledger snapshot."""
+        today = date.today()
+        data_version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+        if (self._quote_snapshot is None or self._quote_snapshot["day"] != today or
+                self._quote_snapshot["data_version"] != data_version):
+            trades = self.db.rows("trades", self.portfolio_id)
+            matches = self.db.rows("trade_matches", self.portfolio_id)
+            positions = self.db.rows("positions", self.portfolio_id)
+            remaining = self.matching.remaining(trades=trades, matches=matches)
+            openings = self.db.legacy_opening_quantities(self.portfolio_id)
+            ledger, by_position = self._ledger_inputs(trades, openings)
+            self._quote_snapshot = {
+                "day": today, "data_version": data_version, "trades": trades,
+                "matches": matches, "positions": positions, "remaining": remaining,
+                "histories": {}, "openings": openings, "ledger": ledger,
+                "by_position": by_position}
+            self._quote_prepared_history = {}
+        snapshot = self._quote_snapshot
+        self._shared_trades = snapshot["trades"]
+        self._shared_matches = snapshot["matches"]
+        self._shared_positions = snapshot["positions"]
+        self._shared_remaining = snapshot["remaining"]
+        self._shared_histories = snapshot["histories"]
+        try:
+            return self.portfolio_rows(position_ids)
+        finally:
+            self._shared_trades = self._shared_matches = self._shared_positions = None
+            self._shared_remaining = self._shared_histories = None
 
     @contextmanager
     def shared_rows(self):
@@ -531,6 +572,20 @@ class PortfolioService:
         if con_id not in cache:
             cache[con_id] = self.db.history(con_id)
         return cache[con_id]
+
+    @staticmethod
+    def _ledger_inputs(trades, openings):
+        ledger = defaultdict(float)
+        by_position = defaultdict(list)
+        for trade in trades:
+            position_id = trade["position_id"]
+            opening = openings.get(position_id)
+            if trade["source"] == "CSV market baseline" and opening:
+                pass  # The opening quantity already includes the estimated lot.
+            elif not opening or trade["trade_date"] > opening["as_of"]:
+                ledger[position_id] += trade["quantity"] * (1 if trade["side"] == "BUY" else -1)
+            by_position[position_id].append(trade)
+        return ledger, by_position
 
     def trade_rows(self, lots=None):
         """Show closed-lot P&L on both matched trades and open P&L on open buys.
@@ -589,24 +644,21 @@ class PortfolioService:
 
     def portfolio_rows(self, position_ids=None):
         trades = self._trades(position_ids)
-        openings = self.db.legacy_opening_quantities(self.portfolio_id)
         remaining = self._remaining(trades, position_ids)
-        ledger = defaultdict(float)
-        by_position = defaultdict(list)
-        for trade in trades:
-            position_id = trade["position_id"]
-            opening = openings.get(position_id)
-            if trade["source"] == "CSV market baseline" and opening:
-                # The CSV quantity anchor already includes this estimated lot.
-                pass
-            elif not opening or trade["trade_date"] > opening["as_of"]:
-                ledger[position_id] += trade["quantity"] * (1 if trade["side"] == "BUY" else -1)
-            by_position[position_id].append(trade)
+        quote_snapshot = (self._quote_snapshot if self._quote_snapshot is not None and
+                          self._shared_histories is self._quote_snapshot["histories"] else None)
+        if quote_snapshot is not None:
+            openings = quote_snapshot["openings"]
+            ledger = quote_snapshot["ledger"]
+            by_position = quote_snapshot["by_position"]
+        else:
+            openings = self.db.legacy_opening_quantities(self.portfolio_id)
+            ledger, by_position = self._ledger_inputs(trades, openings)
         broker = {p["con_id"]: p for p in self.db.broker_positions(self.portfolio_id)}
         broker_complete = bool(self.db.metadata(f"broker_positions_refresh_{self.portfolio_id}"))
         nav = self.db.effective_nav(self.portfolio_id)
         rows = []
-        prepared_history = {}
+        prepared_history = self._quote_prepared_history if quote_snapshot is not None else {}
         histories = {}
         fx_rates = {}
 
