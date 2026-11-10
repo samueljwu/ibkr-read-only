@@ -192,6 +192,7 @@ if EWrapper is not None:
             self.owner = owner
             self.next_id = 1000
             self.pending = {}
+            self.optional_contract_details = set()
             self.found_details = {}
             self.ticker_ids = {}
             self.history_ids = {}
@@ -439,8 +440,11 @@ if EWrapper is not None:
             if reqId in self.pending:
                 position_ids = self.pending.pop(reqId)
                 details = self.found_details.pop(reqId, [])
+                optional = reqId in self.optional_contract_details
+                self.optional_contract_details.discard(reqId)
                 if len(details) != 1:
-                    self.owner.events.put(("status", position_ids, "CONTRACT ERROR"))
+                    if not optional:
+                        self.owner.events.put(("status", position_ids, "CONTRACT ERROR"))
                     return
                 contract = details[0].contract
                 for position_id in position_ids:
@@ -712,6 +716,11 @@ if EWrapper is not None:
                 self.owner.search_requests.discard(reqId)
                 self.owner.events.put(("search_error", reqId, f"IBKR ERROR {errorCode}: {errorString}"))
                 return
+            if reqId in self.optional_contract_details:
+                self.optional_contract_details.discard(reqId)
+                self.pending.pop(reqId, None)
+                self.found_details.pop(reqId, None)
+                return
             ids = list(self.ticker_ids.get(reqId, []))
             if reqId in self.pending:
                 ids = self.pending.pop(reqId)
@@ -734,6 +743,7 @@ class IBKRMarketDataProvider(MarketDataProvider):
         self.positions = {}
         self.missing_trade_fx = set()
         self.history_last_days = {}
+        self.missing_timezones = set()
         self.benchmark_last_day = None
         self.by_contract = {}
         self.idea_contracts = {}
@@ -743,7 +753,7 @@ class IBKRMarketDataProvider(MarketDataProvider):
         self.thread = None
 
     def start(self, positions, stale_con_ids=None, trades=None, benchmark_last_day=None,
-              history_last_days=None):
+              history_last_days=None, missing_timezones=None):
         self.positions = {p["id"]: dict(p) for p in positions}
         self.benchmark_last_day = benchmark_last_day
         self.missing_trade_fx = {t["currency"] for t in (trades or [])
@@ -751,6 +761,7 @@ class IBKRMarketDataProvider(MarketDataProvider):
                                  not valid_price(t.get("fx_to_usd"))}
         self.stale_con_ids = set(stale_con_ids or [])
         self.history_last_days = history_last_days or {}
+        self.missing_timezones = set(missing_timezones or ())
         self.thread = threading.Thread(target=self._run, daemon=True, name="IBKR network")
         self.thread.start()
 
@@ -916,9 +927,9 @@ class IBKRMarketDataProvider(MarketDataProvider):
 
     def _request_all(self, position_ids=None):
         pending_by_key = {}
-        for position_id, position in self.positions.items():
-            if position_ids is not None and position_id not in position_ids:
-                continue
+        selected = (self.positions.items() if position_ids is None else
+                    ((key, self.positions[key]) for key in position_ids if key in self.positions))
+        for position_id, position in selected:
             if position["security_type"] == "STK" and looks_like_option_ticker(position["display_ticker"]):
                 self.events.put(("status", [position_id], "VERIFY SECURITY TYPE"))
                 continue
@@ -951,6 +962,11 @@ class IBKRMarketDataProvider(MarketDataProvider):
             if position.get("con_id") and position.get("multiplier"):
                 contract.conId = position["con_id"]
                 self._subscribe(position_id, contract)
+                if position_id in self.missing_timezones:
+                    request_id = self._new_id()
+                    self.client.pending[request_id] = [position_id]
+                    self.client.optional_contract_details.add(request_id)
+                    self.client.reqContractDetails(request_id, contract)
             else:
                 if position.get("con_id"):
                     contract.conId = position["con_id"]
@@ -1017,8 +1033,9 @@ class IBKRMarketDataProvider(MarketDataProvider):
             self.requested_fx.add(currency)
         return contract
 
-    def add_positions(self, positions):
+    def add_positions(self, positions, missing_timezones=None):
         added = set()
+        self.missing_timezones.update(missing_timezones or ())
         for position in positions:
             if position["id"] not in self.positions:
                 self.positions[position["id"]] = dict(position)
@@ -1133,5 +1150,6 @@ class IBKRMarketDataProvider(MarketDataProvider):
             self.search_requests = set()
             self.client = _IBClient(self)
             self.start(positions, self.stale_con_ids,
-                       benchmark_last_day=self.benchmark_last_day)
+                       benchmark_last_day=self.benchmark_last_day,
+                       missing_timezones=self.missing_timezones)
         return set(self.positions)

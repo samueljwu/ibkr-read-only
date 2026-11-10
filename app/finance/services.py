@@ -4,11 +4,11 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from app.finance.calculations import (adv20, advx, choose_price, closed_lot, effective_commission_usd, flow_adjusted_daily_pnl,
                               looks_like_option_ticker, open_lot, position_metrics,
                               prepare_history, valid_multiplier, valid_price, window_returns)
+from app.market.session import trading_timezone
 
 
 class MatchingService:
@@ -957,17 +957,8 @@ class PortfolioService:
         if not position.get("con_id"):
             return date.today()
         row = self.db.conn.execute("SELECT time_zone FROM contracts WHERE position_id=?", (position["id"],)).fetchone()
-        if row and row[0]:
-            try:
-                return datetime.now(ZoneInfo(row[0])).date()
-            except Exception:
-                pass
-        exchange = str(position.get("primary_exchange") or position.get("exchange") or "").upper()
-        if position.get("currency") == "USD" and exchange in {
-            "NYSE", "NASDAQ", "ARCA", "AMEX", "BATS", "CBOE", "SMART"
-        }:
-            return datetime.now(ZoneInfo("America/New_York")).date()
-        return date.today()
+        zone = trading_timezone(position, row[0] if row else "")
+        return datetime.now(zone).date() if zone else date.today()
 
     def _quote_day(self, position, timestamp):
         """Date a received tick in its instrument's trading timezone."""
@@ -975,17 +966,10 @@ class PortfolioService:
             stamp = datetime.fromisoformat(timestamp)
             if stamp.tzinfo is None:
                 stamp = stamp.astimezone()
-            if position.get("con_id"):
-                row = self.db.conn.execute(
-                    "SELECT time_zone FROM contracts WHERE position_id=?", (position["id"],)
-                ).fetchone()
-                if row and row[0]:
-                    return stamp.astimezone(ZoneInfo(row[0])).date()
-            exchange = str(position.get("primary_exchange") or position.get("exchange") or "").upper()
-            if position.get("currency") == "USD" and exchange in {
-                "NYSE", "NASDAQ", "ARCA", "AMEX", "BATS", "CBOE", "SMART"
-            }:
-                return stamp.astimezone(ZoneInfo("America/New_York")).date()
-            return stamp.astimezone().date()
+            row = (self.db.conn.execute(
+                "SELECT time_zone FROM contracts WHERE position_id=?", (position["id"],)).fetchone()
+                if position.get("con_id") else None)
+            zone = trading_timezone(position, row[0] if row else "")
+            return stamp.astimezone(zone).date() if zone else stamp.astimezone().date()
         except (TypeError, ValueError, OverflowError, KeyError):
             return None

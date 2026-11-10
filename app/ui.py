@@ -34,6 +34,7 @@ from app.views.calcs_ui import CalcsTab
 from app.broker.broker_sync import BrokerIngestor
 from app.storage.excel_io import export_workbook
 from app.market.market_data import IBKRMarketDataProvider, MarketDataProvider, MockMarketDataProvider
+from app.market.session import completed_history_day
 from app.finance.services import PortfolioService
 from app.flex.flex_import import flex_today, oldest_flex_date
 from app.sync.sync_service import trade_sync_paused
@@ -548,7 +549,7 @@ class MainWindow(QMainWindow):
         if not QColor(self._summary_border_color).isValid():
             self._summary_border_color = COLORS["light"]["accent"]
         self._compact_geometry = None
-        self._history_attempt_day = None
+        self._history_attempt_signature = None
         self._last_flex_sync_stamp = self.db.metadata("ibkr_flex_sync_completed")
         self._last_analytics_sync_stamp = self.db.metadata("ibkr_analytics_sync_completed")
         self._sync_process = None
@@ -3514,13 +3515,27 @@ class MainWindow(QMainWindow):
     def _set_refresh_interval(self):
         self.refresh_timer.start(max(1, int(self.db.setting("refresh_seconds") or 30)) * 1000)
 
+    def _history_completed_day(self, position):
+        row = self.db.conn.execute(
+            "SELECT time_zone FROM contracts WHERE position_id=?", (position["id"],)).fetchone()
+        return completed_history_day(position, row[0] if row else "").isoformat()
+
     def _stale_contracts(self, force=False):
-        today = date.today().isoformat()
         current = ({row["con_id"] for row in self.db.broker_positions(self.portfolio_id)}
                    if self.db.metadata(f"broker_positions_refresh_{self.portfolio_id}") else None)
-        return {p["con_id"] for p in self.db.rows("positions", self.portfolio_id) if p.get("con_id") and
-                (current is None or p["con_id"] in current) and
-                (force or self.db.metadata(f"history_refresh_{p['con_id']}") != today)}
+        timezones = {row["position_id"]: row["time_zone"] for row in self.db.conn.execute(
+            "SELECT position_id,time_zone FROM contracts")}
+        refreshed = {row["key"]: row["value"] for row in self.db.conn.execute(
+            "SELECT key,value FROM app_metadata WHERE key GLOB 'history_refresh_*'")}
+        targets = {}
+        for position in self.db.rows("positions", self.portfolio_id):
+            con_id = position.get("con_id")
+            if not con_id or (current is not None and con_id not in current):
+                continue
+            completed_day = completed_history_day(position, timezones.get(position["id"])).isoformat()
+            if force or refreshed.get(f"history_refresh_{con_id}") != completed_day:
+                targets[con_id] = completed_day
+        return targets
 
     def _request_levels_history(self, position, first_saved_day=None):
         if not isinstance(self.market, IBKRMarketDataProvider):
@@ -3547,6 +3562,10 @@ class MainWindow(QMainWindow):
                            if self.db.metadata(f"broker_positions_refresh_{self.portfolio_id}") else None)
                 subscriptions = [p for p in self.db.rows("positions", self.portfolio_id)
                                  if current is None or not p.get("con_id") or p["con_id"] in current]
+                known_timezones = {row["position_id"] for row in self.db.conn.execute(
+                    "SELECT position_id FROM contracts WHERE COALESCE(time_zone,'')<>''")}
+                missing_timezones = {p["id"] for p in subscriptions
+                                     if p.get("con_id") and p["id"] not in known_timezones}
                 self.market.set_idea_contracts(self.calcs_tab.ideas)
                 stale = self._stale_contracts(force_history)
                 last_days = {} if force_history else {int(con_id): self.db.conn.execute(
@@ -3555,8 +3574,9 @@ class MainWindow(QMainWindow):
                 self.market.start(subscriptions, stale,
                                   trades=self.db.rows("trades", self.portfolio_id),
                                   benchmark_last_day=self.db.benchmark_latest_day(),
-                                  history_last_days=last_days)
-                self._history_attempt_day = date.today()
+                                  history_last_days=last_days,
+                                  missing_timezones=missing_timezones)
+                self._history_attempt_signature = frozenset(stale.items())
             except Exception as exc:
                 self._connection_error = str(exc)
                 self.market = MarketDataProvider()
@@ -3641,7 +3661,7 @@ class MainWindow(QMainWindow):
                 time.monotonic() - self._disconnected_since >= 60)) and
               time.monotonic() - self._last_connection_attempt >= 30):
             self._start_provider(force_history=False)
-        elif self._history_attempt_day != date.today() and self._stale_contracts():
+        elif (stale := self._stale_contracts()) and frozenset(stale.items()) != self._history_attempt_signature:
             self._start_provider(force_history=False)
 
     def _remember_broker_instrument(self, broker_row):
@@ -3898,14 +3918,13 @@ class MainWindow(QMainWindow):
                     self.analytics_tab.refresh()
                 elif event[0] == "history":
                     _, con_id, bars = event
-                    tz_row = self.db.conn.execute("SELECT time_zone FROM contracts WHERE con_id=? LIMIT 1", (con_id,)).fetchone()
-                    try:
-                        today = datetime.now(ZoneInfo(tz_row[0])).date() if tz_row and tz_row[0] else date.today()
-                    except Exception:
-                        today = date.today()
-                    completed = [bar for bar in bars if bar["day"] < today.isoformat()]
+                    position = next((p for p in self.db.rows("positions", self.portfolio_id)
+                                     if p["con_id"] == con_id), None)
+                    completed_day = (self._history_completed_day(position) if position else
+                                     completed_history_day({}).isoformat())
+                    completed = [bar for bar in bars if bar["day"] <= completed_day]
                     if completed:
-                        self.db.save_history(con_id, completed)
+                        self.db.save_history(con_id, completed, completed_through=completed_day)
                         if (self.tabs.currentWidget() is self.analytics_tab and
                                 self.analytics_tab.sections.currentWidget() is self.analytics_tab.levels_page):
                             self.analytics_tab.levels_page.refresh()
@@ -3946,7 +3965,8 @@ class MainWindow(QMainWindow):
                 needs_model_refresh = True
             if new_instruments and isinstance(self.market, IBKRMarketDataProvider):
                 self.market.add_positions([p for p in self.db.rows("positions", self.portfolio_id)
-                                           if p["id"] in new_instruments])
+                                           if p["id"] in new_instruments],
+                                          missing_timezones=new_instruments)
             if needs_model_refresh:
                 self._refresh_models()
         required_live_events = {"broker_positions", "account_summary_end"}

@@ -918,15 +918,20 @@ class Database:
                 raise
             return False
 
-    def save_history(self, con_id, bars):
+    def save_history(self, con_id, bars, completed_through=None):
         with self.conn:
             self.conn.executemany("INSERT OR REPLACE INTO historical_prices(con_id,day,close,volume) VALUES (?,?,?,?)",
                                   [(con_id, b["day"], b["close"], b.get("volume")) for b in bars])
-        self.set_metadata(f"history_refresh_{con_id}", datetime.now().date().isoformat())
+        self.set_metadata(f"history_refresh_{con_id}",
+                          completed_through or datetime.now().date().isoformat())
 
     def cache_contract(self, position_id, con_id, time_zone="", multiplier=None, details=None):
         with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO contracts(position_id,con_id,time_zone) VALUES (?,?,?)",
+            self.conn.execute("""INSERT INTO contracts(position_id,con_id,time_zone) VALUES (?,?,?)
+                ON CONFLICT(position_id) DO UPDATE SET con_id=excluded.con_id,
+                    time_zone=CASE WHEN contracts.con_id=excluded.con_id
+                                      AND COALESCE(excluded.time_zone,'')=''
+                                   THEN contracts.time_zone ELSE excluded.time_zone END""",
                               (position_id, con_id, time_zone))
             self.conn.execute("UPDATE positions SET con_id=? WHERE id=?", (con_id, position_id))
             if multiplier is not None and float(multiplier) > 0:
