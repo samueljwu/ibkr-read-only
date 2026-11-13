@@ -1,6 +1,7 @@
 """Read-only portfolio target calculations."""
 
 import math
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 
 
 def _finite(value):
@@ -11,28 +12,35 @@ def _finite(value):
     return result if math.isfinite(result) else None
 
 
-def scale_target_weights(targets, cash_target):
-    """Scale nonnegative targets to the entered cash weight in 0.01% units."""
+def scale_target_weights(targets, cash_target, *, decimal_places=2):
+    """Scale nonnegative targets to the entered cash weight's precision."""
     cash = _finite(cash_target)
     if cash is None:
         raise ValueError("Enter a valid cash target.")
-    position_points = round((1 - cash) * 10000)
-    if position_points < 0:
-        raise ValueError("Cash above 100% would require negative position weights.")
+    if not isinstance(decimal_places, int) or isinstance(decimal_places, bool) or not 0 <= decimal_places <= 30:
+        raise ValueError("Choose 0–30 decimal places for target weights.")
     keys = list(targets)
     bases = [_finite(targets[key]) for key in keys]
     if any(value is None or value < 0 for value in bases):
         raise ValueError("Position targets cannot be negative.")
-    total = sum(bases)
-    if total <= 1e-12:
-        if position_points:
-            raise ValueError("Zero position targets cannot be scaled to this cash weight.")
-        return {key: 0.0 for key in keys}
-    raw = [position_points * value / total for value in bases]
-    points = [math.floor(value) for value in raw]
-    for index in sorted(range(len(keys)), key=lambda i: (-(raw[i] - points[i]), i))[:position_points - sum(points)]:
-        points[index] += 1
-    return {key: value / 10000 for key, value in zip(keys, points)}
+    with localcontext() as context:
+        context.prec = max(28, decimal_places + 20)
+        unit = Decimal(10) ** (decimal_places + 2)
+        position_points = int(((Decimal(1) - Decimal(str(cash))) * unit).to_integral_value(
+            rounding=ROUND_HALF_EVEN))
+        if position_points < 0:
+            raise ValueError("Cash above 100% would require negative position weights.")
+        weights = [Decimal(str(value)) for value in bases]
+        total = sum(weights)
+        if total <= Decimal("1e-12"):
+            if position_points:
+                raise ValueError("Zero position targets cannot be scaled to this cash weight.")
+            return {key: 0.0 for key in keys}
+        raw = [Decimal(position_points) * value / total for value in weights]
+        points = [int(value.to_integral_value(rounding=ROUND_FLOOR)) for value in raw]
+        for index in sorted(range(len(keys)), key=lambda i: (-(raw[i] - points[i]), i))[:position_points - sum(points)]:
+            points[index] += 1
+        return {key: float(Decimal(value) / unit) for key, value in zip(keys, points)}
 
 
 def calculate_targets(rows, nav, cash, *, mode="individual", targets=None,

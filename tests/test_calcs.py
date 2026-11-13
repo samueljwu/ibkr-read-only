@@ -106,6 +106,72 @@ def test_calcs_tab_saves_cash_and_position_targets_by_portfolio(tmp_path):
 
 
 
+def test_rebalance_input_decimal_places_change_and_persist(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "input-decimals.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    service = Service([holding(1, 90000, 900)])
+    tab = CalcsTab(db, service, 1)
+    try:
+        tab.idea_input.setText("NEW")
+        tab.add_idea()
+        for column, places in ((4, 4), (7, 5), (9, 6), (12, 3)):
+            menu = tab._build_header_menu(column)
+            assert any(action.text() == "Decimal places" for action in menu.actions())
+            tab.set_column_decimals(column, places)
+            row = tab._row_for_position(1 if column != 7 else "idea:NEW")
+            assert tab.table.cellWidget(row, column).decimals() == places
+        assert tab.cash_editor.decimals() == 4
+
+        row = tab._row_for_position(1)
+        tab.table.cellWidget(row, 4).setValue(12.3456)
+        tab.table.cellWidget(row, 4).editingFinished.emit()
+        assert tab.targets["1"] == pytest.approx(0.123456)
+        row = tab._row_for_position(1)
+        tab.table.cellWidget(row, 9).setValue(123.456789)
+        tab.table.cellWidget(row, 9).editingFinished.emit()
+        assert tab.scenarios["1"]["up_value"] == pytest.approx(123.456789)
+        row = tab._row_for_position("idea:NEW")
+        tab.table.cellWidget(row, 7).setValue(20.12345)
+        tab.table.cellWidget(row, 7).editingFinished.emit()
+        assert tab.ideas["NEW"]["price_usd"] == pytest.approx(20.12345)
+
+        tab.cash_editor.setValue(12.3456)
+        tab.cash_editor.editingFinished.emit()
+        assert tab.cash_target == pytest.approx(0.123456)
+        assert sum(tab.targets.values()) == pytest.approx(0.876544)
+        saved_view = tab.view_state()
+    finally:
+        tab.close()
+
+    reopened = CalcsTab(db, service, 1)
+    try:
+        for column, places in ((4, 4), (7, 5), (9, 6), (12, 3)):
+            assert reopened.decimals_for(column) == places
+            row = reopened._row_for_position(1 if column != 7 else "idea:NEW")
+            assert reopened.table.cellWidget(row, column).decimals() == places
+        assert reopened.cash_editor.decimals() == 4
+        assert reopened.cash_target == pytest.approx(0.123456)
+        assert reopened.scenarios["1"]["up_value"] == pytest.approx(123.456789)
+        assert reopened.ideas["NEW"]["price_usd"] == pytest.approx(20.12345)
+        reopened.set_column_decimals(4, 2)
+        assert reopened.apply_view_state(saved_view)
+        assert reopened.cash_editor.decimals() == 4
+        assert reopened.table.cellWidget(reopened._row_for_position(1), 4).decimals() == 4
+        reopened.set_column_decimals(4, 2)
+    finally:
+        reopened.close()
+
+    lower_precision = CalcsTab(db, service, 1)
+    try:
+        assert lower_precision.cash_target == pytest.approx(0.123456)
+        lower_precision.set_column_decimals(4, 4)
+        assert lower_precision.cash_editor.value() == pytest.approx(12.3456)
+    finally:
+        lower_precision.close()
+        db.conn.close()
+
+
 def test_portfolio_risk_reward_uses_target_weights_and_skips_missing_cases(tmp_path):
     QApplication.instance() or QApplication([])
     db = Database(tmp_path / "weighted_risk_reward.sqlite3")
@@ -211,27 +277,27 @@ def test_rebalance_idea_add_price_scenario_persistence_and_remove(tmp_path):
         tab.add_idea()
         assert tab.table.rowCount() == 3
         assert tab.ideas == {"NEW": {"price_usd": None}}
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         assert tab.table.item(row, 3).text() == "0.0000 %"
         tab.table.cellWidget(row, 4).setValue(10)
         tab.table.cellWidget(row, 4).editingFinished.emit()
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         assert tab.table.item(row, 5).text() == "Buy $10,000.00"
         assert tab.table.item(row, 6).text() == "—"
         tab.table.cellWidget(row, 7).setValue(200)
         tab.table.cellWidget(row, 7).editingFinished.emit()
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         assert tab.table.item(row, 6).text() == "Buy 50.0000 shares"
         tab.table.cellWidget(row, 8).setCurrentIndex(1)
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         tab.table.cellWidget(row, 9).setValue(25)
         tab.table.cellWidget(row, 9).editingFinished.emit()
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         tab.table.cellWidget(row, 11).setCurrentIndex(1)
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         tab.table.cellWidget(row, 12).setValue(10)
         tab.table.cellWidget(row, 12).editingFinished.emit()
-        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if tab.table.item(i, 0).text() == "NEW")
         assert tab.table.item(row, 10).text() == "250.00 USD"
         assert tab.table.item(row, 13).text() == "180.00 USD"
         assert tab.table.item(row, 14).text() == "2.50"
@@ -243,12 +309,12 @@ def test_rebalance_idea_add_price_scenario_persistence_and_remove(tmp_path):
         assert "already in current positions" in tab.idea_notice.text()
         assert len(service.rows) == 2
         tab.table.sortItems(2, Qt.AscendingOrder)
-        assert tab.table.item(0, 0).text() == "NEW · idea"
+        assert tab.table.item(0, 0).text() == "NEW"
     finally:
         tab.close()
     reopened = CalcsTab(db, service, 1)
     try:
-        row = next(i for i in range(3) if reopened.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(3) if reopened.table.item(i, 0).text() == "NEW")
         assert reopened.targets["idea:NEW"] == pytest.approx(.1)
         assert reopened.ideas["NEW"]["price_usd"] == 200
         assert reopened.table.item(row, 14).text() == "2.50"
@@ -287,6 +353,7 @@ def test_acquired_idea_becomes_one_real_position_and_retains_plan(tmp_path):
         assert tab.ideas == {}
         assert tab.targets["3"] == .2
         assert tab.scenarios["3"]["up_value"] == 25
+        assert tab.table.item(tab._row_for_position(3), 0).data(Qt.ForegroundRole) is None
     finally:
         tab.close()
         db.conn.close()
@@ -317,7 +384,7 @@ def test_rebalance_keyboard_on_cash_and_idea_price(tmp_path):
         tab.idea_input.setText("NEW")
         tab.add_idea()
         app.processEvents()
-        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "NEW")
         price = tab.table.cellWidget(row, 7)
         price.setFocus()
         app.processEvents()
@@ -325,7 +392,7 @@ def test_rebalance_keyboard_on_cash_and_idea_price(tmp_path):
         price.setValue(200)
         QTest.keyClick(price.lineEdit(), Qt.Key_Left)
         assert tab.ideas["NEW"]["price_usd"] == 200
-        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "NEW · idea")
+        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "NEW")
         assert (tab.table.currentRow(), tab.table.currentColumn()) == (row, 6)
     finally:
         tab.close()
@@ -436,18 +503,18 @@ def test_ibkr_idea_requires_suggestion_and_uses_delayed_quote_and_fx(tmp_path, m
         assert tab.ideas["SAP"]["con_id"] == 900000001
         assert ("idea:SAP", 900000001) in requested
         assert ("fx", "EUR") in requested
-        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP · idea")
+        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP")
         assert tab.table.item(row, 7).text() == "—"
         provider.events.put(("quote", ["idea:SAP"], "delayed_last", 100, "Delayed"))
         ids = provider.drain()
         tab.cache_idea_quotes(ids)
         tab.refresh()
-        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP · idea")
+        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP")
         assert tab.table.item(row, 7).text() == "100.00 EUR"
         assert "DELAYED" in tab.table.item(row, 7).toolTip().upper()
         tab.table.cellWidget(row, 4).setValue(12)
         tab.table.cellWidget(row, 4).editingFinished.emit()
-        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP · idea")
+        row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "SAP")
         assert tab.table.item(row, 6).text() == "Buy 100.0000 shares"
     finally:
         tab.close()
@@ -455,7 +522,7 @@ def test_ibkr_idea_requires_suggestion_and_uses_delayed_quote_and_fx(tmp_path, m
     try:
         assert reopened.ideas["SAP"]["con_id"] == 900000001
         assert reopened.ideas["SAP"]["price_usd"] == 100
-        row = next(i for i in range(reopened.table.rowCount()) if reopened.table.item(i, 0).text() == "SAP · idea")
+        row = next(i for i in range(reopened.table.rowCount()) if reopened.table.item(i, 0).text() == "SAP")
         assert "CACHED QUOTE" in reopened.table.item(row, 7).toolTip()
     finally:
         reopened.close()

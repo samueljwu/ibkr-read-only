@@ -751,7 +751,7 @@ class InputReportTable(ReportTable):
             self._input_bindings[line_edit] = binding
             line_edit.installEventFilter(self)
 
-    def select_cell(self, row, column, *, focus=False):
+    def select_cell(self, row, column, *, focus=False, ensure_visible=True):
         if focus:
             self.setFocus()
         index = self.model().index(row, column)
@@ -762,7 +762,8 @@ class InputReportTable(ReportTable):
         selection.blockSignals(False)
         self._update_active_editor(index, previous)
         self.selection_axis = "cell"
-        self.scrollTo(index, QAbstractItemView.EnsureVisible)
+        if ensure_visible:
+            self.scrollTo(index, QAbstractItemView.EnsureVisible)
         self.viewport().update()
 
     def move_cell(self, row, column, key):
@@ -823,7 +824,7 @@ class InputReportTable(ReportTable):
             _, row_key, column, _, _ = binding
             row = self.row_for_key(row_key)
             if row >= 0 and (self.currentRow(), self.currentColumn()) != (row, column):
-                self.select_cell(row, column)
+                self.select_cell(row, column, ensure_visible=event.reason() != Qt.MouseFocusReason)
         if binding is not None and isinstance(binding[0], QAbstractSpinBox):
             select_spinbox_text_on_click(binding[0], event)
         if binding is None or event.type() != QEvent.KeyPress:

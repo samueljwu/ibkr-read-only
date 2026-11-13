@@ -7,7 +7,7 @@ import time
 from datetime import date
 
 from PySide6.QtCore import QByteArray, QEvent, QSize, QStringListModel, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QCompleter, QDoubleSpinBox, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
@@ -20,7 +20,7 @@ from app.views import widgets
 from app.views.table_ui import (TABLE_ROW_HEIGHT, InputHoverOutline, InputReportTable,
                                 InputSpinBox, SortItem, build_header_menu,
                                 keep_spinbox_arrow_cursor, select_spinbox_text_on_click)
-from app.views.ui_theme import (TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
+from app.views.ui_theme import (COLORS, TOOLBAR_GROUP_SPACING, TOOLBAR_ITEM_SPACING,
                                 set_zoom_height, style_combo_selection,
                                 style_toolbar_dropdown)
 
@@ -30,11 +30,30 @@ def _text(value, places=2):
 
 
 class CalcsTable(InputReportTable):
+    EDITOR_COLUMNS = (4, 7, 8, 9, 11, 12)
+    # QTableView::item has four pixels of horizontal padding on each side.
+    EDITOR_HORIZONTAL_INSET = 8
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.show_input_hover_outline = True
         self.viewport().setMouseTracking(True)
         self.cash_editor = None
+        self.horizontalHeader().sectionResized.connect(self._resize_column_editors)
+
+    def _resize_column_editors(self, column, _old_width, new_width):
+        if column not in self.EDITOR_COLUMNS or new_width <= 0:
+            return
+        width = max(1, new_width - self.EDITOR_HORIZONTAL_INSET)
+        for row in range(self.rowCount()):
+            editor = self.cellWidget(row, column)
+            if isinstance(editor, (QComboBox, QDoubleSpinBox)):
+                editor.setFixedWidth(width)
+
+    def setCellWidget(self, row, column, widget):
+        if column in self.EDITOR_COLUMNS and isinstance(widget, (QComboBox, QDoubleSpinBox)):
+            widget.setFixedWidth(max(1, self.columnWidth(column) - self.EDITOR_HORIZONTAL_INSET))
+        super().setCellWidget(row, column, widget)
 
     def keyPressEvent(self, event):
         if (event.key() == Qt.Key_Up and event.modifiers() == Qt.NoModifier and
@@ -54,8 +73,9 @@ class CalcsTab(QWidget):
                "Current price", "Upside type", "Upside value", "Upside result",
                "Downside type", "Downside value", "Downside result", "Upside / downside", "Idea",
                "Next earnings")
-    NUMERIC_COLUMNS = (1, 2, 3, 5, 6, 7, 10, 13, 14)
-    DEFAULT_DECIMALS = {1: 4, 2: 2, 3: 4, 5: 2, 6: 4, 7: 2, 10: 2, 13: 2, 14: 2}
+    NUMERIC_COLUMNS = (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 13, 14)
+    DEFAULT_DECIMALS = {1: 4, 2: 2, 3: 4, 4: 2, 5: 2, 6: 4, 7: 2,
+                        9: 4, 10: 2, 12: 4, 13: 2, 14: 2}
 
     def __init__(self, db, service, portfolio_id, parent=None):
         super().__init__(parent)
@@ -74,6 +94,8 @@ class CalcsTab(QWidget):
         self._setting_key = f"calcs_targets_{portfolio_id}"
         self._scenario_key = f"calcs_scenarios_{portfolio_id}"
         self._ideas_key = f"rebalance_ideas_{portfolio_id}"
+        saved_theme = self.db.setting("ui_theme")
+        self.theme = saved_theme if saved_theme in COLORS else "light"
         self.mode = "individual"
         self._view_key = f"calcs_view_mode_v2_{portfolio_id}"
         self.view_mode = self.db.setting(self._view_key) or self.db.setting(f"calcs_view_mode_{portfolio_id}")
@@ -118,7 +140,11 @@ class CalcsTab(QWidget):
         top.addWidget(reset)
         layout.addLayout(top)
         add_row = QHBoxLayout()
-        add_row.addWidget(QLabel("Add idea"))
+        idea_label = QLabel("Add idea")
+        idea_label_font = idea_label.font()
+        idea_label_font.setItalic(True)
+        idea_label.setFont(idea_label_font)
+        add_row.addWidget(idea_label)
         self.idea_input = QLineEdit()
         self.idea_input.setPlaceholderText("Ticker, e.g. NVDA")
         self.idea_input.setMaxLength(60)
@@ -256,19 +282,25 @@ class CalcsTab(QWidget):
             saved = {}
         self.mode = saved.get("mode") if saved.get("mode") in ("individual", "proportional") else "individual"
         targets = saved.get("targets") if isinstance(saved.get("targets"), dict) else {}
-        self.targets = {key: rounded for key, value in targets.items()
-                        if (rounded := self._rounded_weight(value)) is not None}
-        self.cash_target = self._rounded_weight(saved.get("cash_target"), cash=True)
+        self.targets = {key: valid for key, value in targets.items()
+                        if (valid := self._valid_weight(value)) is not None}
+        self.cash_target = self._valid_weight(saved.get("cash_target"), cash=True)
 
     @staticmethod
-    def _rounded_weight(value, *, cash=False):
+    def _valid_weight(value, *, cash=False):
         try:
             fraction = float(value)
         except (TypeError, ValueError):
             return None
         if not math.isfinite(fraction) or not (-9.9999 if cash else 0) <= fraction <= 9.9999:
             return None
-        return round(fraction * 100, 2) / 100
+        return fraction
+
+    def _rounded_weight(self, value, *, cash=False):
+        fraction = self._valid_weight(value, cash=cash)
+        if fraction is None:
+            return None
+        return round(fraction * 100, self.decimals_for(4)) / 100
 
     def _save(self):
         self.db.set_setting(self._setting_key, json.dumps({
@@ -336,8 +368,7 @@ class CalcsTab(QWidget):
             elif price is not None and quote.get("updated"):
                 source = f"{quote.get('mode', 'Live').upper()} · {source} · {quote['updated']}"
             fx = self.db.fx_rate(currency, date.today().isoformat())
-            display = f"{ticker} · {'idea' if details.get('con_id') or not self.require_ibkr_ideas else 'unverified'}"
-            rows.append({"id": f"idea:{ticker}", "display_ticker": display,
+            rows.append({"id": f"idea:{ticker}", "display_ticker": ticker,
                          "ib_symbol": ticker, "position_qty": 0.0, "value": 0.0,
                          "unit_price_usd": price * fx if price is not None and fx is not None else None,
                          "last_px": price, "currency": currency, "security_type": "STK",
@@ -637,6 +668,7 @@ class CalcsTab(QWidget):
                     self.column_decimals[column] = places
             self.db.set_setting(f"calcs_decimals_v3_{self.portfolio_id}",
                                 json.dumps(self.column_decimals))
+            self.cash_editor.setDecimals(self.decimals_for(4))
             self.refresh()
         saved = state.get("header")
         if isinstance(saved, str) and not legacy:
@@ -680,6 +712,8 @@ class CalcsTab(QWidget):
         else:
             self.column_decimals[column] = places
         self.db.set_setting(f"calcs_decimals_v3_{self.portfolio_id}", json.dumps(self.column_decimals))
+        if column == 4:
+            self.cash_editor.setDecimals(places)
         self.refresh()
 
     def _build_header_menu(self, column):
@@ -720,7 +754,8 @@ class CalcsTab(QWidget):
             return
         cash_target = self._rounded_weight(value / 100, cash=True)
         try:
-            adjusted = scale_target_weights(self._shown_targets, cash_target)
+            adjusted = scale_target_weights(self._shown_targets, cash_target,
+                                            decimal_places=self.decimals_for(4))
         except ValueError as exc:
             self._target_error = str(exc)
             self.refresh()
@@ -804,6 +839,24 @@ class CalcsTab(QWidget):
         if position_id is not None:
             item.setData(Qt.UserRole, position_id)
         return item
+
+    def set_theme(self, theme):
+        self.theme = theme if theme in COLORS else "light"
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and str(item.data(Qt.UserRole)).startswith("idea:"):
+                self._style_position_item(item, idea=True)
+
+    def _style_position_item(self, item, *, idea):
+        font = item.font()
+        font.setBold(idea)
+        font.setItalic(idea)
+        item.setFont(font)
+        item.setData(Qt.BackgroundRole, None)
+        if idea:
+            item.setForeground(QColor(COLORS[self.theme]["selection_border"]))
+        else:
+            item.setData(Qt.ForegroundRole, None)
 
     def _watch_editor(self, editor, position_id, column):
         if (isinstance(editor, QDoubleSpinBox) and
@@ -974,22 +1027,28 @@ class CalcsTab(QWidget):
     def _number(self, value, column, suffix=""):
         return "—" if value is None else f"{value:,.{self.decimals_for(column)}f}{suffix}"
 
-    @staticmethod
-    def _configure_weight_editor(editor, *, cash=False):
+    def _configure_weight_editor(self, editor, *, cash=False):
         editor.setObjectName("calcsTargetInput")
         editor.setButtonSymbols(QDoubleSpinBox.NoButtons)
         editor.setRange(-999.99 if cash else 0, 999.99)
-        editor.setDecimals(2)
+        editor.setDecimals(self.decimals_for(4))
         editor.setSingleStep(0.5)
         editor.setSuffix(" %")
+
+    @staticmethod
+    def _size_table_editor(editor):
+        set_zoom_height(editor, 28)
+        editor.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
     def _weight_editor(self, row, value, callback, *, reuse=False):
         editor = self.table.cellWidget(row, 4) if reuse else None
         if not isinstance(editor, QDoubleSpinBox):
             editor = InputSpinBox()
             self._configure_weight_editor(editor)
+            self._size_table_editor(editor)
             self.table.setCellWidget(row, 4, editor)
             editor.editingFinished.connect(lambda: self._finish_spin_edit(editor, callback))
+        editor.setDecimals(self.decimals_for(4))
         if not editor.hasFocus():
             editor.blockSignals(True)
             editor.setValue(100 * value)
@@ -1004,13 +1063,15 @@ class CalcsTab(QWidget):
             editor.setObjectName("calcsTargetInput")
             editor.setButtonSymbols(QDoubleSpinBox.NoButtons)
             editor.setRange(0, 1_000_000_000)
-            editor.setDecimals(4)
+            editor.setDecimals(self.decimals_for(7))
             editor.setSuffix(" USD")
             editor.setSpecialValueText("Enter price")
+            self._size_table_editor(editor)
             self.table.setCellWidget(row, 7, editor)
             editor.editingFinished.connect(lambda symbol=ticker, spin=editor:
                                            self._finish_spin_edit(spin, lambda value:
                                                                   self._idea_price_changed(symbol, value)))
+        editor.setDecimals(self.decimals_for(7))
         if not editor.hasFocus():
             editor.blockSignals(True)
             editor.setValue(price or 0)
@@ -1028,7 +1089,7 @@ class CalcsTab(QWidget):
             choice.setObjectName("calcsTargetInput")
             choice.addItem("Price", "price")
             choice.addItem("%", "percent")
-            set_zoom_height(choice, 28)
+            self._size_table_editor(choice)
             self.table.setCellWidget(row, mode_column, choice)
             choice.currentIndexChanged.connect(
                 lambda _, pid=position_id, which=side, box=choice:
@@ -1039,17 +1100,18 @@ class CalcsTab(QWidget):
         editor = self.table.cellWidget(row, value_column) if reuse else None
         if not isinstance(editor, QDoubleSpinBox):
             editor = InputSpinBox()
-            editor.setObjectName("calcsTargetInput")
+            editor.setObjectName("calcsScenarioValueInput")
             editor.setButtonSymbols(QDoubleSpinBox.NoButtons)
             editor.setRange(0, 1_000_000_000)
-            editor.setDecimals(4)
+            editor.setDecimals(self.decimals_for(value_column))
             editor.setSpecialValueText("Enter")
-            set_zoom_height(editor, 28)
+            self._size_table_editor(editor)
             self.table.setCellWidget(row, value_column, editor)
             editor.editingFinished.connect(
                 lambda pid=position_id, which=side, spin=editor:
                 self._finish_spin_edit(spin, lambda value:
                                        self._scenario_value_changed(pid, which, value)))
+        editor.setDecimals(self.decimals_for(value_column))
         editor.setSingleStep(1 if mode == "percent" else 0.5)
         editor.setSuffix(" %" if mode == "percent" else "")
         if not editor.hasFocus():
@@ -1160,9 +1222,10 @@ class CalcsTab(QWidget):
                 if not isinstance(target, (int, float)) or not math.isfinite(target):
                     target = 0
                 self._shown_targets[str(row["id"])] = target
-                self._cell(index, 0, row["display_ticker"],
-                           tip=str(row.get("contract_tooltip") or row.get("price_source") or ""),
-                           position_id=row["id"])
+                ticker_item = self._cell(index, 0, row["display_ticker"],
+                                         tip=str(row.get("contract_tooltip") or row.get("price_source") or ""),
+                                         position_id=row["id"])
+                self._style_position_item(ticker_item, idea=bool(row.get("hypothetical")))
                 self._cell(index, 1, self._number(row["position_qty"], 1), sort_value=row["position_qty"])
                 self._cell(index, 2, self._number(row.get("value"), 2), sort_value=row.get("value"))
                 self._cell(index, 3, self._number(weight * 100 if weight is not None else None, 3, " %"), sort_value=weight)
@@ -1248,7 +1311,7 @@ class CalcsTab(QWidget):
             self.table.verticalScrollBar().setValue(vertical_scroll)
             cash_weight = cash / nav if cash is not None and nav and nav > 0 else None
             self.cash_value.setText("—" if cash is None else
-                                    f"${cash:,.2f}  ·  " + (_text(cash_weight * 100, 4) + "%" if cash_weight is not None else "weight unavailable"))
+                                    f"${cash:,.2f}  ·  " + (_text(cash_weight * 100, 2) + "%" if cash_weight is not None else "weight unavailable"))
             self.cash_value.setToolTip(cash_note)
             cash_target = calc.get("cash_target")
             if cash_target is None:
