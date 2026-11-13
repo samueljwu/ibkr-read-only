@@ -742,6 +742,7 @@ class IBKRMarketDataProvider(MarketDataProvider):
         self.delayed_requested = False
         self.positions = {}
         self.missing_trade_fx = set()
+        self.stale_con_ids = set()
         self.history_last_days = {}
         self.missing_timezones = set()
         self.benchmark_last_day = None
@@ -1040,6 +1041,10 @@ class IBKRMarketDataProvider(MarketDataProvider):
             if position["id"] not in self.positions:
                 self.positions[position["id"]] = dict(position)
                 added.add(position["id"])
+                if position.get("con_id"):
+                    # A position discovered after connection setup was absent
+                    # from the initial stale-history scan.
+                    self.stale_con_ids.add(int(position["con_id"]))
         if added and self.connected:
             self._request_all(added)
 

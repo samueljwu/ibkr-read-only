@@ -1,16 +1,19 @@
 """Daily bars must finish in the instrument's trading timezone."""
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
 import app.ui as ui
+from app.finance.services import PortfolioService
+from app.market.market_data import IBKRMarketDataProvider, MockMarketDataProvider
 from app.market.session import completed_history_day
-from app.market.market_data import IBKRMarketDataProvider
 from app.storage.database import Database
 
 
@@ -68,6 +71,51 @@ def test_known_contract_still_requests_missing_timezone(monkeypatch):
     failed_request_id = requested[-1][0]
     provider.client.error(failed_request_id, 200, "Synthetic details unavailable")
     assert provider.events.empty()
+
+
+def test_new_broker_position_requests_daily_history_on_existing_connection(monkeypatch):
+    provider = IBKRMarketDataProvider("127.0.0.1", 7497, 17)
+    provider.connected = True
+    position = {"id": 1, "display_ticker": "TEST", "ib_symbol": "TEST",
+                "security_type": "STK", "exchange": "NASDAQ",
+                "primary_exchange": "", "currency": "USD",
+                "con_id": 123, "multiplier": 1}
+    monkeypatch.setattr(provider.client, "reqMktData", lambda *_args: None)
+    monkeypatch.setattr(provider.client, "reqContractDetails", lambda *_args: None)
+    history_requests = []
+    monkeypatch.setattr(provider.client, "reqHistoricalData",
+                        lambda *args: history_requests.append(args))
+
+    provider.add_positions([position])
+    assert len(history_requests) == 1
+    assert history_requests[0][1].conId == 123
+    assert history_requests[0][2:5] == ("", "1 Y", "1 day")
+    provider.add_positions([position])
+    assert len(history_requests) == 1
+
+
+def test_new_position_daily_pnl_uses_execution_without_prior_close(tmp_path):
+    db = Database(tmp_path / "new-position.sqlite3")
+    try:
+        position_id = db.add_position({"display_ticker": "TEST", "ib_symbol": "TEST"})
+        db.cache_contract(position_id, 123)
+        market = MockMarketDataProvider()
+        service = PortfolioService(db, market)
+        session_day = service._as_of(db.rows("positions")[0])
+        db.add_trade({"position_id": position_id, "trade_date": session_day.isoformat(),
+                      "side": "BUY", "quantity": 10, "price": 105,
+                      "fx_to_usd": 1, "commission_usd": 1})
+        market.quotes[position_id] = {"ticks": {"last": 107}, "mode": "Live",
+                                      "status": "OK"}
+        row = service.portfolio_rows()[0]
+        assert row["daily_pnl"] == 19
+        assert row["one_day"] is None
+        db.save_history(123, [{"day": (session_day - timedelta(days=1)).isoformat(),
+                               "close": 100}])
+        row = service.portfolio_rows()[0]
+        assert row["one_day"] == pytest.approx(0.07)
+    finally:
+        db.conn.close()
 
 
 def test_history_event_filters_incomplete_bar_and_tracks_session(tmp_path, monkeypatch):

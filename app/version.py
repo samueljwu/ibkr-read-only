@@ -1,3 +1,3 @@
 """Application release version shared by the UI and packaging."""
 
-VERSION = "1.2.13"
+VERSION = "1.2.14"
