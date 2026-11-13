@@ -421,18 +421,20 @@ QComboBox QListView::item:selected {
     background: ${selection}; color: ${selection_text};
     border: 2px solid ${selection_border};
 }
-QDoubleSpinBox#calcsTargetInput, QComboBox#calcsTargetInput {
-    background: ${accent_soft}; color: ${text}; border: 1px solid ${accent};
-    border-radius: 2px; padding: 1px 4px;
+QDoubleSpinBox#calcsTargetInput, QDoubleSpinBox#calcsScenarioValueInput,
+QComboBox#calcsTargetInput {
+    background: ${accent_soft}; color: ${text}; border: 2px solid ${accent};
+    border-radius: 4px; padding: 0 3px;
 }
 QComboBox#calcsTargetInput[activeCell="true"],
 QDoubleSpinBox#calcsTargetInput[activeCell="true"] {
-    border: 1px solid ${selection_border};
+    border-color: ${selection_border};
 }
 QComboBox#calcsTargetInput:focus, QComboBox#calcsTargetInput:on,
 QDoubleSpinBox#calcsTargetInput:focus {
-    border: 2px solid ${selection_border}; border-radius: 4px; padding: 0 3px;
+    border-color: ${selection_border};
 }
+QDoubleSpinBox#calcsScenarioValueInput { border-color: ${selection_border}; }
 QMenuBar { background: ${canvas}; color: ${text}; }
 QMenuBar::item:selected { background: ${accent_soft}; color: ${text}; }
 QMenu { background: ${surface}; color: ${text}; border: 1px solid ${line}; }

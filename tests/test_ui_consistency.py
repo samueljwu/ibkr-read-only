@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo, QMouseEvent, QPalette
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QFontInfo, QMouseEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QComboBox, QDialog,
                                QDialogButtonBox, QHeaderView,
@@ -378,6 +378,7 @@ def test_rebalance_input_hover_preserves_selection_and_cursor(tmp_path, theme):
 
 def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
     app = QApplication.instance() or QApplication([])
+    install_app_font(app)
     db = Database(tmp_path / "input-fit.sqlite3")
     db.set_portfolio_nav(1, 100000)
 
@@ -390,6 +391,7 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
 
     tab = CalcsTab(db, Service(), 1)
     try:
+        assert _label(tab, "Add idea").font().italic()
         tab.idea_input.setText("NEW")
         tab.add_idea()
         tab.ideas["NEW"]["price_usd"] = 10000
@@ -399,14 +401,34 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
         tab.show()
         for theme in ("light", "dark"):
             tab.setStyleSheet(stylesheet(theme))
+            tab.set_theme(theme)
             for width in (800, 1372):
                 tab.resize(width, 600)
                 app.processEvents()
                 _assert_input_text_fits(tab)
+                idea_row = tab._row_for_position("idea:NEW")
+                idea_item = tab.table.item(idea_row, 0)
+                assert idea_item.text() == "NEW"
+                assert idea_item.font().bold()
+                assert idea_item.font().italic()
+                assert idea_item.foreground().color() == QColor(COLORS[theme]["selection_border"])
+                assert idea_item.data(Qt.BackgroundRole) is None
+                held_item = tab.table.item(tab._row_for_position(1), 0)
+                assert not held_item.font().bold()
+                assert not held_item.font().italic()
+                assert held_item.data(Qt.BackgroundRole) is None
                 for position_id in (1, "idea:NEW"):
                     row = tab._row_for_position(position_id)
                     assert tab.table.rowHeight(row) == TABLE_ROW_HEIGHT
                     weight = tab.table.cellWidget(row, 4)
+                    weight_size = weight.size()
+                    tab.table.select_cell(row, 4, focus=True)
+                    weight.setFocus()
+                    app.processEvents()
+                    assert weight.size() == weight_size
+                    tab.table.select_cell(row, 3, focus=True)
+                    app.processEvents()
+                    assert weight.size() == weight_size
                     assert weight.buttonSymbols() == QAbstractSpinBox.NoButtons
                     assert weight.height() >= weight.sizeHint().height()
                     assert weight.height() <= tab.table.rowHeight(row)
@@ -419,6 +441,21 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
                             assert widget.buttonSymbols() == QAbstractSpinBox.NoButtons
                         assert widget.height() >= widget.sizeHint().height()
                         assert widget.height() <= tab.table.rowHeight(row)
+                    for column in (8, 9, 11, 12):
+                        widget = tab.table.cellWidget(row, column)
+                        size = widget.size()
+                        line_size = widget.lineEdit().size() if isinstance(widget, QDoubleSpinBox) else None
+                        border = ("selection_border" if column in (9, 12) else "accent")
+                        assert (widget.grab().toImage().pixelColor(1, size.height() // 2).name() ==
+                                COLORS[theme][border])
+                        tab.table.select_cell(row, column, focus=True)
+                        widget.setFocus()
+                        app.processEvents()
+                        assert widget.size() == size
+                        assert (widget.grab().toImage().pixelColor(1, size.height() // 2).name() ==
+                                COLORS[theme]["selection_border"])
+                        if line_size is not None:
+                            assert widget.lineEdit().size() == line_size
                 assert tab.cash_editor.buttonSymbols() == QAbstractSpinBox.NoButtons
                 assert tab.cash_editor.height() == tab.table.verticalHeader().defaultSectionSize()
                 row = tab._row_for_position(1)
@@ -448,6 +485,123 @@ def test_rebalance_table_inputs_fit_large_values_in_both_themes(tmp_path):
             assert tab.table.columnWidth(column) == width
         tab.refresh()
         assert all(tab.table.columnWidth(column) == width for column, width in resized.items())
+    finally:
+        tab.close()
+        db.conn.close()
+
+
+@pytest.mark.parametrize("theme", ("light", "dark"))
+def test_rebalance_allocation_inputs_keep_size_when_clicked(tmp_path, theme):
+    app = QApplication.instance() or QApplication([])
+    install_app_font(app)
+    db = Database(tmp_path / f"allocation-size-{theme}.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+
+    class Service:
+        def portfolio_rows(self):
+            return [{"id": index, "display_ticker": f"SYNTH{index}", "ib_symbol": f"SYNTH{index}",
+                     "position_qty": 10, "value": 10000, "security_type": "STK",
+                     "last_px": 100, "currency": "USD"} for index in (1, 2, 3)]
+
+    tab = CalcsTab(db, Service(), 1)
+    try:
+        tab.setStyleSheet(stylesheet(theme))
+        tab.set_theme(theme)
+        tab.resize(800, 600)
+        tab.show()
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("allocation"))
+        tab.table.setColumnWidth(4, 115)
+        app.processEvents()
+        initial = {index: (tab.table.cellWidget(tab._row_for_position(index), 4).size(),
+                           tab.table.cellWidget(tab._row_for_position(index), 4).lineEdit().size())
+                   for index in (1, 2, 3)}
+        for index in (1, 2, 3, 1):
+            editor = tab.table.cellWidget(tab._row_for_position(index), 4)
+            QTest.mouseClick(editor.lineEdit(), Qt.LeftButton)
+            app.processEvents()
+            assert (editor.size(), editor.lineEdit().size()) == initial[index]
+            if index == 1 and not tab.targets:
+                QTest.keyClicks(editor.lineEdit(), "25")
+        tab.table.select_cell(tab._row_for_position(1), 3, focus=True)
+        app.processEvents()
+        assert tab.targets["1"] == .25
+        for index in (1, 2, 3):
+            editor = tab.table.cellWidget(tab._row_for_position(index), 4)
+            assert (editor.size(), editor.lineEdit().size()) == initial[index]
+    finally:
+        tab.close()
+        db.conn.close()
+
+
+def test_rebalance_clicking_partly_visible_upside_value_does_not_jump_scroll(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "upside-scroll.sqlite3")
+
+    class Service:
+        def portfolio_rows(self):
+            return [{"id": 1, "display_ticker": "SYNTH", "ib_symbol": "SYNTH",
+                     "position_qty": 10, "value": 10000, "security_type": "STK",
+                     "last_px": 100, "currency": "USD"}]
+
+    tab = CalcsTab(db, Service(), 1)
+    try:
+        tab.resize(600, 600)
+        tab.show()
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
+        app.processEvents()
+        editor = tab.table.cellWidget(0, 9)
+        scroll = tab.table.horizontalScrollBar()
+        visible_width = editor.visibleRegion().boundingRect().width()
+        assert 0 < visible_width < editor.width()
+
+        QTest.mouseClick(editor.lineEdit(), Qt.LeftButton, pos=QPoint(4, 4))
+        app.processEvents()
+        assert scroll.value() == 0
+        assert editor.visibleRegion().boundingRect().width() == visible_width
+        assert tab.table.currentColumn() == 9
+
+        tab.table.select_cell(0, 8, focus=True)
+        tab.table.move_cell(0, 8, Qt.Key_Right)
+        app.processEvents()
+        assert scroll.value() > 0
+        assert editor.visibleRegion().boundingRect().width() == editor.width()
+    finally:
+        tab.close()
+        db.conn.close()
+
+
+def test_rebalance_upside_value_width_stays_equal_across_clicked_rows(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    install_app_font(app)
+    db = Database(tmp_path / "upside-width.sqlite3")
+
+    class Service:
+        def portfolio_rows(self):
+            return [{"id": index, "display_ticker": f"SYNTH{index}",
+                     "position_qty": 10, "value": 10000, "security_type": "STK",
+                     "last_px": 100, "currency": "USD"} for index in (1, 2, 3)]
+
+    tab = CalcsTab(db, Service(), 1)
+    try:
+        tab.setStyleSheet(stylesheet("light"))
+        tab.resize(900, 500)
+        tab.show()
+        tab.view_choice.setCurrentIndex(tab.view_choice.findData("cases"))
+        tab.table.setColumnWidth(9, 92)
+        app.processEvents()
+        editors = [tab.table.cellWidget(row, 9) for row in range(3)]
+        width = editors[0].width()
+        assert all(editor.minimumWidth() == editor.maximumWidth() == width for editor in editors)
+
+        for editor in editors[:2]:
+            QTest.mouseClick(editor.lineEdit(), Qt.LeftButton)
+            app.processEvents()
+            assert [widget.width() for widget in editors] == [width] * 3
+
+        tab.table.setColumnWidth(9, 106)
+        app.processEvents()
+        assert all(editor.minimumWidth() == editor.maximumWidth() == 98 for editor in editors)
+        assert [editor.width() for editor in editors] == [98] * 3
     finally:
         tab.close()
         db.conn.close()

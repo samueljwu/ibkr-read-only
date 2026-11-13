@@ -989,6 +989,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, theme):
         self.theme = theme if theme in ("light", "dark") else "light"
         self.setStyleSheet(stylesheet(self.theme, self.zoom_percent))
+        self.calcs_tab.set_theme(self.theme)
         self._refresh_summary_border()
         for calendar in self.findChildren(DatePickerCalendar):
             calendar.set_colors(COLORS[self.theme])
