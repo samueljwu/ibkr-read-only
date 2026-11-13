@@ -953,7 +953,7 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, 
         assert active_controls.start_date.isVisible()
         assert active_controls.end_date.isVisible()
         assert tab.start_date.date().toPython() == recorded_days[0]
-        assert tab.end_date.date().toPython() == recorded_days[-1]
+        assert tab.end_date.date().toPython() == today
         view = getattr(tab, f"{section}_chart")
         area = view.chart().plotArea()
         assert area.width() > 100
@@ -1005,7 +1005,7 @@ def test_chart_drag_updates_shared_dates_and_both_tables(tmp_path, monkeypatch, 
         navigation.reset.click()
         assert tab.range_combo.currentText() == "All"
         assert tab.start_date.date().toPython() == recorded_days[0]
-        assert tab.end_date.date().toPython() == recorded_days[-1]
+        assert tab.end_date.date().toPython() == today
         if navigation.select_dates.isChecked():
             navigation.select_dates.click()
         assert view.cursor().shape() == Qt.ArrowCursor

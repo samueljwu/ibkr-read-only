@@ -3965,9 +3965,16 @@ class MainWindow(QMainWindow):
                     self.db.set_fx_rate(currency, date.today().isoformat(), rate, "IBKR live")
                 needs_model_refresh = True
             if new_instruments and isinstance(self.market, IBKRMarketDataProvider):
-                self.market.add_positions([p for p in self.db.rows("positions", self.portfolio_id)
-                                           if p["id"] in new_instruments],
-                                          missing_timezones=new_instruments)
+                added_positions = [p for p in self.db.rows("positions", self.portfolio_id)
+                                   if p["id"] in new_instruments]
+                self.market.add_positions(added_positions, missing_timezones=new_instruments)
+                if self.market.connected:
+                    # These contracts have already received a history request.
+                    # Avoid reconnecting just because the next stale scan sees them.
+                    requested = frozenset((p["con_id"], self._history_completed_day(p))
+                                          for p in added_positions if p.get("con_id"))
+                    self._history_attempt_signature = (
+                        (self._history_attempt_signature or frozenset()) | requested)
             if needs_model_refresh:
                 self._refresh_models()
         required_live_events = {"broker_positions", "account_summary_end"}
