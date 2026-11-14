@@ -1,6 +1,8 @@
 import os
 from datetime import date, timedelta
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -56,7 +58,7 @@ def test_overview_total_cost_includes_remaining_buy_fees_at_acquisition_fx(tmp_p
         model = ui.GridModel("Portfolio", db, service)
         column = next(i for i, (key, _, _) in enumerate(model.columns)
                       if key == "total_cost_usd")
-        assert model.headerData(column, Qt.Horizontal) == "Total cost USD"
+        assert model.headerData(column, Qt.Horizontal) == "Open basis USD"
         assert model.data(model.index(0, column)) == "68.80"
         assert "allocated buy fees" in model.data(model.index(0, column), Qt.ToolTipRole)
         model.refresh([{**row, "open_pnl_fee_pending": True}])
@@ -72,6 +74,88 @@ def test_overview_total_cost_is_blank_when_open_lot_fx_is_missing(tmp_path):
         db.add_trade({"position_id": position, "trade_date": "2026-01-02",
                       "side": "BUY", "quantity": 2, "price": 20, "fx_to_usd": 0})
         assert PortfolioService(db, MockMarketDataProvider()).portfolio_rows()[0]["total_cost_usd"] is None
+    finally:
+        db.conn.close()
+
+
+def test_overview_values_remaining_short_after_partial_cover(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "short-overview.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "SHORT", "ib_symbol": "SHORT"})
+        db.add_trade({"position_id": position, "trade_date": "2026-01-02", "side": "SELL",
+                      "quantity": 10, "price": 12, "commission_usd": 2})
+        db.add_trade({"position_id": position, "trade_date": "2026-01-03", "side": "BUY",
+                      "quantity": 4, "price": 10, "commission_usd": 0.5})
+        MatchingService(db).rebuild_auto()
+        db.set_portfolio_nav(1, 1_000)
+        market = MockMarketDataProvider()
+        market.quotes[position] = {"mode": "Mock", "ticks": {"last": 8}, "status": "MOCK"}
+        service = PortfolioService(db, market)
+        row = service.portfolio_rows()[0]
+        assert row["position_qty"] == -6
+        assert row["average_cost"] == pytest.approx(11.8)
+        assert row["total_cost_usd"] == pytest.approx(70.8)
+        assert row["value"] == pytest.approx(-48)
+        assert row["portfolio_pct"] == pytest.approx(-0.048)
+        assert row["unrealized_pnl"] == pytest.approx(22.8)
+        assert row["unrealized_pct"] == pytest.approx(22.8 / 70.8)
+        assert row["data_status"] == "OPEN SHORT"
+
+        model = ui.GridModel("Portfolio", db, service)
+        model.refresh([row])
+        columns = {key: i for i, (key, _, _) in enumerate(model.columns)}
+        assert "proceeds from open short sales" in model.data(
+            model.index(0, columns["total_cost_usd"]), Qt.ToolTipRole)
+        assert "liability" in model.data(model.index(0, columns["value"]), Qt.ToolTipRole)
+        model.refresh([{**row, "open_pnl_fee_pending": True}])
+        tooltip = model.data(model.index(0, columns["total_cost_usd"]), Qt.ToolTipRole)
+        assert "open short sales" in tooltip and "pending fees" in tooltip
+    finally:
+        db.conn.close()
+
+
+def test_overview_short_requires_price_for_open_pnl(tmp_path):
+    db = Database(tmp_path / "short-no-price.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "SHORT", "ib_symbol": "SHORT"})
+        db.add_trade({"position_id": position, "trade_date": "2026-01-02", "side": "SELL",
+                      "quantity": 2, "price": 12, "commission_usd": 1})
+        row = PortfolioService(db, MockMarketDataProvider()).portfolio_rows()[0]
+        assert row["position_qty"] == -2
+        assert row["total_cost_usd"] == 23
+        assert row["value"] is None
+        assert row["unrealized_pnl"] is None
+        assert row["unrealized_pct"] is None
+        assert row["data_status"] == "OPEN SHORT"
+    finally:
+        db.conn.close()
+
+
+def test_overview_short_uses_sale_fx_and_reports_missing_basis(tmp_path):
+    db = Database(tmp_path / "short-fx.sqlite3")
+    try:
+        position = db.add_position({"display_ticker": "SHORT", "ib_symbol": "SHORT",
+                                    "currency": "EUR"})
+        sale = db.add_trade({"position_id": position, "trade_date": "2026-01-02",
+                             "side": "SELL", "quantity": 10, "price": 12,
+                             "fx_to_usd": 1.2, "commission_usd": 2})
+        db.set_fx_rate("EUR", date.today().isoformat(), 1.1)
+        market = MockMarketDataProvider()
+        market.quotes[position] = {"mode": "Mock", "ticks": {"last": 8}, "status": "MOCK"}
+        service = PortfolioService(db, market)
+        row = service.portfolio_rows()[0]
+        assert row["total_cost_usd"] == pytest.approx(142)
+        assert row["value"] == pytest.approx(-88)
+        assert row["unrealized_pnl"] == pytest.approx(54)
+
+        db.conn.execute("UPDATE trades SET fx_to_usd=0 WHERE id=?", (sale,))
+        db.conn.commit()
+        row = service.portfolio_rows()[0]
+        assert row["position_qty"] == -10
+        assert row["total_cost_usd"] is None
+        assert row["unrealized_pnl"] is None
+        assert row["data_status"] == "OPEN SHORT · BASIS UNAVAILABLE"
     finally:
         db.conn.close()
 
@@ -141,5 +225,26 @@ def test_overview_daily_pnl_shows_percent_of_current_nav(tmp_path, monkeypatch):
                      "last_px": None, "fx_to_usd": 1})
         window._refresh_summary(rows, [])
         assert window.metric_values["daily"].text() == "Partial $25.00 (2.50%)"
+    finally:
+        window.close()
+
+
+def test_overview_summary_nets_short_liability_against_long_holdings(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "Database", lambda: Database(tmp_path / "net-short.sqlite3"))
+    window = ui.MainWindow()
+    try:
+        rows = [
+            {"display_ticker": "LONG", "position_qty": 10, "reconciliation": "OK",
+             "value": 100, "daily_pnl": 5, "unrealized_pnl": 10,
+             "last_px": 10, "fx_to_usd": 1},
+            {"display_ticker": "SHORT", "position_qty": -6, "reconciliation": "OK",
+             "value": -48, "daily_pnl": 3, "unrealized_pnl": 22.8,
+             "last_px": 8, "fx_to_usd": 1},
+        ]
+        window._refresh_summary(rows, [])
+        assert window.metric_values["holdings"].text() == "$52.00"
+        assert "short liabilities" in window.metric_values["holdings"].toolTip()
+        assert window.metric_values["open"].text() == "$32.80"
     finally:
         window.close()

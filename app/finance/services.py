@@ -679,30 +679,36 @@ class PortfolioService:
             position_trades = by_position[position["id"]]
             open_buys = [(t, remaining[t["id"]]) for t in position_trades
                          if t["side"] == "BUY" and remaining[t["id"]] > 1e-9]
-            open_qty = sum(qty for _, qty in open_buys)
             estimated_openings = [t["trade_date"] for t, _ in open_buys
                                   if t["source"] == "CSV market baseline"]
             row["estimated_baseline"] = min(estimated_openings) if estimated_openings else None
             row["recorded_qty"] = position["position_qty"]
             raw_qty = opening_qty + ledger[position["id"]]
             row["position_qty"] = 0.0 if abs(raw_qty) < 1e-9 else raw_qty
+            is_short = row["position_qty"] < 0
+            open_trades = ([(t, remaining[t["id"]]) for t in position_trades
+                            if t["side"] == "SELL" and remaining[t["id"]] > 1e-9]
+                           if is_short else open_buys)
+            open_qty = sum(qty for _, qty in open_trades)
+            open_qty_matches = (open_qty > 1e-9 and
+                                abs(open_qty - abs(row["position_qty"])) < 1e-9)
             multiplier = valid_multiplier(position["multiplier"])
-            complete_open_lots = (open_qty > 1e-9 and row["position_qty"] > 0 and
-                                  abs(open_qty - row["position_qty"]) < 1e-9 and
+            complete_open_lots = (open_qty_matches and
                                   multiplier is not None and all(
                                       valid_price(t["fx_to_usd"]) is not None and
                                       t["multiplier"] == multiplier
-                                      for t, _ in open_buys))
-            row["open_pnl_fee_pending"] = any(not t["commission_complete"] for t, _ in open_buys)
+                                      for t, _ in open_trades))
+            row["open_pnl_fee_pending"] = any(not t["commission_complete"] for t, _ in open_trades)
             row["average_cost"] = (
                 sum(qty * (t["price"] * multiplier +
-                           effective_commission_usd(t) / t["quantity"] / t["fx_to_usd"])
-                    for t, qty in open_buys) / (open_qty * multiplier)
+                           (-1 if is_short else 1) * effective_commission_usd(t) /
+                           t["quantity"] / t["fx_to_usd"])
+                    for t, qty in open_trades) / (open_qty * multiplier)
                 if complete_open_lots else None)
             row["total_cost_usd"] = (
                 sum(qty * t["price"] * multiplier * t["fx_to_usd"] +
-                    effective_commission_usd(t) * qty / t["quantity"]
-                    for t, qty in open_buys)
+                    (-1 if is_short else 1) * effective_commission_usd(t) * qty / t["quantity"]
+                    for t, qty in open_trades)
                 if complete_open_lots and position["security_type"] != "FUT" else None)
             current_fx = fx_rate(position["currency"], date.today().isoformat())
             row["fx_to_usd"] = current_fx
@@ -749,9 +755,7 @@ class PortfolioService:
             stale_tick = bool(tick_time and self._quote_day(position, tick_time) != as_of)
             if stale_tick:
                 row["daily_move"] = row["one_day"] = None
-            # A price-only shortcut cannot value partial, missing, or short lots.
-            # The broker-compatible open P&L below uses each surviving purchase's
-            # acquisition FX and allocated fee.
+            # Open P&L uses each surviving trade's acquisition FX and allocated fee.
             row["unrealized_pnl"] = row["unrealized_pct"] = None
             prior_day = (prior_bar["day"] if prior_bar and
                          valid_price(tick_close) is None else
@@ -768,14 +772,20 @@ class PortfolioService:
                 source == "CLOSE" or source.startswith("CACHED QUOTE") or stale_tick):
                 row["daily_pnl"] = None
             if complete_open_lots:
-                lots = [open_lot(buy, qty, price, current_fx) for buy, qty in open_buys]
-                row["unrealized_pnl"] = (sum(lot["net_unrealized"] for lot in lots)
-                                         if all(lot["net_unrealized"] is not None for lot in lots) else None)
-                basis = sum(lot["buy_value_usd"] + lot["buy_commission"] for lot in lots
-                            if lot["buy_value_usd"] is not None and lot["buy_commission"] is not None)
+                if is_short:
+                    row["unrealized_pnl"] = (
+                        row["total_cost_usd"] - open_qty * price * current_fx * multiplier
+                        if row["total_cost_usd"] is not None and valid_price(price) is not None
+                        and valid_price(current_fx) is not None else None)
+                    basis = row["total_cost_usd"]
+                else:
+                    lots = [open_lot(buy, qty, price, current_fx) for buy, qty in open_buys]
+                    row["unrealized_pnl"] = (sum(lot["net_unrealized"] for lot in lots)
+                                             if all(lot["net_unrealized"] is not None for lot in lots) else None)
+                    basis = sum(lot["buy_value_usd"] + lot["buy_commission"] for lot in lots
+                                if lot["buy_value_usd"] is not None and lot["buy_commission"] is not None)
                 row["unrealized_pct"] = (row["unrealized_pnl"] / basis
-                                         if row["unrealized_pnl"] is not None and basis > 0 and
-                                         all(lot["buy_value_usd"] is not None for lot in lots) else None)
+                                         if row["unrealized_pnl"] is not None and basis > 0 else None)
             bar_key = (position["con_id"], as_of)
             prepared = prepared_history.get(bar_key) if position["con_id"] else None
             if prepared is None:
@@ -805,6 +815,12 @@ class PortfolioService:
                 row["data_status"] = "VERIFY SECURITY TYPE"
             elif not position_trades:
                 row["data_status"] = "STATEMENT OPENING" if opening else "NO TRADES"
+            elif is_short and open_qty_matches:
+                row["data_status"] = "OPEN SHORT"
+                if not complete_open_lots:
+                    row["data_status"] += " · BASIS UNAVAILABLE"
+                if row["open_pnl_fee_pending"]:
+                    row["data_status"] += " · FEE PENDING"
             elif any(t["side"] == "SELL" and remaining[t["id"]] > 1e-9 for t in position_trades):
                 row["data_status"] = "UNMATCHED SALE"
             elif row["open_pnl_fee_pending"]:
