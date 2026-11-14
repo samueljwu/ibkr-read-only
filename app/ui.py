@@ -73,7 +73,7 @@ PORTFOLIO = [
     col("reconciliation", "Reconciliation"), col("data_status", "Data status"),
     col("price_source", "Price source"), col("last_updated", "Updated"),
     # Append logical columns to preserve saved sort indices and header layouts.
-    col("total_cost_usd", "Total cost USD", "money"),
+    col("total_cost_usd", "Open basis USD", "money"),
 ]
 TRADES = [
     col("trade_date", "Date", "date"), col("display_ticker", "Instrument"),
@@ -329,6 +329,20 @@ class GridModel(QAbstractTableModel):
                 return (f"{display_number(row['quantity'])} traded ÷ "
                         f"{display_number(abs(row['position_before_qty']))} position size before this trade "
                         f"= {float(value):,.{self.decimals_for(index.column())}%}.")
+            if self.name == "Portfolio" and row.get("position_qty", 0) < 0:
+                short_notes = {
+                    "average_cost": "Net opening sale price per unit in the instrument currency, after allocated sale fees or rebates.",
+                    "total_cost_usd": "USD proceeds from open short sales, after allocated sale fees or rebates at each sale's FX rate.",
+                    "unrealized_pnl": "Open short sale proceeds less the current USD cost to cover the remaining shares.",
+                    "unrealized_pct": "Open short P&L divided by net opening sale proceeds.",
+                    "value": "Negative market value is the current liability to cover this short position.",
+                    "portfolio_pct": "Negative weight is the short liability divided by account NAV.",
+                }
+                if key in short_notes:
+                    note = short_notes[key]
+                    if key in ("average_cost", "total_cost_usd", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
+                        note += " Estimated without pending fees or rebates; this value will update when they arrive."
+                    return note
             if self.name == "Portfolio" and key in ("average_cost", "total_cost_usd", "unrealized_pnl", "unrealized_pct") and row.get("open_pnl_fee_pending"):
                 return "Estimated without pending fees or rebates; this value will update when they arrive."
             if self.name in ("Lots", "Trades") and key in ("realized_net", "realized_pct", "net_unrealized", "unrealized_pct") and row.get("fee_pending"):
@@ -3165,6 +3179,8 @@ class MainWindow(QMainWindow):
             label = self.metric_values[key]
             label.setText(text)
             note = ""
+            if key == "holdings" and any(r["position_qty"] < -1e-9 for r in eligible):
+                note = "Signed market value: long holdings less short liabilities."
             if key == "daily":
                 note = " Security-position P&L excludes cash income and standalone FX effects."
                 if daily_fee_pending:
