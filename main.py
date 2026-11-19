@@ -106,6 +106,9 @@ def main(argv=None):
         try:
             return MainWindow(database_path=path, on_manage_portfolios=show_chooser)
         except (MissingDatabaseKey, InvalidDatabaseKey):
+            if parent is None:
+                show_chooser()
+                parent = chooser
             while True:
                 code, accepted = QInputDialog.getText(
                     parent, "Unlock portfolio", "Enter the 64-character database recovery code:",
@@ -195,6 +198,12 @@ def main(argv=None):
         window = open_window(database_path)
     except MissingSelectedDatabase:
         show_chooser()
+    except Exception:
+        show_chooser()
+        QMessageBox.warning(
+            chooser, "Open portfolio",
+            "The selected portfolio could not be opened. "
+            "Choose another database or create a new portfolio.")
     else:
         if window is None:
             show_chooser()
@@ -202,6 +211,8 @@ def main(argv=None):
             if database_path is not None:
                 Database.select_database(window.db.path)
             register(window)
+            if chooser is not None and chooser.isVisible():
+                chooser.close()
             if window.db.recovery_code:
                 _show_recovery_code(window, window.db.recovery_code)
                 window.db.recovery_code = None

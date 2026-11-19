@@ -83,7 +83,7 @@ def test_app_opens_database_selection_when_saved_database_is_missing(tmp_path, m
 def test_cancelling_recovery_prompt_can_create_new_portfolio(tmp_path, monkeypatch,
                                                             synthetic_database_keys):
     from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication, QPushButton
+    from PySide6.QtWidgets import QApplication, QInputDialog, QPushButton
     import main as entry
 
     from app.views.database_selection import DatabaseSelectionWindow
@@ -97,10 +97,22 @@ def test_cancelling_recovery_prompt_can_create_new_portfolio(tmp_path, monkeypat
     original = locked.read_bytes()
     synthetic_database_keys.clear()
     monkeypatch.setattr(entry, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
-    monkeypatch.setattr(entry.QInputDialog, "getText", lambda *args: ("", False))
     monkeypatch.setattr(entry, "_show_recovery_code", lambda *args: None)
     app = QApplication.instance() or QApplication([])
     observed = []
+    prompt_parents = []
+
+    original_get_text = QInputDialog.getText
+
+    def cancel_prompt(parent, *args):
+        prompt_parents.append(parent)
+        assert isinstance(parent, DatabaseSelectionWindow) and parent.isVisible()
+        QTimer.singleShot(0, lambda: app.activeModalWidget().reject())
+        result = original_get_text(parent, *args)
+        QTimer.singleShot(0, inspect)
+        return result
+
+    monkeypatch.setattr(entry.QInputDialog, "getText", cancel_prompt)
 
     def inspect():
         try:
@@ -118,13 +130,109 @@ def test_cancelling_recovery_prompt_can_create_new_portfolio(tmp_path, monkeypat
         finally:
             app.quit()
 
-    QTimer.singleShot(0, inspect)
     assert entry.main([]) == 0
+    assert len(prompt_parents) == 1
     assert len(observed) == 1
     assert observed[0] != locked
     assert observed[0].is_file()
     assert locked.read_bytes() == original
     assert Database.saved_databases() == [observed[0], locked]
+
+
+def test_recovery_prompt_opens_database_and_closes_chooser(tmp_path, monkeypatch,
+                                                          synthetic_database_keys):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+    import main as entry
+
+    from app.views.database_selection import DatabaseSelectionWindow
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    _isolate_app_data(monkeypatch, tmp_path)
+    locked = tmp_path / "locked" / "portfolio.sqlite3"
+    db = Database(locked)
+    code = db.recovery_code
+    db.conn.close()
+    Database.select_database(locked)
+    synthetic_database_keys.clear()
+    monkeypatch.setattr(entry, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
+    app = QApplication.instance() or QApplication([])
+    observed = []
+
+    def provide_code(parent, *args):
+        assert isinstance(parent, DatabaseSelectionWindow) and parent.isVisible()
+        return code, True
+
+    monkeypatch.setattr(entry.QInputDialog, "getText", provide_code)
+
+    def inspect():
+        try:
+            observed.extend(widget.db.path for widget in app.topLevelWidgets()
+                            if isinstance(widget, MainWindow) and widget.isVisible())
+            assert not any(isinstance(widget, DatabaseSelectionWindow) and widget.isVisible()
+                           for widget in app.topLevelWidgets())
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    widget.close()
+        finally:
+            app.quit()
+
+    QTimer.singleShot(0, inspect)
+    assert entry.main([]) == 0
+    assert observed == [locked]
+
+
+def test_keychain_denial_still_opens_portfolio_chooser(tmp_path, monkeypatch):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QPushButton
+    import main as entry
+
+    from app.platform import secret_store
+    from app.views.database_selection import DatabaseSelectionWindow
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    _isolate_app_data(monkeypatch, tmp_path)
+    locked = tmp_path / "locked" / "portfolio.sqlite3"
+    db = Database(locked)
+    db.conn.close()
+    Database.select_database(locked)
+    original = locked.read_bytes()
+    load_key = secret_store.load_database_key
+
+    def denied(path):
+        if Path(path) == locked:
+            raise RuntimeError("synthetic Keychain access denied")
+        return load_key(path)
+
+    monkeypatch.setattr(secret_store, "load_database_key", denied)
+    monkeypatch.setattr(entry, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
+    monkeypatch.setattr(entry, "_show_recovery_code", lambda *args: None)
+    app = QApplication.instance() or QApplication([])
+    warnings = []
+    monkeypatch.setattr(entry.QMessageBox, "warning",
+                        lambda _parent, title, message: warnings.append((title, message)))
+    observed = []
+
+    def inspect():
+        try:
+            chooser = next(widget for widget in app.topLevelWidgets()
+                           if isinstance(widget, DatabaseSelectionWindow) and widget.isVisible())
+            button = next(button for button in chooser.findChildren(QPushButton)
+                          if button.text() == "Create new portfolio")
+            button.click()
+            observed.extend(widget.db.path for widget in app.topLevelWidgets()
+                            if isinstance(widget, MainWindow) and widget.isVisible())
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    widget.close()
+        finally:
+            app.quit()
+
+    QTimer.singleShot(0, inspect)
+    assert entry.main([]) == 0
+    assert len(observed) == 1 and observed[0] != locked
+    assert warnings and warnings[0][0] == "Open portfolio"
+    assert locked.read_bytes() == original
 
 
 def test_saved_portfolio_files_remain_selectable(tmp_path, monkeypatch):
