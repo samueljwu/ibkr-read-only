@@ -80,6 +80,53 @@ def test_app_opens_database_selection_when_saved_database_is_missing(tmp_path, m
     assert json.loads(config.read_text())["data_directory"] == str(missing.parent)
 
 
+def test_cancelling_recovery_prompt_can_create_new_portfolio(tmp_path, monkeypatch,
+                                                            synthetic_database_keys):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QPushButton
+    import main as entry
+
+    from app.views.database_selection import DatabaseSelectionWindow
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    _isolate_app_data(monkeypatch, tmp_path)
+    locked = tmp_path / "locked" / "portfolio.sqlite3"
+    db = Database(locked)
+    db.conn.close()
+    Database.select_database(locked)
+    original = locked.read_bytes()
+    synthetic_database_keys.clear()
+    monkeypatch.setattr(entry, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
+    monkeypatch.setattr(entry.QInputDialog, "getText", lambda *args: ("", False))
+    monkeypatch.setattr(entry, "_show_recovery_code", lambda *args: None)
+    app = QApplication.instance() or QApplication([])
+    observed = []
+
+    def inspect():
+        try:
+            chooser = next(widget for widget in app.topLevelWidgets()
+                           if isinstance(widget, DatabaseSelectionWindow) and widget.isVisible())
+            assert "create a new portfolio" in chooser.explanation.text()
+            button = next(button for button in chooser.findChildren(QPushButton)
+                          if button.text() == "Create new portfolio")
+            button.click()
+            observed.extend(widget.db.path for widget in app.topLevelWidgets()
+                            if isinstance(widget, MainWindow) and widget.isVisible())
+            for widget in app.topLevelWidgets():
+                if isinstance(widget, MainWindow):
+                    widget.close()
+        finally:
+            app.quit()
+
+    QTimer.singleShot(0, inspect)
+    assert entry.main([]) == 0
+    assert len(observed) == 1
+    assert observed[0] != locked
+    assert observed[0].is_file()
+    assert locked.read_bytes() == original
+    assert Database.saved_databases() == [observed[0], locked]
+
+
 def test_saved_portfolio_files_remain_selectable(tmp_path, monkeypatch):
     _isolate_app_data(monkeypatch, tmp_path)
     first = tmp_path / "first" / "portfolio.sqlite3"

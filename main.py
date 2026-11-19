@@ -197,13 +197,14 @@ def main(argv=None):
         show_chooser()
     else:
         if window is None:
-            return 1
-        if database_path is not None:
-            Database.select_database(window.db.path)
-        register(window)
-        if window.db.recovery_code:
-            _show_recovery_code(window, window.db.recovery_code)
-            window.db.recovery_code = None
+            show_chooser()
+        else:
+            if database_path is not None:
+                Database.select_database(window.db.path)
+            register(window)
+            if window.db.recovery_code:
+                _show_recovery_code(window, window.db.recovery_code)
+                window.db.recovery_code = None
     result = app.exec()
     pending_update = getattr(app, "pending_update", None)
     if pending_update is not None:
