@@ -64,9 +64,7 @@ class DatabaseSelectionWindow(QDialog):
         self._current = Path(current).resolve() if current is not None else None
         self.heading.setText("Portfolios" if current else "No database selected")
         self.explanation.setText(
-            "Open a saved portfolio, choose another database, or create a new portfolio."
-            if current else "The previously selected database is unavailable. "
-                            "Open another portfolio or create a new one.")
+            "Open a saved portfolio, choose another database, or create a new portfolio.")
         first_available = None
         for path in paths:
             path = Path(path)
