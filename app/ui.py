@@ -302,6 +302,10 @@ class GridModel(QAbstractTableModel):
                         "Position traded % places untimed trades before timed trades for the day.")
             if key == "commission_usd" and not row.get("commission_complete", True):
                 return "Fee or rebate has not arrived from IBKR; P&L excludes it for now."
+            if self.name == "Portfolio" and key == "last_px":
+                source = str(row.get("price_source") or "")
+                if source == "PRIOR CLOSE" or "· PRIOR CLOSE ·" in source:
+                    return "Previous trading day's close used as a reference price, not a last trade."
             if self.name == "Portfolio" and row.get("estimated_baseline") and key in (
                     "average_cost", "total_cost_usd", "unrealized_pnl", "unrealized_pct", "data_status"):
                 return (f"Estimated from the Activity Statement closing market price on "
@@ -3612,7 +3616,7 @@ class MainWindow(QMainWindow):
             if valid_price(saved["price"]) is not None:
                 self.market.quotes[position_id] = {
                     "ticks": {}, "cached_price": saved["price"],
-                    "cached_as_of": saved["as_of"], "mode": "Cached",
+                    "cached_source": saved["source"], "cached_as_of": saved["as_of"], "mode": "Cached",
                     "status": "CACHED QUOTE"}
 
     def refresh_market(self, *, force=False):
@@ -3787,7 +3791,8 @@ class MainWindow(QMainWindow):
                         price, source = choose_price(quote.get("ticks", {}), quote.get("mode", "Live"))
                         as_of = quote.get("updated")
                     else:
-                        price, source = quote.get("cached_price"), "CACHED QUOTE"
+                        price = quote.get("cached_price")
+                        source = quote.get("cached_source", "CACHED QUOTE")
                         as_of = quote.get("cached_as_of")
                     if position_id in positions and valid_price(price) is not None and as_of:
                         saved.append((position_id, positions[position_id]["con_id"], price,

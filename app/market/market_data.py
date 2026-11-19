@@ -126,9 +126,10 @@ class MarketDataProvider:
                 self.connected = event[1]
                 if not self.connected:
                     for position_id, record in self.quotes.items():
-                        price, _ = choose_price(record.get("ticks", {}), record.get("mode", "Live"))
+                        price, source = choose_price(record.get("ticks", {}), record.get("mode", "Live"))
                         if price is not None:
                             record["cached_price"] = price
+                            record["cached_source"] = source
                             record["cached_as_of"] = record.get("updated", "")
                         record["ticks"] = {}
                         record["tick_updated"] = {}

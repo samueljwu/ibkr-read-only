@@ -55,6 +55,45 @@ def test_option_in_mock_mode_never_uses_underlying_stock_quote(tmp_path):
         db.conn.close()
 
 
+def test_option_price_source_labels_prior_close_and_unknown_cached_quote(tmp_path):
+    db = Database(tmp_path / "option-close.sqlite3")
+    try:
+        position_id = db.add_position({"display_ticker": "SYN 270115 P420", "ib_symbol": "SYN",
+                                       "security_type": "OPT", "option_right": "P",
+                                       "multiplier": 100})
+        db.add_trade({"position_id": position_id, "trade_date": "2026-01-02", "side": "SELL",
+                      "quantity": 1, "price": 10, "security_type": "OPT", "multiplier": 100})
+        market = MockMarketDataProvider()
+        market.quotes[position_id] = {"ticks": {"close": 9.45}, "mode": "Live",
+                                      "status": "OK", "cached_price": 9.45,
+                                      "cached_source": "CACHED QUOTE",
+                                      "cached_as_of": "2026-01-03T10:00:00"}
+        service = PortfolioService(db, market)
+        row = service.portfolio_rows()[0]
+        assert row["last_px"] == 9.45
+        assert row["value"] == pytest.approx(-945)
+        assert row["daily_pnl"] is None
+        assert row["price_source"] == "PRIOR CLOSE"
+
+        del market.quotes[position_id]["ticks"]["close"]
+        row = service.portfolio_rows()[0]
+        assert row["last_px"] == 9.45
+        assert "SOURCE UNKNOWN" in row["price_source"]
+        assert row["daily_pnl"] is None
+
+        market.quotes[position_id]["cached_source"] = "LIVE LAST"
+        row = service.portfolio_rows()[0]
+        assert row["last_px"] == 9.45
+        assert "LIVE LAST" in row["price_source"]
+
+        market.quotes[position_id]["ticks"]["last"] = 8.8
+        row = service.portfolio_rows()[0]
+        assert row["last_px"] == 8.8
+        assert row["price_source"] == "LIVE LAST"
+    finally:
+        db.conn.close()
+
+
 def test_option_like_ticker_is_not_silently_treated_as_stock(tmp_path):
     db = Database(tmp_path / "safety.sqlite3")
     try:

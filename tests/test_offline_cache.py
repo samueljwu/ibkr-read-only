@@ -153,11 +153,56 @@ def test_live_tick_is_saved_and_disconnection_uses_cached_price(tmp_path, monkey
         assert window._last_db_data_version != window.db.conn.execute(
             "PRAGMA data_version").fetchone()[0]
 
+        window._last_quote_cache_at = 0
         provider.events.put(("connected", False))
         window._poll()
         row = window.models["Portfolio"].rows[0]
         assert row["last_px"] == 42.5
-        assert row["price_source"].startswith("CACHED QUOTE")
+        assert "CACHED QUOTE · LIVE LAST" in row["price_source"]
+        assert window.db.cached_quotes(1, "ACCOUNT-A")[position_id]["source"] == "LIVE LAST"
+    finally:
+        window.close()
+
+
+def test_option_disconnect_preserves_quote_origin():
+    provider = MarketDataProvider()
+    provider.events.put(("quote", [1], "close", 9.45, "Live"))
+    provider.drain()
+    provider.events.put(("connected", False))
+    provider.drain()
+    assert provider.quote(1)["cached_price"] == 9.45
+    assert provider.quote(1)["cached_source"] == "CLOSE"
+
+    provider.events.put(("quote", [1], "last", 8.8, "Live"))
+    provider.drain()
+    provider.events.put(("connected", False))
+    provider.drain()
+    assert provider.quote(1)["cached_price"] == 8.8
+    assert provider.quote(1)["cached_source"] == "LIVE LAST"
+
+
+def test_installed_style_option_cache_labels_unknown_price_source(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    path = tmp_path / "option-cache.sqlite3"
+    seed = Database(path)
+    position = seed.add_position({"display_ticker": "SYN 270115 P420", "ib_symbol": "SYN",
+                                  "security_type": "OPT", "option_right": "P", "multiplier": 100})
+    seed.set_setting("ib_account_id", "ACCOUNT-A")
+    seed.save_quotes(1, "ACCOUNT-A", [(position, None, 9.45, "CACHED QUOTE",
+                                       "2026-01-03T10:00:00")])
+    seed.conn.close()
+    monkeypatch.setattr(ui, "Database", lambda: Database(path))
+    window = ui.MainWindow()
+    try:
+        window._load_cached_quotes()
+        assert window.market.quote(position)["cached_price"] == 9.45
+        row = next(row for row in window.service.portfolio_rows() if row["id"] == position)
+        assert "SOURCE UNKNOWN" in row["price_source"]
+        window.db.save_quotes(1, "ACCOUNT-A", [(position, None, 8.8, "LIVE LAST",
+                                                "2026-01-03T10:01:00")])
+        window._load_cached_quotes()
+        assert window.market.quote(position)["cached_price"] == 8.8
+        assert window.market.quote(position)["cached_source"] == "LIVE LAST"
     finally:
         window.close()
 

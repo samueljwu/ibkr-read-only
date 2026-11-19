@@ -716,7 +716,12 @@ class PortfolioService:
             price, source = choose_price(quote.get("ticks", {}), quote.get("mode", "Live"))
             if price is None and valid_price(quote.get("cached_price")) is not None:
                 price = float(quote["cached_price"])
-                source = f"CACHED QUOTE {quote['cached_as_of']}"
+                cached_origin = quote.get("cached_source") or "SOURCE UNKNOWN"
+                if cached_origin == "CLOSE":
+                    cached_origin = "PRIOR CLOSE"
+                elif cached_origin == "CACHED QUOTE":
+                    cached_origin = "SOURCE UNKNOWN"
+                source = f"CACHED QUOTE · {cached_origin} · {quote['cached_as_of']}"
             suspect_option = (position["security_type"] == "STK" and
                               looks_like_option_ticker(position["display_ticker"]))
             if suspect_option:
@@ -795,7 +800,8 @@ class PortfolioService:
             row.update(window_returns(None if stale_tick or source.startswith("CACHED QUOTE") else price,
                                       prepared[0], prepared[1]))
             row["last_px"] = price
-            row["price_source"] = "MOCK" if quote.get("mode") == "Mock" and price else source
+            row["price_source"] = ("MOCK" if quote.get("mode") == "Mock" and price else
+                                   "PRIOR CLOSE" if source == "CLOSE" else source)
             row["last_updated"] = quote.get("cached_as_of", "") if source.startswith("CACHED QUOTE") else quote.get("updated", "")
             cached_status = "CACHED QUOTE"
             broker_status = str(quote.get("status") or "")

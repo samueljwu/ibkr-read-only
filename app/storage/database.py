@@ -221,6 +221,11 @@ class Database:
           portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
           name TEXT NOT NULL, PRIMARY KEY(portfolio_id,name)
         );
+        CREATE TABLE IF NOT EXISTS exposure_factors (
+          portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+          con_id INTEGER NOT NULL, factor REAL NOT NULL CHECK(factor != 0),
+          PRIMARY KEY(portfolio_id,con_id)
+        );
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS broker_positions (
