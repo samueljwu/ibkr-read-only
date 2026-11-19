@@ -4,10 +4,11 @@ from PySide6.QtCharts import QChart, QChartView, QPieSeries
 from PySide6.QtCore import QByteArray, QMargins, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QBoxLayout,
-                               QComboBox, QHBoxLayout, QHeaderView, QInputDialog,
-                               QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                               QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
-from app.finance.exposure import CASH_CATEGORY, add_custom_set, custom_sets, exposure_mix, exposure_snapshot
+from app.finance.exposure import (CASH_CATEGORY, add_custom_set, custom_sets, exposure_mix,
+                                  exposure_snapshot, set_exposure_factor)
 from app.views import widgets
 from app.views.exposure_custom_ui import CustomSetDialog
 from app.views.metric_summary import MetricInfoButton, MetricSummary, MetricValue
@@ -18,6 +19,48 @@ from app.views.ui_theme import COLORS, style_toolbar_dropdown
 
 def _percent(value, nav):
     return percent(value / nav * 100) if value is not None and nav else "—"
+
+
+class ExposureFactorDialog(QDialog):
+    def __init__(self, panel, row, under_id):
+        super().__init__(panel)
+        self.panel = panel
+        self.under_id = under_id
+        self.setWindowTitle("Exposure factor")
+        self.setMinimumWidth(360)
+        layout = QVBoxLayout(self)
+        widgets.apply_layout(layout, "dialog")
+        layout.addWidget(QLabel(f"{row['symbol']} underlying exposure factor"))
+        self.factor_combo = style_toolbar_dropdown(QComboBox())
+        self.factor_combo.setEditable(True)
+        self.factor_combo.addItems(("-1", "-2", "-3", "1", "2", "3"))
+        self.factor_combo.setCurrentText(f"{row['exposure_factor']:g}")
+        self.factor_combo.setMinimumWidth(260)
+        self.factor_combo.setAccessibleName("Underlying exposure factor")
+        layout.addWidget(self.factor_combo)
+        layout.addWidget(widgets.hint("Choose a signed factor; use 1 to reset."))
+        self.error = widgets.hint("")
+        self.error.hide()
+        layout.addWidget(self.error)
+        buttons = widgets.dialog_buttons(
+            self, QDialogButtonBox.Ok | QDialogButtonBox.Cancel, primary=self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        try:
+            factor = float(self.factor_combo.currentText().strip())
+        except ValueError:
+            self.error.setText("Enter a nonzero exposure factor between -10 and 10")
+            self.error.show()
+            return
+        try:
+            set_exposure_factor(self.panel.db, self.panel.portfolio_id, self.under_id, factor)
+        except ValueError as error:
+            self.error.setText(str(error))
+            self.error.show()
+        else:
+            self.accept()
 
 
 class ExposurePanel(QWidget):
@@ -115,6 +158,12 @@ class ExposurePanel(QWidget):
         self.clear_filter_button.setObjectName("secondary")
         self.clear_filter_button.clicked.connect(lambda: self._select_category(None))
         positions_header.addWidget(self.clear_filter_button)
+        self.factor_button = widgets.button("Exposure factor…", self._set_factor)
+        self.factor_button.setToolTip(
+            "Set the signed exposure factor for a stock or ETF and its options. "
+            "Use -1 for an inverse fund, -2 for a 2× inverse fund, or 1 to reset.")
+        self.factor_button.setEnabled(False)
+        positions_header.addWidget(self.factor_button)
         positions_header.addStretch()
         positions_layout.addLayout(positions_header)
         self.positions = ReportTable(0, 8)
@@ -135,6 +184,7 @@ class ExposurePanel(QWidget):
         self.positions.sortItems(4, Qt.DescendingOrder)
         self.positions.setColumnHidden(1, True)
         self.positions.setColumnHidden(2, True)
+        self.positions.itemSelectionChanged.connect(self._factor_selection_changed)
         positions_layout.addWidget(self.positions, 1)
         self.positions.fit_header_widths()
         self.splitter = widgets.pane_splitter(
@@ -206,6 +256,25 @@ class ExposurePanel(QWidget):
         self.category_filter = self.groups.item(selected[0].row(), 0).data(Qt.UserRole) if selected else None
         self.positions.clearSelection()
         self.render()
+
+    def _factor_selection_changed(self):
+        selected = self.positions.selectedItems()
+        item = self.positions.item(selected[0].row(), 0) if selected else None
+        self.factor_button.setEnabled(bool(item and item.data(Qt.UserRole) and
+                                           item.data(Qt.UserRole + 1) in {"STK", "OPT"}))
+
+    def _set_factor(self):
+        selected = self.positions.selectedItems()
+        if not selected:
+            return
+        item = self.positions.item(selected[0].row(), 0)
+        under_id = item.data(Qt.UserRole)
+        row = next((row for row in self.snapshot["positions"]
+                    if row["under_con_id"] == under_id), None)
+        if not row or row["type"] not in {"STK", "OPT"}:
+            return
+        if ExposureFactorDialog(self, row, under_id).exec() == QDialog.Accepted:
+            self.refresh()
 
     def set_theme(self, theme):
         self.palette_name = theme
@@ -293,13 +362,13 @@ class ExposurePanel(QWidget):
         market = self.snapshot["totals"]["value"]
         adjusted = self.snapshot["totals"]["adjusted"]
         for metric, value, basis in ((self.market_metric, market, "Market net"),
-                                     (self.adjusted_metric, adjusted, "Delta-adjusted net")):
+                                     (self.adjusted_metric, adjusted, "Adjusted net")):
             metric.value.setText(_percent(value, nav))
             metric.info.set_detail(
                 f"{basis}: {_money(value)} USD\nAccount NAV: {_money(nav)} USD\n"
                 "Signed net exposure divided by account NAV.")
         as_of = self.snapshot["as_of"]
-        self.status.setText(f"Latest snapshot{' · ' + as_of if as_of else ''} · USD · options use IBKR delta")
+        self.status.setText(f"Latest snapshot{' · ' + as_of if as_of else ''} · USD · options use IBKR delta · signed factors apply to adjusted exposure")
         self.render()
 
     def render(self, *_):
@@ -308,7 +377,7 @@ class ExposurePanel(QWidget):
         group = self.group_combo.currentText()
         field = "custom" if group == "Custom" else "sector"
         value_field = "adjusted" if self.basis_combo.currentText() == "Adjusted" else "value"
-        self.mix_heading.setText(f"{'Delta-adjusted' if value_field == 'adjusted' else 'Market value'} mix")
+        self.mix_heading.setText(f"{'Adjusted' if value_field == 'adjusted' else 'Market value'} mix")
         self._render_mix(field, value_field)
         self._render_positions()
 
@@ -425,6 +494,7 @@ class ExposurePanel(QWidget):
         for index, row in enumerate(rows):
             detail = (f"Market: {_money(row['value'])} · Adjusted: {_money(row['adjusted'])}\n"
                       f"Account NAV: {_money(nav)} · both percentages use account NAV\n"
+                      f"Underlying exposure factor: {row['exposure_factor']:g}×\n"
                       f"Price source: {row['price_source']}\n"
                       f"IBKR delta: {row['delta']} · {row['delta_mode'] or 'unavailable'} "
                       f"({row['delta_as_of'] or 'unavailable'})\n"
@@ -441,6 +511,7 @@ class ExposurePanel(QWidget):
                      self.positions.numeric_item(7, row["adjusted"] / nav * 100
                                                  if row["adjusted"] is not None and nav else None))
             cells[0].setData(Qt.UserRole, row["under_con_id"])
+            cells[0].setData(Qt.UserRole + 1, row["type"])
             for column, item in enumerate(cells):
                 item.setToolTip(detail)
                 self.positions.setItem(index, column, item)

@@ -115,11 +115,28 @@ def set_custom_label(db, portfolio_id, set_name, con_id, label):
                             (portfolio_id, set_name, con_id))
 
 
+def set_exposure_factor(db, portfolio_id, con_id, factor):
+    """Set the signed market sensitivity of a stock or fund underlying."""
+    factor = _valid(factor)
+    if not isinstance(con_id, int) or con_id <= 0 or factor is None or factor == 0 or abs(factor) > 10:
+        raise ValueError("Choose a nonzero exposure factor between -10 and 10")
+    with db.conn:
+        if factor == 1:
+            db.conn.execute("DELETE FROM exposure_factors WHERE portfolio_id=? AND con_id=?",
+                            (portfolio_id, con_id))
+        else:
+            db.conn.execute("""INSERT INTO exposure_factors(portfolio_id,con_id,factor) VALUES (?,?,?)
+                ON CONFLICT(portfolio_id,con_id) DO UPDATE SET factor=excluded.factor""",
+                (portfolio_id, con_id, factor))
+
+
 def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_rows=None):
     facts = {row["con_id"]: dict(row) for row in db.conn.execute(
         "SELECT * FROM exposure_facts WHERE portfolio_id=?", (portfolio_id,))}
     labels = {(row["set_name"], row["con_id"]): row["label"] for row in db.conn.execute(
         "SELECT * FROM exposure_custom WHERE portfolio_id=?", (portfolio_id,))}
+    factors = {row["con_id"]: row["factor"] for row in db.conn.execute(
+        "SELECT con_id,factor FROM exposure_factors WHERE portfolio_id=?", (portfolio_id,))}
     nav = db.effective_nav(portfolio_id)
     positions = []
     issues = []
@@ -140,6 +157,7 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
         equivalent_shares = None
         issue = "" if value is not None else "Market value unavailable"
         under_id = fact.get("under_con_id") if security_type == "OPT" else con_id
+        exposure_factor = factors.get(under_id, 1.0)
         under_fact = facts.get(under_id, {}) if under_id else {}
         underlying_price = fact.get("underlying_price")
         underlying_as_of = fact.get("underlying_as_of", "")
@@ -176,6 +194,8 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
         elif security_type in {"FUT", "FOP", "CFD", "IOPT", "WAR", "BAG"}:
             adjusted = None
             issue = "Adjusted exposure unsupported for this derivative"
+        if adjusted is not None and security_type in {"STK", "OPT"}:
+            adjusted *= exposure_factor
         if row.get("reconciliation") == "DIFFERENCE":
             adjusted = None
             issue = "Broker position mismatch"
@@ -192,6 +212,7 @@ def exposure_snapshot(db, service, portfolio_id, *, custom_set="", portfolio_row
                           "under_symbol": fact.get("under_symbol", ""),
                           "symbol": row.get("display_ticker", ""), "type": security_type,
                           "quantity": qty, "value": value, "adjusted": adjusted,
+                          "exposure_factor": exposure_factor,
                           "equivalent_shares": equivalent_shares, "delta": fact.get("delta"),
                           "delta_mode": fact.get("delta_mode", ""),
                           "delta_as_of": fact.get("delta_as_of", ""),

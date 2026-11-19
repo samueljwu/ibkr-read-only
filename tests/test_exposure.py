@@ -6,7 +6,7 @@ import pytest
 from app.storage.database import Database
 from app.finance.exposure import (CASH_CATEGORY, add_custom_set, custom_labels, delete_custom_set,
                           exposure_mix, exposure_snapshot, grouped_exposure, rename_custom_set,
-                          save_broker_fact, set_custom_label)
+                          save_broker_fact, set_custom_label, set_exposure_factor)
 
 
 def _row(con_id, symbol, kind, qty, value, multiplier=1):
@@ -56,6 +56,40 @@ def test_cash_is_included_in_exposure_mix(tmp_path):
     snapshot = exposure_snapshot(db, service, 1)
     assert snapshot["cash"] == 250
     assert exposure_mix(snapshot["positions"], "sector", "value", snapshot["cash"])["gross"] == 750
+
+
+def test_inverse_fund_factor_applies_to_adjusted_exposure_and_options(tmp_path):
+    db = Database(tmp_path / "inverse.sqlite3")
+    db.set_portfolio_nav(1, 1000)
+    rows = [_row(301, "INV", "STK", 10, 100),
+            _row(302, "SHORT INV", "STK", -2, -20),
+            _row(401, "INV CALL", "OPT", 1, 5, 100)]
+    save_broker_fact(db, 1, ("exposure_detail", 401, {"under_con_id": 301}))
+    save_broker_fact(db, 1, ("exposure_delta", 401, .5, "Live"))
+    save_broker_fact(db, 1, ("exposure_underlying_price", 401, 10, "USD", "Live"))
+    set_exposure_factor(db, 1, 301, -2)
+    set_exposure_factor(db, 1, 302, -1)
+    snapshot = exposure_snapshot(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
+    assert [position["value"] for position in snapshot["positions"]] == [100, -20, 5]
+    assert [position["adjusted"] for position in snapshot["positions"]] == [-200, 20, -1000]
+    assert snapshot["totals"]["value"] == 85
+    assert snapshot["totals"]["adjusted"] == -1180
+    assert snapshot["totals"]["adjusted_gross"] == 1220
+    assert snapshot["cash"] == 915
+    assert exposure_mix(snapshot["positions"], "sector", "adjusted")["gross"] == 1220
+
+    db.conn.close()
+    reopened = Database(tmp_path / "inverse.sqlite3")
+    try:
+        assert exposure_snapshot(reopened, SimpleNamespace(portfolio_rows=lambda: rows), 1)[
+            "totals"]["adjusted"] == -1180
+        set_exposure_factor(reopened, 1, 301, 1)
+        assert exposure_snapshot(reopened, SimpleNamespace(portfolio_rows=lambda: rows), 1)[
+            "totals"]["adjusted"] == 620
+        with pytest.raises(ValueError):
+            set_exposure_factor(reopened, 1, 301, 0)
+    finally:
+        reopened.conn.close()
 
 
 def test_missing_delta_keeps_adjusted_total_unavailable(tmp_path):
@@ -327,6 +361,47 @@ def test_exposure_positions_show_market_and_adjusted_value_over_account_nav(tmp_
         panel.close()
 
 
+
+
+def test_exposure_panel_sets_inverse_factor_for_selected_fund(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from app.views.exposure_ui import ExposureFactorDialog, ExposurePanel
+
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "inverse-panel.sqlite3")
+    db.set_portfolio_nav(1, 1000)
+    rows = [_row(301, "INV", "STK", 10, 100)]
+    panel = ExposurePanel(db, SimpleNamespace(portfolio_rows=lambda: rows), 1)
+    try:
+        panel.refresh()
+        assert not panel.factor_button.isEnabled()
+        panel.positions.selectRow(0)
+        assert panel.factor_button.isEnabled()
+
+        def choose_factor(dialog):
+            dialog.show()
+            QApplication.processEvents()
+            assert dialog.factor_combo.objectName() == "toolbarDropdown"
+            assert dialog.factor_combo.width() >= 260
+            assert [dialog.factor_combo.itemText(index) for index in range(6)] == [
+                "-1", "-2", "-3", "1", "2", "3"]
+            dialog.factor_combo.setCurrentText("invalid")
+            dialog._save()
+            assert dialog.error.isVisible()
+            assert dialog.result() != QDialog.Accepted
+            dialog.factor_combo.setCurrentText("-2")
+            dialog._save()
+            return dialog.result()
+
+        monkeypatch.setattr(ExposureFactorDialog, "exec", choose_factor)
+        panel.factor_button.click()
+        assert panel.snapshot["positions"][0]["adjusted"] == -200
+        assert panel.snapshot["positions"][0]["value"] == 100
+        assert "-2×" in panel.positions.item(0, 0).toolTip()
+    finally:
+        panel.close()
+        db.conn.close()
 
 
 def test_custom_set_selection_saved_and_legacy_view_restored(tmp_path):
