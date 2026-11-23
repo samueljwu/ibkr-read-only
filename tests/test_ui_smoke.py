@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QDate, QItemSelectionModel, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QPainter, QPalette, QWheelEvent
+from PySide6.QtGui import QFontInfo
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QStyle, QStyleOptionViewItem, QTableWidget, QToolButton, QVBoxLayout, QWidget
 
@@ -212,12 +213,12 @@ def test_zoom_menu_shortcuts_and_saved_level(tmp_path, monkeypatch):
         app.processEvents()
         table = window.views["Portfolio"]
         base_row_height = table.verticalHeader().defaultSectionSize()
-        base_font_size = window.font().pointSizeF()
+        base_font_size = QFontInfo(window.font()).pixelSize()
         table.setFocus()
         QTest.keyClick(table, Qt.Key_Equal, Qt.ControlModifier)
         assert window.zoom_percent == 110
         assert table.verticalHeader().defaultSectionSize() > base_row_height
-        assert window.font().pointSizeF() > base_font_size
+        assert QFontInfo(window.font()).pixelSize() > base_font_size
         QTest.keyClick(table, Qt.Key_Minus, Qt.ControlModifier)
         assert window.zoom_percent == 100
         window.zoom_in_action.trigger()
