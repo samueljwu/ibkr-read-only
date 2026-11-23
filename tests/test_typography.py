@@ -9,15 +9,35 @@ from PySide6.QtGui import QFont, QFontInfo
 from PySide6.QtWidgets import QApplication, QWidget
 
 from app.ui import MainWindow
+from app.views import typography
 from app.views.database_selection import DatabaseSelectionWindow
 from app.views.table_ui import TABLE_ROW_HEIGHT
 from app.views.typography import FONT_FAMILY, FONT_SIZES_PX, install_app_font
-from app.views.ui_theme import PAGE_MARGINS
+from app.views.ui_theme import PAGE_MARGINS, stylesheet
 
 
 def _margins(layout):
     value = layout.contentsMargins()
     return value.left(), value.top(), value.right(), value.bottom()
+
+
+def test_body_font_units_are_platform_specific(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    previous_font = QFont(app.font())
+    try:
+        monkeypatch.setattr(typography, "IS_MACOS", True)
+        install_app_font(app)
+        assert app.font().pixelSize() == FONT_SIZES_PX["body_size"]
+        assert "QWidget { font-size: 14px; }" in stylesheet("light")
+        assert "QWidget { font-size: 21px; }" in stylesheet("light", 150)
+
+        monkeypatch.setattr(typography, "IS_MACOS", False)
+        install_app_font(app)
+        assert app.font().pointSizeF() == typography.BODY_POINT_SIZE
+        assert "QWidget { font-size: 10.5pt; }" in stylesheet("light")
+        assert "QWidget { font-size: 15.75pt; }" in stylesheet("light", 150)
+    finally:
+        app.setFont(previous_font)
 
 
 def test_inter_and_text_spacing_across_windows_and_zoom(tmp_path):

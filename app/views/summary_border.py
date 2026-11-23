@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
-from app.views.typography import BODY_POINT_SIZE, FONT_SIZES_PX
+from app.views.typography import FONT_SIZES_PX
 from app.views.ui_theme import COLORS, SUMMARY_BORDER_GRADIENTS
 
 
@@ -101,8 +101,11 @@ class SummaryBorder(QWidget):
                              QPointF(frame.right() - 17, frame.top() + 25))
             painter.setPen(QColor(COLORS[self.theme]["text"]))
             font = self.font()
-            font.setPointSizeF(font.pointSizeF() * FONT_SIZES_PX["caption_size"] /
-                               FONT_SIZES_PX["body_size"])
+            size_ratio = FONT_SIZES_PX["caption_size"] / FONT_SIZES_PX["body_size"]
+            if font.pointSizeF() > 0:
+                font.setPointSizeF(font.pointSizeF() * size_ratio)
+            else:
+                font.setPixelSize(round(font.pixelSize() * size_ratio))
             font.setWeight(QFont.DemiBold)
             painter.setFont(font)
             painter.drawText(QRectF(frame.left() + 18, frame.top() + 8, 180, 15),

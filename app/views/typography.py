@@ -1,6 +1,7 @@
 """Shared application font for every Qt window and dialog."""
 
 from pathlib import Path
+import sys
 
 from PySide6.QtGui import QFont, QFontDatabase
 
@@ -16,7 +17,14 @@ FONT_SIZES_PX = {
     "metric_size": 19,
 }
 BODY_POINT_SIZE = FONT_SIZES_PX["body_size"] * 0.75
+IS_MACOS = sys.platform == "darwin"
 FONT_FILES = ("Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf")
+
+
+def body_font_size(zoom_percent=100):
+    """Match the pixel-sized UI roles on macOS; retain Windows point sizing."""
+    return (f'{FONT_SIZES_PX["body_size"]}px' if IS_MACOS
+            else f"{BODY_POINT_SIZE * zoom_percent / 100:g}pt")
 
 
 def install_app_font(app):
@@ -29,5 +37,8 @@ def install_app_font(app):
                 raise RuntimeError(f"Could not load bundled font: {filename}")
         app.setProperty("inter_font_registered", True)
     font = QFont(FONT_FAMILY)
-    font.setPointSizeF(BODY_POINT_SIZE)
+    if IS_MACOS:
+        font.setPixelSize(FONT_SIZES_PX["body_size"])
+    else:
+        font.setPointSizeF(BODY_POINT_SIZE)
     app.setFont(font)

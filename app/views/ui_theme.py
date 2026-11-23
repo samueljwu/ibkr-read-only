@@ -5,7 +5,7 @@ import re
 
 from PySide6.QtWidgets import QComboBox, QPushButton, QStyledItemDelegate
 
-from app.views.typography import BODY_POINT_SIZE, FONT_SIZES_PX
+from app.views.typography import FONT_SIZES_PX, body_font_size
 
 
 COLORS = {
@@ -130,7 +130,7 @@ def apply_widget_theme(widget, theme, zoom_percent=100):
 
 
 STYLESHEET = Template("""
-QWidget { font-size: ${body_point_size}pt; }
+QWidget { font-size: ${body_font_size}; }
 QMainWindow, QWidget#central, QWidget#settingsPage, QWidget#helpPage, QWidget#calcsPage,
 QWidget#analyticsContent, QWidget#analyticsPage, QWidget#analyticsSection,
 QScrollArea#analyticsScroller, QDialog, QScrollArea, QTabWidget::pane {
@@ -514,9 +514,8 @@ QToolTip { background: ${surface}; color: ${text}; border: 1px solid ${line}; }
 
 
 def stylesheet(theme, zoom_percent=100):
-    point_size = BODY_POINT_SIZE * zoom_percent / 100
     style = STYLESHEET.substitute(COLORS[theme] | FONT_SIZES_PX |
-                                 {"body_point_size": f"{point_size:g}"})
+                                 {"body_font_size": body_font_size(zoom_percent)})
     if zoom_percent == 100:
         return style
     return re.sub(r"(font-size:\s*)(\d+)px",
