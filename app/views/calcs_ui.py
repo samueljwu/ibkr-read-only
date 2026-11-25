@@ -249,6 +249,13 @@ class CalcsTab(QWidget):
         self.totals = QLabel()
         self.totals.setWordWrap(True)
         layout.addWidget(self.totals)
+        self.scenario_totals = QLabel()
+        self.scenario_totals.setWordWrap(True)
+        self.scenario_totals.setToolTip(
+            "Estimated USD gains and losses from current prices and position sizes. Each total "
+            "includes holdings with a USD market value and a valid case for that side. "
+            "For shorts, falling prices produce gains and rising prices produce losses.")
+        layout.addWidget(self.scenario_totals)
         self.refresh()
         self._apply_view_mode()
         header.sortIndicatorChanged.connect(self._keep_idea_visible_after_sort)
@@ -1214,6 +1221,7 @@ class CalcsTab(QWidget):
                 self.table.setRowCount(len(rows))
                 work = list(enumerate(rows))
             weighted_ratios = []
+            scenario_notionals = {"upside": None, "downside": None}
             for index, row in work:
                 result = calculated.get(row["id"])
                 weight = row["value"] / nav if row.get("value") is not None and nav and nav > 0 else None
@@ -1263,6 +1271,14 @@ class CalcsTab(QWidget):
                 ratio = metrics["risk_reward"]
                 if result is not None:
                     weighted_ratios.append((result["target_weight"], ratio))
+                current_value = row.get("value")
+                if current_value:
+                    gain, loss = metrics["upside_pct"], metrics["downside_pct"]
+                    if current_value < 0:
+                        gain, loss = loss, gain
+                    for side, change in (("upside", gain), ("downside", loss)):
+                        if change is not None and math.isfinite(notional := abs(current_value) * change):
+                            scenario_notionals[side] = (scenario_notionals[side] or 0.0) + notional
                 reason = metrics["upside_reason"] or metrics["downside_reason"]
                 self._cell(index, 14, self._number(ratio, 14),
                            tip=reason or "Upside gain % divided by downside loss %",
@@ -1330,6 +1346,10 @@ class CalcsTab(QWidget):
             portfolio_ratio = weighted_risk_reward(weighted_ratios)
             self.portfolio_risk_reward.setText(
                 f"{portfolio_ratio:,.2f}" if portfolio_ratio is not None else "—")
+            upside, downside = scenario_notionals["upside"], scenario_notionals["downside"]
+            upside_text = f"+${upside:,.2f}" if upside is not None else "—"
+            downside_text = f"−${downside:,.2f}" if downside is not None else "—"
+            self.scenario_totals.setText(f"Notional upside {upside_text}  ·  Notional downside {downside_text}")
             if calc["error"]:
                 self.status.setText(self._target_error or calc["error"])
                 self.totals.setText("Buy / sell estimates unavailable until the inputs reconcile.")

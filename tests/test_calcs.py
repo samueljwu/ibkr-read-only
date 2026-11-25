@@ -210,6 +210,44 @@ def test_portfolio_risk_reward_uses_target_weights_and_skips_missing_cases(tmp_p
         db.conn.close()
 
 
+def test_notional_scenario_totals_use_current_holdings(tmp_path):
+    QApplication.instance() or QApplication([])
+    db = Database(tmp_path / "scenario_notionals.sqlite3")
+    db.set_portfolio_nav(1, 100000)
+    service = Service([holding(1, 60000, 600), holding(2, 30000, 300)])
+    tab = CalcsTab(db, service, 1)
+    try:
+        assert tab.scenario_totals.text() == "Notional upside —  ·  Notional downside —"
+
+        tab.scenarios["1"] = {"up_mode": "price", "up_value": 125}
+        tab.scenarios["2"] = {"up_mode": "percent", "up_value": 10,
+                              "down_mode": "percent", "down_value": 20}
+        tab.refresh()
+        assert tab.scenario_totals.text() == "Notional upside +$18,000.00  ·  Notional downside −$6,000.00"
+
+        target = tab.table.cellWidget(tab._row_for_position(1), 4)
+        target.setValue(0)
+        target.editingFinished.emit()
+        assert tab.scenario_totals.text() == "Notional upside +$18,000.00  ·  Notional downside −$6,000.00"
+
+        downside = tab.table.cellWidget(tab._row_for_position(2), 12)
+        downside.setValue(15)
+        downside.editingFinished.emit()
+        assert tab.scenario_totals.text() == "Notional upside +$18,000.00  ·  Notional downside −$4,500.00"
+
+        db.set_portfolio_nav(1, None)
+        service.rows[1] = holding(2, -10000, -100)
+        tab.refresh()
+        assert tab.scenario_totals.text() == "Notional upside +$16,500.00  ·  Notional downside −$1,000.00"
+
+        service.rows[1]["value"] = None
+        tab.refresh()
+        assert tab.scenario_totals.text() == "Notional upside +$15,000.00  ·  Notional downside —"
+    finally:
+        tab.close()
+        db.conn.close()
+
+
 def test_scenario_arrows_move_between_mode_value_and_rows(tmp_path):
     app = QApplication.instance() or QApplication([])
     db = Database(tmp_path / "scenario_arrows.sqlite3")
