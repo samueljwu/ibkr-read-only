@@ -24,6 +24,8 @@ DEFAULTS = {
     "flex_query_id": "", "analytics_flex_query_id": "", "cash_flex_query_id": "",
     "flex_auto_sync_enabled": "0",
 }
+SETTING_UPSERT = """INSERT INTO settings(key,value) VALUES (?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value"""
 POSITION_FIELDS = ("display_ticker", "ib_symbol", "security_type", "exchange", "primary_exchange",
                    "currency", "local_symbol", "expiry", "option_right", "strike", "trading_class",
                    "multiplier", "position_qty", "average_cost", "fx_to_usd", "notes")
@@ -41,13 +43,10 @@ class Database:
         new_default = path is None and not local_config_path().is_file()
         self.path = Path(path) if path is not None else self._default_path()
         new_file = not self.path.is_file()
-        self.conn = open_database(self.path, key=recovery_key)
+        self.conn = self._connect(key=recovery_key)
         self.encrypted = not is_plaintext(self.path)
         self._key = (recovery_key or secret_store.load_database_key(self.path)) if self.encrypted else None
         self.recovery_code = self._key if (new_file or new_default) and self.encrypted else None
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA busy_timeout=30000")
         try:
             self._init()
             if recovery_key is not None:
@@ -55,6 +54,16 @@ class Database:
         except Exception:
             self.conn.close()
             raise
+
+    def _connect(self, *, key, create=True):
+        connection = open_database(self.path, key=key, create=create)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     @staticmethod
     def _configured_database(config_path):
@@ -855,8 +864,29 @@ class Database:
 
     def set_setting(self, key, value):
         with self.conn:
-            self.conn.execute("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                              (key, str(value)))
+            self.conn.execute(SETTING_UPSERT, (key, str(value)))
+
+    def save_settings(self, values):
+        """Apply edited settings to the file currently at the selected path."""
+        previous = self.conn
+        before = dict(previous.execute("SELECT key,value FROM settings"))
+        edits = {key: value for key, value in values.items() if before.get(key, "") != value}
+        # A file provider can replace the path while the old connection remains readable.
+        current = self._connect(key=self._key, create=False)
+        self.conn = current
+        try:
+            with current:
+                current.execute("BEGIN IMMEDIATE")
+                account_id = self.setting("ib_account_id")
+                if account_id != before.get("ib_account_id", ""):
+                    raise ValueError("The portfolio's IBKR account changed on disk. Reopen the portfolio before applying Settings.")
+                self.validate_account_change(edits.get("ib_account_id", account_id))
+                current.executemany(SETTING_UPSERT, edits.items())
+        except Exception:
+            self.conn = previous
+            current.close()
+            raise
+        previous.close()
 
     def set_metadata(self, key, value):
         with self.conn:

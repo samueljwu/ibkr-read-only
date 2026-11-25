@@ -8,8 +8,11 @@ import pytest
 
 from app.platform import secret_store
 from app.platform.secret_store import load_database_key as credential_load_database_key
-def test_mac_token_uses_explicit_keychain_backend(monkeypatch):
+
+
+def test_mac_credentials_reuse_successful_keychain_reads(monkeypatch, tmp_path):
     saved = {}
+    reads = []
     backend = ModuleType("keyring.backends.macOS")
 
     class FakeKeyring:
@@ -17,18 +20,40 @@ def test_mac_token_uses_explicit_keychain_backend(monkeypatch):
             saved[(service, user)] = password
 
         def get_password(self, service, user):
+            reads.append((service, user))
             return saved.get((service, user))
 
     backend.Keyring = FakeKeyring
     monkeypatch.setitem(sys.modules, "keyring.backends.macOS", backend)
     monkeypatch.setattr(secret_store.sys, "platform", "darwin")
+    monkeypatch.setattr(secret_store, "_macos_credentials", {})
+    token_target = ("ibkr-dashboard:ibkr-flex:TEST", "TEST")
+    old_target = ("custom-ib-monitor:ibkr-flex:TEST", "TEST")
     assert secret_store.load_flex_token("TEST") is None
-    secret_store.save_flex_token("TEST", "1234567890123456")
+    assert reads == [token_target, old_target]
+    saved[token_target] = "1234567890123456"
     assert secret_store.load_flex_token("TEST") == "1234567890123456"
-    assert list(saved) == [("ibkr-dashboard:ibkr-flex:TEST", "TEST")]
-    saved.pop(("ibkr-dashboard:ibkr-flex:TEST", "TEST"))
-    saved[("custom-ib-monitor:ibkr-flex:TEST", "TEST")] = "1234567890123456"
     assert secret_store.load_flex_token("TEST") == "1234567890123456"
+    assert reads == [token_target, old_target, token_target]
+
+    path = tmp_path / "portfolio.sqlite3"
+    target = secret_store._database_target(path)
+    saved[target, target] = "a" * 64
+    assert credential_load_database_key(path) == "a" * 64
+    assert credential_load_database_key(path) == "a" * 64
+    assert reads[-1] == (target, target)
+    assert reads.count((target, target)) == 1
+
+    secret_store.save_flex_token("TEST", "2345678901234567")
+    assert secret_store.load_flex_token("TEST") == "2345678901234567"
+    assert saved[token_target] == "2345678901234567"
+    assert len(reads) == 4
+
+    # A new process can still fall back to an item stored by an older version.
+    secret_store._macos_credentials.clear()
+    saved[old_target] = saved.pop(token_target)
+    assert secret_store.load_flex_token("TEST") == "2345678901234567"
+    assert reads[-2:] == [token_target, old_target]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Credential Manager")

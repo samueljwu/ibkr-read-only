@@ -1,18 +1,22 @@
-"""Moving a portfolio keeps the original and selects a verified copy."""
+"""Moving or replacing a portfolio file while using the dashboard."""
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
+import shutil
+import sqlite3
 from tempfile import TemporaryDirectory
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
 
 import app.ui as ui
 from app.storage.database import Database
+from app.storage.encryption import open_database
 from scripts import move_database
 
 
@@ -22,6 +26,55 @@ class Finished:
 
     def poll(self):
         return self.returncode
+
+
+@pytest.mark.parametrize("encrypted", (False, True))
+def test_apply_settings_uses_database_replaced_at_same_path(tmp_path, monkeypatch, encrypted):
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "portfolio.sqlite3"
+    key = "ab" * 32 if encrypted else None
+    if not encrypted:
+        with closing(sqlite3.connect(source)) as plain:
+            plain.execute("PRAGMA user_version=1")
+    with closing(Database(source, recovery_key=key).conn):
+        pass
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    window = ui.MainWindow(database_path=source)
+    try:
+        old_connection = window.db.conn
+        replacement = tmp_path / "replacement.sqlite3"
+        shutil.copyfile(source, replacement)
+        with closing(open_database(replacement, key=key, create=False)) as updated:
+            with updated:
+                updated.execute("UPDATE settings SET value='45' WHERE key='refresh_seconds'")
+        try:
+            os.replace(replacement, source)
+        except PermissionError:
+            if os.name != "nt":
+                raise
+            pytest.skip("Windows reports a sharing violation for the open database file")
+
+        assert window.db.setting("refresh_seconds") == "30"
+        window.settings_fields["ib_port"].setText("4001")
+        apply_button = next(button for button in window.settings_dialog.findChildren(QPushButton)
+                            if button.text() == "Apply Settings")
+        apply_button.click()
+
+        assert not warnings
+        assert window.db.path == source
+        assert window.db.conn is not old_connection
+        assert window.settings_fields["refresh_seconds"].text() == "45"
+        with closing(open_database(source, key=key, readonly=True)) as verified:
+            assert dict(verified.execute(
+                "SELECT key,value FROM settings WHERE key IN ('ib_port','refresh_seconds')"
+            )) == {"ib_port": "4001", "refresh_seconds": "45"}
+    finally:
+        window.close()
+        for handler in window.log.handlers[:]:
+            window.log.removeHandler(handler)
+            handler.close()
+    assert app is not None
 
 
 @pytest.mark.parametrize("copy_fails", (False, True))

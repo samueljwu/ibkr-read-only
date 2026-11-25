@@ -8,6 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 import re
 import sys
+from threading import Lock
 
 
 _TARGET_PREFIX = "ibkr-dashboard:ibkr-flex:"
@@ -16,6 +17,8 @@ _OLD_TARGET_PREFIX = "custom-ib-monitor:ibkr-flex:"
 _OLD_DATABASE_PREFIX = "custom-ib-monitor:database:"
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_LOCAL_MACHINE = 2
+_macos_credentials: dict[tuple[str, str], str] = {}
+_macos_credentials_lock = Lock()
 
 
 class _FILETIME(ctypes.Structure):
@@ -51,7 +54,9 @@ def _api():
 def _save(target: str, value: str, user: str):
     if sys.platform == "darwin":
         from keyring.backends.macOS import Keyring
-        Keyring().set_password(target, user, value)
+        with _macos_credentials_lock:
+            Keyring().set_password(target, user, value)
+            _macos_credentials[target, user] = value
         return
     data = value.encode("utf-16-le")
     blob = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
@@ -69,7 +74,14 @@ def _save(target: str, value: str, user: str):
 def _load(target: str, user: str) -> str | None:
     if sys.platform == "darwin":
         from keyring.backends.macOS import Keyring
-        return Keyring().get_password(target, user)
+        with _macos_credentials_lock:
+            value = _macos_credentials.get((target, user))
+            if value is None:
+                value = Keyring().get_password(target, user)
+                if value is not None:
+                    # Reuse a successful Keychain read for the life of this process.
+                    _macos_credentials[target, user] = value
+            return value
     pointer = ctypes.POINTER(_CREDENTIAL)()
     api = _api()
     if not api.CredReadW(target, _CRED_TYPE_GENERIC, 0,

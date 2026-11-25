@@ -45,12 +45,13 @@ def _apply_key(connection, key: str):
     connection.execute("PRAGMA temp_store=MEMORY")
 
 
-def open_database(path, *, key=None, readonly=False, timeout=30):
+def open_database(path, *, key=None, readonly=False, create=True, timeout=30):
     """Open a portfolio without ever treating a missing key as a new database."""
     path = Path(path)
     exists = path.is_file()
     supplied_key = key is not None
-    if readonly and not exists:
+    existing_only = readonly or not create
+    if existing_only and not exists:
         raise FileNotFoundError(path)
     plain = exists and is_plaintext(path)
     if plain and key is not None:
@@ -63,10 +64,11 @@ def open_database(path, *, key=None, readonly=False, timeout=30):
             key = token_hex(32)
         else:
             key = _valid_key(key)
-    if not readonly:
+    if not existing_only:
         path.parent.mkdir(parents=True, exist_ok=True)
-    location = path.resolve().as_uri() + "?mode=ro" if readonly else str(path)
-    connection = sqlite3.connect(location, uri=readonly, timeout=timeout)
+    mode = "ro" if readonly else "rw"
+    location = path.resolve().as_uri() + f"?mode={mode}" if existing_only else str(path)
+    connection = sqlite3.connect(location, uri=existing_only, timeout=timeout)
     try:
         if not plain:
             _apply_key(connection, key)

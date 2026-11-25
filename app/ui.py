@@ -1814,12 +1814,8 @@ class MainWindow(QMainWindow):
             if options:
                 widget = style_combo_selection(QComboBox())
                 widget.addItems(options)
-                stored = self.db.setting(key)
-                widget.setCurrentText("On" if key == "autosave" and stored == "1" else
-                                      "Off" if key == "autosave" else stored)
             else:
-                stored = self.db.setting(key)
-                widget = QLineEdit("" if stored is None else str(stored))
+                widget = QLineEdit()
             self.settings_fields[key] = widget
             target = advanced_form if key in (
                 "provider", "ib_client_id", "data_mode", "refresh_seconds",
@@ -1833,6 +1829,7 @@ class MainWindow(QMainWindow):
                 target.addRow(label, port_row)
             else:
                 target.addRow(label, widget)
+        self._load_settings_fields()
         self.database_location = QLabel(str(self.db.path))
         self.database_location.setTextFormat(Qt.PlainText)
         self.database_location.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
@@ -1892,6 +1889,15 @@ class MainWindow(QMainWindow):
         close_button = widgets.dialog_buttons(self.settings_dialog, QDialogButtonBox.Close)
         close_button.rejected.connect(self.settings_dialog.reject)
         dialog_layout.addWidget(close_button)
+
+    def _load_settings_fields(self):
+        for key, widget in self.settings_fields.items():
+            value = self.db.setting(key)
+            if isinstance(widget, QComboBox):
+                widget.setCurrentText("On" if key == "autosave" and value == "1" else
+                                      "Off" if key == "autosave" else value)
+            else:
+                widget.setText(value)
 
     def open_settings(self):
         self._refresh_flex_token_status()
@@ -3519,12 +3525,12 @@ class MainWindow(QMainWindow):
                 values[key] = "1" if key == "autosave" and value == "On" else "0" if key == "autosave" else value
             if int(values["ib_port"]) <= 0 or int(values["ib_client_id"]) < 0 or int(values["refresh_seconds"]) < 1:
                 raise ValueError("Port, client ID, and refresh interval must be valid positive numbers")
-            self.db.validate_account_change(values["ib_account_id"])
-            for key, value in values.items():
-                self.db.set_setting(key, value)
+            self.db.save_settings(values)
+            self._last_db_data_version = self.db.conn.execute("PRAGMA data_version").fetchone()[0]
+            self._load_settings_fields()
             self._refresh_history_import_coverage()
             self._refresh_flex_token_status()
-            self.use_ibkr_button.setVisible(values["provider"] != "IBKR")
+            self.use_ibkr_button.setVisible(self.db.setting("provider") != "IBKR")
             self._set_refresh_interval()
             self._start_provider()
             self._queue_configured_syncs()
